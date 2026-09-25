@@ -1,0 +1,348 @@
+import type { MapSource } from '@game/shared/types';
+import { Dices, Globe, Mountain, Square } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import { useId } from 'react';
+import { GeoAreaPicker } from '@/components/geo-area-picker';
+import InputError from '@/components/input-error';
+import { SliderField } from '@/components/slider-field';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
+import { formatKm, formatMetresPerSample } from '@/lib/format';
+import { cn } from '@/lib/utils';
+
+export type TerrainFormData = {
+    source: MapSource;
+    resolution: number;
+    size: number;
+    center_lat: number | null;
+    center_lng: number | null;
+    height_scale: number;
+    import_water: boolean;
+    seed: number | null;
+};
+
+export const PROCEDURAL_SIZES = [1024, 2048, 4096, 8192];
+
+export const SOURCE_OPTIONS: {
+    value: MapSource;
+    title: string;
+    description: string;
+    icon: LucideIcon;
+}[] = [
+    {
+        value: 'procedural',
+        title: 'Procedural',
+        description: 'Generated hills, a river and a lake',
+        icon: Mountain,
+    },
+    {
+        value: 'real_world',
+        title: 'Real world',
+        description: 'Use real elevation data and water from OpenStreetMap',
+        icon: Globe,
+    },
+    {
+        value: 'flat',
+        title: 'Flat',
+        description: 'A blank canvas',
+        icon: Square,
+    },
+];
+
+export function randomSeed(): number {
+    return Math.floor(Math.random() * 999_999) + 1;
+}
+
+type Props = {
+    data: TerrainFormData;
+    onChange: (patch: Partial<TerrainFormData>) => void;
+    errors: Partial<Record<keyof TerrainFormData, string>>;
+    resolutions: number[];
+    /** Compact layout for dialogs. */
+    compact?: boolean;
+};
+
+/** Source choice + source specific options (area picker, seed, size) + resolution. */
+export function TerrainSourceFields({
+    data,
+    onChange,
+    errors,
+    resolutions,
+    compact = false,
+}: Props) {
+    const id = useId();
+
+    const selectSource = (source: MapSource) => {
+        if (source === data.source) {
+            return;
+        }
+
+        const patch: Partial<TerrainFormData> = { source };
+
+        // A real-world area can be up to 16 km; generated maps offer up to 8 km.
+        if (source !== 'real_world' && !PROCEDURAL_SIZES.includes(data.size)) {
+            patch.size = 4096;
+        }
+
+        if (source === 'procedural' && !data.seed) {
+            patch.seed = randomSeed();
+        }
+
+        onChange(patch);
+    };
+
+    return (
+        <div className="grid gap-8">
+            <fieldset className="grid gap-3">
+                <legend className="mb-3 text-sm font-medium">
+                    Terrain source
+                </legend>
+                <div
+                    role="radiogroup"
+                    aria-label="Terrain source"
+                    className={cn(
+                        'grid gap-3',
+                        compact ? 'sm:grid-cols-3' : 'md:grid-cols-3',
+                    )}
+                >
+                    {SOURCE_OPTIONS.map((option) => {
+                        const selected = data.source === option.value;
+
+                        return (
+                            <button
+                                key={option.value}
+                                type="button"
+                                role="radio"
+                                aria-checked={selected}
+                                onClick={() => selectSource(option.value)}
+                                className={cn(
+                                    'group relative flex items-start gap-3 rounded-xl border bg-card p-4 text-left transition-all outline-none hover:border-foreground/30 focus-visible:ring-[3px] focus-visible:ring-ring/50',
+                                    compact
+                                        ? 'sm:flex-col'
+                                        : 'md:flex-col md:p-5',
+                                    selected &&
+                                        'border-sky-500 bg-sky-500/5 ring-1 ring-sky-500 hover:border-sky-500 dark:bg-sky-500/10',
+                                )}
+                            >
+                                <div
+                                    className={cn(
+                                        'flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground transition-colors',
+                                        selected &&
+                                            'bg-sky-500 text-white dark:bg-sky-500',
+                                    )}
+                                >
+                                    <option.icon className="size-5" />
+                                </div>
+                                <div className="space-y-1">
+                                    <div className="font-medium">
+                                        {option.title}
+                                    </div>
+                                    <p className="text-sm text-muted-foreground">
+                                        {option.description}
+                                    </p>
+                                </div>
+                                <span
+                                    aria-hidden="true"
+                                    className={cn(
+                                        'absolute top-3 right-3 size-4 rounded-full border-2 border-muted-foreground/40',
+                                        selected &&
+                                            'border-sky-500 bg-sky-500 shadow-[inset_0_0_0_2px_var(--color-card)]',
+                                    )}
+                                />
+                            </button>
+                        );
+                    })}
+                </div>
+                <InputError message={errors.source} />
+            </fieldset>
+
+            {data.source === 'real_world' && (
+                <div className="grid gap-6">
+                    <div className="grid gap-2">
+                        <Label>Area</Label>
+                        <p className="-mt-1 text-sm text-muted-foreground">
+                            Drag the marker, click the map or search for a
+                            place. The highlighted square becomes your map.
+                        </p>
+                        <GeoAreaPicker
+                            value={
+                                data.center_lat !== null &&
+                                data.center_lng !== null
+                                    ? {
+                                          lat: data.center_lat,
+                                          lng: data.center_lng,
+                                          size: data.size,
+                                      }
+                                    : null
+                            }
+                            onChange={(area) =>
+                                onChange({
+                                    center_lat: Number(area.lat.toFixed(6)),
+                                    center_lng: Number(area.lng.toFixed(6)),
+                                    size: area.size,
+                                })
+                            }
+                            resolution={data.resolution}
+                        />
+                        <InputError
+                            message={
+                                errors.center_lat ??
+                                errors.center_lng ??
+                                errors.size
+                            }
+                        />
+                    </div>
+                    <div className="grid gap-6 md:grid-cols-2">
+                        <SliderField
+                            label="Height scale"
+                            value={data.height_scale}
+                            onChange={(v) => onChange({ height_scale: v })}
+                            min={0.1}
+                            max={5}
+                            step={0.05}
+                            unit="×"
+                            description="Exaggerate or flatten the real elevation."
+                            error={errors.height_scale}
+                        />
+                        <div className="flex items-start justify-between gap-4 rounded-lg border p-4">
+                            <div className="space-y-1">
+                                <Label htmlFor={`${id}-water`}>
+                                    Import water
+                                </Label>
+                                <p className="text-xs text-muted-foreground">
+                                    Rivers, lakes and coastline from
+                                    OpenStreetMap.
+                                </p>
+                            </div>
+                            <Switch
+                                id={`${id}-water`}
+                                checked={data.import_water}
+                                onCheckedChange={(checked) =>
+                                    onChange({ import_water: checked })
+                                }
+                            />
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            <div
+                className={cn(
+                    'grid gap-6',
+                    data.source === 'procedural'
+                        ? 'sm:grid-cols-3'
+                        : data.source === 'flat'
+                          ? 'sm:grid-cols-2'
+                          : 'sm:grid-cols-1 md:max-w-sm',
+                )}
+            >
+                {data.source === 'procedural' && (
+                    <div className="grid content-start gap-2">
+                        <Label htmlFor={`${id}-seed`}>Seed</Label>
+                        <div className="flex gap-2">
+                            <Input
+                                id={`${id}-seed`}
+                                type="number"
+                                min={1}
+                                max={999999}
+                                value={data.seed ?? ''}
+                                onChange={(e) =>
+                                    onChange({
+                                        seed:
+                                            e.target.value === ''
+                                                ? null
+                                                : Number(e.target.value),
+                                    })
+                                }
+                                placeholder="Random"
+                                className="tabular-nums"
+                            />
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="icon"
+                                onClick={() => onChange({ seed: randomSeed() })}
+                                title="Randomise seed"
+                            >
+                                <Dices />
+                                <span className="sr-only">Randomise seed</span>
+                            </Button>
+                        </div>
+                        <InputError message={errors.seed} />
+                    </div>
+                )}
+
+                {data.source !== 'real_world' && (
+                    <div className="grid content-start gap-2">
+                        <Label htmlFor={`${id}-size`}>Map size</Label>
+                        <Select
+                            value={String(data.size)}
+                            onValueChange={(v) => onChange({ size: Number(v) })}
+                        >
+                            <SelectTrigger id={`${id}-size`} className="w-full">
+                                <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {(PROCEDURAL_SIZES.includes(data.size)
+                                    ? PROCEDURAL_SIZES
+                                    : [...PROCEDURAL_SIZES, data.size].sort(
+                                          (a, b) => a - b,
+                                      )
+                                ).map((size) => (
+                                    <SelectItem key={size} value={String(size)}>
+                                        {formatKm(size)} × {formatKm(size)}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                        <InputError message={errors.size} />
+                    </div>
+                )}
+
+                <div className="grid content-start gap-2">
+                    <Label htmlFor={`${id}-resolution`}>
+                        Heightmap resolution
+                    </Label>
+                    <Select
+                        value={String(data.resolution)}
+                        onValueChange={(v) =>
+                            onChange({ resolution: Number(v) })
+                        }
+                    >
+                        <SelectTrigger
+                            id={`${id}-resolution`}
+                            className="w-full"
+                        >
+                            <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                            {resolutions.map((resolution) => (
+                                <SelectItem
+                                    key={resolution}
+                                    value={String(resolution)}
+                                >
+                                    {resolution} × {resolution}
+                                </SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                        {formatMetresPerSample(data.size, data.resolution)} per
+                        sample. Higher resolutions give finer detail but use
+                        more memory.
+                    </p>
+                    <InputError message={errors.resolution} />
+                </div>
+            </div>
+        </div>
+    );
+}

@@ -11,4 +11,11 @@ export type NavItem = {
     href: NonNullable<InertiaLinkProps['href']>;
     icon?: LucideIcon | null;
     isActive?: boolean;
+    /** Path prefix that also marks the item as active (e.g. "/maps"). */
+    activePrefix?: string;
+};
+
+export type NavGroup = {
+    title: string;
+    items: NavItem[];
 };

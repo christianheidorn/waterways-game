@@ -1,39 +1,65 @@
 import { Link } from '@inertiajs/react';
-import { BookOpen, FolderGit2, LayoutGrid } from 'lucide-react';
+import {
+    Clapperboard,
+    LayoutGrid,
+    Map as MapIcon,
+    Palette,
+    SlidersHorizontal,
+    Trees,
+} from 'lucide-react';
 import AppLogo from '@/components/app-logo';
-import { NavFooter } from '@/components/nav-footer';
 import { NavMain } from '@/components/nav-main';
-import { NavUser } from '@/components/nav-user';
 import {
     Sidebar,
     SidebarContent,
-    SidebarFooter,
     SidebarHeader,
     SidebarMenu,
     SidebarMenuButton,
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
-import { dashboard } from '@/routes';
-import type { NavItem } from '@/types';
+import { dashboard, studio } from '@/routes';
+import { edit as editAppearance } from '@/routes/appearance';
+import foliage from '@/routes/foliage';
+import gameSettings from '@/routes/game-settings';
+import maps from '@/routes/maps';
+import type { NavGroup } from '@/types';
 
-const mainNavItems: NavItem[] = [
+const navGroups: NavGroup[] = [
     {
-        title: 'Dashboard',
-        href: dashboard(),
-        icon: LayoutGrid,
+        title: 'World',
+        items: [
+            { title: 'Dashboard', href: dashboard(), icon: LayoutGrid },
+            {
+                title: 'Maps',
+                href: maps.index(),
+                icon: MapIcon,
+                activePrefix: '/maps',
+            },
+            { title: 'Open Studio', href: studio(), icon: Clapperboard },
+        ],
     },
-];
-
-const footerNavItems: NavItem[] = [
     {
-        title: 'Repository',
-        href: 'https://github.com/laravel/react-starter-kit',
-        icon: FolderGit2,
+        title: 'Assets',
+        items: [
+            {
+                title: 'Foliage',
+                href: foliage.index(),
+                icon: Trees,
+                activePrefix: '/foliage',
+            },
+        ],
     },
     {
-        title: 'Documentation',
-        href: 'https://laravel.com/docs/starter-kits#react',
-        icon: BookOpen,
+        title: 'Configuration',
+        items: [
+            {
+                title: 'Game settings',
+                href: gameSettings.edit('player'),
+                icon: SlidersHorizontal,
+                activePrefix: '/settings/game',
+            },
+            { title: 'Appearance', href: editAppearance(), icon: Palette },
+        ],
     },
 ];
 
@@ -52,14 +78,15 @@ export function AppSidebar() {
                 </SidebarMenu>
             </SidebarHeader>
 
-            <SidebarContent>
-                <NavMain items={mainNavItems} />
+            <SidebarContent className="gap-4 pt-2">
+                {navGroups.map((group) => (
+                    <NavMain
+                        key={group.title}
+                        label={group.title}
+                        items={group.items}
+                    />
+                ))}
             </SidebarContent>
-
-            <SidebarFooter>
-                <NavFooter items={footerNavItems} className="mt-auto" />
-                <NavUser />
-            </SidebarFooter>
         </Sidebar>
     );
 }

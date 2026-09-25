@@ -1,4 +1,5 @@
 import { Link } from '@inertiajs/react';
+import { Gamepad2, MonitorCog, Palette, PersonStanding } from 'lucide-react';
 import type { PropsWithChildren } from 'react';
 import Heading from '@/components/heading';
 import { Button } from '@/components/ui/button';
@@ -6,25 +7,29 @@ import { Separator } from '@/components/ui/separator';
 import { useCurrentUrl } from '@/hooks/use-current-url';
 import { cn, toUrl } from '@/lib/utils';
 import { edit as editAppearance } from '@/routes/appearance';
-import { edit } from '@/routes/profile';
-import { edit as editSecurity } from '@/routes/security';
+import gameSettings from '@/routes/game-settings';
 import type { NavItem } from '@/types';
 
 const sidebarNavItems: NavItem[] = [
     {
-        title: 'Profile',
-        href: edit(),
-        icon: null,
+        title: 'Player',
+        href: gameSettings.edit('player'),
+        icon: PersonStanding,
     },
     {
-        title: 'Security',
-        href: editSecurity(),
-        icon: null,
+        title: 'Graphics',
+        href: gameSettings.edit('graphics'),
+        icon: MonitorCog,
+    },
+    {
+        title: 'Editor',
+        href: gameSettings.edit('editor'),
+        icon: Gamepad2,
     },
     {
         title: 'Appearance',
         href: editAppearance(),
-        icon: null,
+        icon: Palette,
     },
 ];
 
@@ -32,10 +37,10 @@ export default function SettingsLayout({ children }: PropsWithChildren) {
     const { isCurrentOrParentUrl } = useCurrentUrl();
 
     return (
-        <div className="px-4 py-6">
+        <div className="px-4 py-6 sm:px-6">
             <Heading
                 title="Settings"
-                description="Manage your profile and account settings"
+                description="Configure the game and the studio"
             />
 
             <div className="flex flex-col lg:flex-row lg:space-x-12">
@@ -67,8 +72,8 @@ export default function SettingsLayout({ children }: PropsWithChildren) {
 
                 <Separator className="my-6 lg:hidden" />
 
-                <div className="flex-1 md:max-w-2xl">
-                    <section className="max-w-xl space-y-12">
+                <div className="min-w-0 flex-1 md:max-w-2xl">
+                    <section className="max-w-2xl space-y-12">
                         {children}
                     </section>
                 </div>

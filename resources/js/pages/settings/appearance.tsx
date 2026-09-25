@@ -2,6 +2,7 @@ import { Head } from '@inertiajs/react';
 import AppearanceTabs from '@/components/appearance-tabs';
 import Heading from '@/components/heading';
 import { edit as editAppearance } from '@/routes/appearance';
+import gameSettings from '@/routes/game-settings';
 
 export default function Appearance() {
     return (
@@ -14,7 +15,7 @@ export default function Appearance() {
                 <Heading
                     variant="small"
                     title="Appearance settings"
-                    description="Update the appearance settings for your account"
+                    description="Light, dark or follow your system — for the studio UI only"
                 />
                 <AppearanceTabs />
             </div>
@@ -25,7 +26,11 @@ export default function Appearance() {
 Appearance.layout = {
     breadcrumbs: [
         {
-            title: 'Appearance settings',
+            title: 'Settings',
+            href: gameSettings.edit('player'),
+        },
+        {
+            title: 'Appearance',
             href: editAppearance(),
         },
     ],

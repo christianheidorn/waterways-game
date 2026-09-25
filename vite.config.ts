@@ -5,18 +5,26 @@ import tailwindcss from '@tailwindcss/vite';
 import react, { reactCompilerPreset } from '@vitejs/plugin-react';
 import laravel from 'laravel-vite-plugin';
 import { bunny } from 'laravel-vite-plugin/fonts';
+import { fileURLToPath, URL } from 'node:url';
 import { defineConfig, lazyPlugins } from 'vite-plus';
 
 export default defineConfig({
     plugins: lazyPlugins(() => [
         laravel({
-            input: ['resources/css/app.css', 'resources/js/app.tsx'],
-            refresh: true,
-            fonts: [
-                bunny('Instrument Sans', {
-                    weights: [400, 500, 600],
-                }),
+            input: [
+                'resources/css/app.css',
+                'resources/js/app.tsx',
+                'resources/game/main.ts',
             ],
+            refresh: true,
+            // Set WATERWAYS_OFFLINE_FONTS=1 to build without fetching web fonts (offline / sandboxed CI).
+            fonts: process.env.WATERWAYS_OFFLINE_FONTS
+                ? []
+                : [
+                      bunny('Instrument Sans', {
+                          weights: [400, 500, 600],
+                      }),
+                  ],
         }),
         inertia(),
         react(),
@@ -28,6 +36,13 @@ export default defineConfig({
             formVariants: true,
         }),
     ]),
+    resolve: {
+        alias: {
+            '@game': fileURLToPath(
+                new URL('./resources/game', import.meta.url),
+            ),
+        },
+    },
     server: {
         watch: {
             ignored: [

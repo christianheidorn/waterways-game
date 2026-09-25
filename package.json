@@ -38,6 +38,7 @@
         "concurrently": "^10.0.3",
         "laravel-vite-plugin": "^3.0.0",
         "leaflet": "^1.9.4",
+        "lucide": "^1.48.0",
         "lucide-react": "^0.475.0",
         "react": "^19.2.0",
         "react-dom": "^19.2.0",

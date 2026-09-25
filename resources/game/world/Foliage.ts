@@ -401,6 +401,132 @@ export class Foliage {
         return total;
     }
 
+    /**
+     * Fill a circle as if painted at full strength until saturated (used by the foliage preview).
+     * Every candidate spot is subject to the type's rules and spacing, so forbidden ground stays
+     * empty and allowed ground ends up at the configured density. Deterministic for a given seed.
+     * Returns the number of instances placed.
+     */
+    fill(
+        ctx: FoliagePlacementContext,
+        typeId: number,
+        x: number,
+        z: number,
+        radius: number,
+        seed = 1,
+        maxInstances = 60000,
+    ): number {
+        const renderer = this.renderers.get(typeId);
+
+        if (!renderer) {
+            return 0;
+        }
+
+        const type = renderer.type;
+        const target = Math.min(
+            maxInstances,
+            Math.round((type.density / 100) * Math.PI * radius * radius),
+        );
+        const spacing = Math.sqrt(100 / Math.max(0.01, type.density)) * 0.45;
+        const checkSpacing = spacing > 0.3;
+        const s2 = spacing * spacing;
+        // Local spatial hash so the neighbour test stays O(1) even for dense grass.
+        const grid = new Map<number, number[]>();
+        const gridKey = (gx: number, gz: number) =>
+            (gx + 32768) * 65536 + (gz + 32768);
+        const crowded = (px: number, pz: number) => {
+            const gx = Math.floor(px / spacing);
+            const gz = Math.floor(pz / spacing);
+
+            for (let dz = -1; dz <= 1; dz++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    const list = grid.get(gridKey(gx + dx, gz + dz));
+
+                    if (!list) {
+                        continue;
+                    }
+
+                    for (let i = 0; i < list.length; i += 2) {
+                        const ex = list[i] - px;
+                        const ez = list[i + 1] - pz;
+
+                        if (ex * ex + ez * ez < s2) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        };
+        const previousRandom = this.random;
+        const rand = mulberry32(seed * 7919 + 17);
+        this.random = mulberry32(seed * 104729 + 3);
+        let placed = 0;
+
+        try {
+            for (let i = 0; i < target; i++) {
+                const a = rand() * Math.PI * 2;
+                const d = Math.sqrt(rand()) * radius;
+                let px = x + Math.cos(a) * d;
+                let pz = z + Math.sin(a) * d;
+
+                // Like a brush dab, a spot taken by a neighbour is retried nearby a few times.
+                for (let attempt = 0; attempt < 4; attempt++) {
+                    if (!placementAllowed(ctx, type, px, pz)) {
+                        break;
+                    }
+
+                    if (!checkSpacing || !crowded(px, pz)) {
+                        if (
+                            this.tryPlace(ctx, renderer, px, pz, 0, true, true)
+                        ) {
+                            placed++;
+
+                            if (checkSpacing) {
+                                const k = gridKey(
+                                    Math.floor(px / spacing),
+                                    Math.floor(pz / spacing),
+                                );
+                                const list = grid.get(k) ?? [];
+                                list.push(px, pz);
+                                grid.set(k, list);
+                            }
+                        }
+
+                        break;
+                    }
+
+                    px += (rand() - 0.5) * spacing * 3;
+                    pz += (rand() - 0.5) * spacing * 3;
+
+                    if ((px - x) ** 2 + (pz - z) ** 2 > radius * radius) {
+                        break;
+                    }
+                }
+            }
+
+            for (const cell of renderer.cells.values()) {
+                shuffleInstances(cell.data, rand);
+            }
+        } finally {
+            this.random = previousRandom;
+        }
+
+        return placed;
+    }
+
+    /** Current render geometry of a type (procedural LODs, or the loaded GLB model). */
+    geometryOf(
+        typeId: number,
+    ): { lods: THREE.BufferGeometry[]; lodDistances: number[] } | null {
+        const renderer = this.renderers.get(typeId);
+
+        return renderer
+            ? { lods: renderer.lods, lodDistances: renderer.lodDistances }
+            : null;
+    }
+
     /** Place one instance exactly (single-click placement). */
     placeSingle(
         ctx: FoliagePlacementContext,
@@ -603,22 +729,7 @@ export class Foliage {
         const y = hf.sample(x, z);
 
         if (!force) {
-            const slope = hf.slope(x, z);
-
-            if (slope < type.min_slope || slope > type.max_slope) {
-                return false;
-            }
-
-            if (
-                (type.min_height !== null && y < type.min_height) ||
-                (type.max_height !== null && y > type.max_height)
-            ) {
-                return false;
-            }
-
-            const water = ctx.waterLevelAt(x, z);
-
-            if (!type.allow_underwater && water !== null && water > y - 0.05) {
+            if (!placementAllowed(ctx, type, x, z)) {
                 return false;
             }
 
@@ -802,7 +913,8 @@ export class Foliage {
         for (let i = 0; i < count; i++) {
             const o = i * FOLIAGE_STRIDE;
             p.set(d[o], d[o + 1], d[o + 2]);
-            e.set(d[o + 5], d[o + 3], d[o + 6], 'XYZ');
+            // Yaw first (Y), then tilt to the terrain normal (Z, X).
+            e.set(d[o + 5], d[o + 3], d[o + 6], 'XZY');
             q.setFromEuler(e);
             s.setScalar(d[o + 4]);
             m.compose(p, q, s);
@@ -1048,6 +1160,38 @@ transformed *= fadeK;`
 
         renderer.depthMaterial.dispose();
     }
+}
+
+/** Whether a type's slope / height / underwater rules allow an instance at world X/Z. */
+export function placementAllowed(
+    ctx: FoliagePlacementContext,
+    type: FoliageType,
+    x: number,
+    z: number,
+): boolean {
+    const hf = ctx.heights;
+
+    if (!hf.contains(x, z)) {
+        return false;
+    }
+
+    const y = hf.sample(x, z);
+    const slope = hf.slope(x, z);
+
+    if (slope < type.min_slope || slope > type.max_slope) {
+        return false;
+    }
+
+    if (
+        (type.min_height !== null && y < type.min_height) ||
+        (type.max_height !== null && y > type.max_height)
+    ) {
+        return false;
+    }
+
+    const water = ctx.waterLevelAt(x, z);
+
+    return type.allow_underwater || water === null || water <= y - 0.05;
 }
 
 function smooth01(a: number, b: number, v: number): number {

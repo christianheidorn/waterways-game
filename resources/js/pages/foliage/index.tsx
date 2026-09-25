@@ -22,6 +22,7 @@ import type { FormEvent, ReactNode } from 'react';
 import { useId, useRef, useState } from 'react';
 import { ColorField } from '@/components/color-field';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { FoliagePreview } from '@/components/foliage-preview';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
 import { SliderField } from '@/components/slider-field';
@@ -156,7 +157,7 @@ export default function FoliageIndex({ foliageTypes, kinds }: Props) {
             </div>
 
             <Sheet open={open} onOpenChange={setOpen}>
-                <SheetContent className="w-full gap-0 sm:max-w-lg">
+                <SheetContent className="w-full gap-0 sm:max-w-2xl">
                     <FoliageEditor
                         key={formKey}
                         type={editing}
@@ -318,6 +319,12 @@ function FoliageEditor({
 
     const set = <K extends keyof FoliageForm>(key: K, value: FoliageForm[K]) =>
         form.setData((prev) => ({ ...prev, [key]: value }));
+    // The preview follows the unsaved form values; the id seeds the procedural mesh like in-game.
+    const previewType: FoliageType = {
+        ...form.data,
+        id: type?.id ?? 0,
+        model_url: type?.model_url ?? null,
+    };
 
     const submit = (e: FormEvent) => {
         e.preventDefault();
@@ -340,6 +347,8 @@ function FoliageEditor({
             </SheetHeader>
 
             <div className="flex-1 space-y-8 overflow-y-auto p-4">
+                <FoliagePreview type={previewType} />
+
                 <section className="grid gap-4">
                     <div className="flex items-end gap-3">
                         <KindIcon type={form.data} />

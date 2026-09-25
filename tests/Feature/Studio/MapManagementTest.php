@@ -36,6 +36,42 @@ class MapManagementTest extends TestCase
         Queue::assertPushed(GenerateMapTerrain::class, fn ($job) => $job->map->is($map));
     }
 
+    public function test_water_and_shaping_settings_default_and_validate(): void
+    {
+        Queue::fake();
+
+        $this->post('/maps', ['name' => 'Defaults', 'source' => 'procedural', 'resolution' => 257, 'size' => 2048])
+            ->assertRedirect('/maps/defaults');
+        $map = Map::query()->where('slug', 'defaults')->firstOrFail();
+        $this->assertSame([6.0, 2.0, 15.0, 35.0, 0.5], [$map->lake_depth, $map->river_depth, $map->shore_angle, $map->bank_angle, $map->smoothing]);
+
+        $this->post('/maps', [
+            'name' => 'Custom', 'source' => 'procedural', 'resolution' => 257, 'size' => 2048,
+            'lake_depth' => 20, 'river_depth' => 0.5, 'shore_angle' => 30, 'bank_angle' => 60, 'smoothing' => 0,
+        ])->assertRedirect('/maps/custom');
+        $map = Map::query()->where('slug', 'custom')->firstOrFail();
+        $this->assertSame([20.0, 0.5, 30.0, 60.0, 0.0], [$map->lake_depth, $map->river_depth, $map->shore_angle, $map->bank_angle, $map->smoothing]);
+
+        $this->post('/maps', [
+            'name' => 'Invalid', 'source' => 'procedural', 'resolution' => 257, 'size' => 2048,
+            'lake_depth' => 0.1, 'river_depth' => 31, 'shore_angle' => 0, 'bank_angle' => 85, 'smoothing' => 1.5,
+        ])->assertSessionHasErrors(['lake_depth', 'river_depth', 'shore_angle', 'bank_angle', 'smoothing']);
+
+        $this->post("/maps/{$map->slug}/regenerate", ['source' => 'procedural', 'resolution' => 257, 'size' => 2048, 'river_depth' => 3])
+            ->assertRedirect();
+        $map->refresh();
+        $this->assertSame(3.0, $map->river_depth);
+        $this->assertSame(20.0, $map->lake_depth, 'Omitted settings are kept on regenerate.');
+
+        $this->get("/maps/{$map->slug}")->assertInertia(fn ($page) => $page
+            ->where('map.lake_depth', 20)
+            ->where('map.river_depth', 3)
+            ->where('map.shore_angle', 30)
+            ->where('map.bank_angle', 60)
+            ->where('map.smoothing', 0)
+        );
+    }
+
     public function test_real_world_maps_require_coordinates(): void
     {
         $this->post('/maps', ['name' => 'Nowhere', 'source' => 'real_world', 'resolution' => 513, 'size' => 2048])

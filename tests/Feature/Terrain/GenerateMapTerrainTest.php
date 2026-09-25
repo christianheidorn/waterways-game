@@ -14,6 +14,7 @@ use App\Services\Terrain\TerrariumElevationSource;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Sleep;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -107,8 +108,9 @@ class GenerateMapTerrainTest extends TestCase
             (new MapProjection(50.0, $centreLng, 2048, 65))->bounds(), 2048 / 64,
         );
         $coast = TerrariumElevationSource::lngToPixelX($centreLng, $zoom);
+        Sleep::fake();
+        Http::fake(['*/api/interpreter' => Http::response('Gateway timeout', 504)]);
         TerrariumElevationSourceTest::fakeTiles(fn (int $gx) => $gx < $coast ? -15.0 : 30.0);
-        Http::fake(['overpass-api.de/*' => Http::response('Gateway timeout', 504)]);
 
         $map = $this->makeMap([
             'source' => MapSource::RealWorld,
@@ -125,6 +127,8 @@ class GenerateMapTerrainTest extends TestCase
         $map->refresh();
         $this->assertSame(TerrainStatus::Ready, $map->terrain_status);
         $this->assertStringStartsWith('Water data unavailable:', (string) $map->terrain_message);
+        $this->assertStringEndsWith('Ocean detected from elevation data.', (string) $map->terrain_message);
+        $this->assertLessThanOrEqual(250, strlen((string) $map->terrain_message));
         $this->assertTrue($map->environment['ocean_enabled']);
         $this->assertSame(9, $map->environment['time_of_day']);
         $this->assertEqualsWithDelta(60.0, $map->max_height, 0.05, 'Heights are multiplied by height_scale.');
@@ -133,6 +137,45 @@ class GenerateMapTerrainTest extends TestCase
         $water = HeightGrid::fromBinary(65, (string) $this->storage->read($map, 'water'));
         $this->assertSame(0.0, $water->get(2, 32));
         $this->assertSame(TerrainStorage::NO_WATER, $water->get(62, 32));
+    }
+
+    public function test_real_world_map_imports_water_with_the_map_settings(): void
+    {
+        $projection = new MapProjection(50.0, 8.0, 2048, 65);
+        $geometry = fn (array $points) => array_map(function (array $p) use ($projection) {
+            [$lat, $lng] = $projection->toLatLng($p[0], $p[1]);
+
+            return ['lat' => $lat, 'lon' => $lng];
+        }, $points);
+
+        TerrariumElevationSourceTest::fakeTiles(fn () => 200.0);
+        Http::fake(['*/api/interpreter' => Http::response(['elements' => [
+            ['type' => 'way', 'id' => 1, 'tags' => ['natural' => 'water'],
+                'geometry' => $geometry([[10, 10], [40, 10], [40, 40], [10, 40], [10, 10]])],
+            ['type' => 'way', 'id' => 2, 'tags' => ['waterway' => 'stream'], 'geometry' => $geometry([[45, 0], [50, 64]])],
+        ]])]);
+
+        $map = $this->makeMap([
+            'source' => MapSource::RealWorld,
+            'center_lat' => 50.0,
+            'center_lng' => 8.0,
+            'lake_depth' => 12,
+            'river_depth' => 1,
+            'shore_angle' => 60,
+        ]);
+
+        GenerateMapTerrain::dispatch($map);
+
+        $map->refresh();
+        $this->assertSame(TerrainStatus::Ready, $map->terrain_status);
+        $this->assertSame('Imported 1 lake, 1 rivers/streams.', $map->terrain_message);
+
+        $terrain = HeightGrid::fromBinary(65, (string) $this->storage->read($map, 'heightmap'));
+        $water = HeightGrid::fromBinary(65, (string) $this->storage->read($map, 'water'));
+        $this->assertEqualsWithDelta(200.0, $water->get(25, 25), 0.01);
+        $this->assertEqualsWithDelta(188.0, $terrain->get(25, 25), 0.01, 'Lake depth comes from the map.');
+        $this->assertEqualsWithDelta(199.0, $terrain->get(48, 32) + ($water->get(48, 32) - 200.0), 0.05, 'Stream depth comes from the map.');
+        $this->assertEqualsWithDelta(188.0, $map->min_height, 0.01);
     }
 
     public function test_failure_marks_the_map_as_failed(): void

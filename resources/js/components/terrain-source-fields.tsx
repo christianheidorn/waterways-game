@@ -28,7 +28,21 @@ export type TerrainFormData = {
     height_scale: number;
     import_water: boolean;
     seed: number | null;
+    lake_depth: number;
+    river_depth: number;
+    shore_angle: number;
+    bank_angle: number;
+    smoothing: number;
 };
+
+/** Mirrors App\Services\Terrain\TerrainShaping::DEFAULTS. */
+export const SHAPING_DEFAULTS = {
+    lake_depth: 6,
+    river_depth: 2,
+    shore_angle: 15,
+    bank_angle: 35,
+    smoothing: 0.5,
+} satisfies Partial<TerrainFormData>;
 
 export const PROCEDURAL_SIZES = [1024, 2048, 4096, 8192];
 
@@ -233,6 +247,79 @@ export function TerrainSourceFields({
                         </div>
                     </div>
                 </div>
+            )}
+
+            {data.source !== 'flat' && (
+                <fieldset className="grid gap-4">
+                    <legend className="text-sm font-medium">
+                        Water &amp; shaping
+                    </legend>
+                    <p className="-mt-2 text-sm text-muted-foreground">
+                        Depth is carved into the terrain below the water level
+                        detected from the elevation data.
+                    </p>
+                    <div className="grid gap-6 md:grid-cols-2">
+                        <SliderField
+                            label="Lake depth"
+                            value={data.lake_depth}
+                            onChange={(v) => onChange({ lake_depth: v })}
+                            min={0.5}
+                            max={100}
+                            step={0.5}
+                            unit="m"
+                            description="Maximum depth of lakes, ponds, reservoirs and the ocean shelf."
+                            error={errors.lake_depth}
+                        />
+                        <SliderField
+                            label="River depth"
+                            value={data.river_depth}
+                            onChange={(v) => onChange({ river_depth: v })}
+                            min={0.2}
+                            max={30}
+                            step={0.1}
+                            unit="m"
+                            description="Maximum depth of rivers, streams, canals and ditches."
+                            error={errors.river_depth}
+                        />
+                        <SliderField
+                            label="Shore slope"
+                            value={data.shore_angle}
+                            onChange={(v) => onChange({ shore_angle: v })}
+                            min={1}
+                            max={60}
+                            step={1}
+                            unit="°"
+                            description="How quickly water deepens away from the shore. Low values give wide shallows."
+                            error={errors.shore_angle}
+                        />
+                        <SliderField
+                            label="Bank angle"
+                            value={data.bank_angle}
+                            onChange={(v) => onChange({ bank_angle: v })}
+                            min={10}
+                            max={80}
+                            step={1}
+                            unit="°"
+                            description="Steepest bank allowed right next to water. Removes cliffs where map outlines and elevation data disagree."
+                            error={errors.bank_angle}
+                        />
+                        <SliderField
+                            label="Terrain smoothing"
+                            value={data.smoothing}
+                            onChange={(v) => onChange({ smoothing: v })}
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            formatValue={(v) => `${Math.round(v * 100)}%`}
+                            description={
+                                data.source === 'real_world'
+                                    ? 'Removes stair steps from whole-metre elevation data, mostly in flat areas. 0 keeps the raw data.'
+                                    : 'Softens the generated terrain slightly.'
+                            }
+                            error={errors.smoothing}
+                        />
+                    </div>
+                </fieldset>
             )}
 
             <div

@@ -33,7 +33,13 @@ return [
     ],
 
     'overpass' => [
-        'url' => env('OVERPASS_URL', 'https://overpass-api.de/api/interpreter'),
+        // Optional single endpoint, tried before the list below.
+        'url' => env('OVERPASS_URL'),
+        // Endpoints tried in order until one answers (comma separated in OVERPASS_URLS).
+        'urls' => array_values(array_filter(explode(',', (string) env(
+            'OVERPASS_URLS',
+            'https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter,https://overpass.private.coffee/api/interpreter',
+        )))),
     ],
 
     'slack' => [

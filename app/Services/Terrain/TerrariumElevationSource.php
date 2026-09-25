@@ -32,6 +32,9 @@ class TerrariumElevationSource
 
     private const CONCURRENCY = 8;
 
+    /** Heights below this are Terrarium no-data (the deepest ocean is about -11 000 m). */
+    private const NO_DATA_BELOW = -12000.0;
+
     /** @var array<string, GdImage> decoded tile images for the current tile row */
     private array $images = [];
 
@@ -91,7 +94,7 @@ class TerrariumElevationSource
     }
 
     /**
-     * Inclusive tile index range covering the bounds (plus the half pixel needed for bilinear sampling).
+     * Inclusive tile index range covering the bounds (plus the pixels needed for bicubic sampling).
      *
      * @param  array{south: float, west: float, north: float, east: float}  $bounds
      * @return array{minX: int, maxX: int, minY: int, maxY: int}
@@ -102,10 +105,10 @@ class TerrariumElevationSource
         $max = (2 ** $zoom) - 1;
 
         return [
-            'minX' => (int) floor((self::lngToPixelX($bounds['west'], $zoom) - 1) / $size),
-            'maxX' => (int) floor((self::lngToPixelX($bounds['east'], $zoom) + 1) / $size),
-            'minY' => max(0, (int) floor((self::latToPixelY($bounds['north'], $zoom) - 1) / $size)),
-            'maxY' => min($max, (int) floor((self::latToPixelY($bounds['south'], $zoom) + 1) / $size)),
+            'minX' => (int) floor((self::lngToPixelX($bounds['west'], $zoom) - 2) / $size),
+            'maxX' => (int) floor((self::lngToPixelX($bounds['east'], $zoom) + 2) / $size),
+            'minY' => max(0, (int) floor((self::latToPixelY($bounds['north'], $zoom) - 2) / $size)),
+            'maxY' => min($max, (int) floor((self::latToPixelY($bounds['south'], $zoom) + 2) / $size)),
         ];
     }
 
@@ -208,8 +211,9 @@ class TerrariumElevationSource
     }
 
     /**
-     * Bilinearly sample the tile mosaic at every grid sample. Pixel rows are decoded lazily,
-     * at most once each, as the grid is walked from north to south.
+     * Bicubic (Catmull-Rom) sample of the tile mosaic at every grid sample. Pixel rows are decoded
+     * lazily, at most once each, and interpolated horizontally once, as the grid is walked from
+     * north to south.
      *
      * @param  callable(float, string): void  $progress
      */
@@ -220,7 +224,7 @@ class TerrariumElevationSource
 
         // Longitude depends on the column only, latitude on the row only.
         $colX0 = [];
-        $colFx = [];
+        $colW = [];
         $minPx = PHP_INT_MAX;
         $maxPx = PHP_INT_MIN;
         for ($col = 0; $col < $n; $col++) {
@@ -228,12 +232,13 @@ class TerrariumElevationSource
             $sx = self::lngToPixelX($lng, $zoom) - 0.5;
             $x0 = (int) floor($sx);
             $colX0[$col] = $x0;
-            $colFx[$col] = $sx - $x0;
-            $minPx = min($minPx, $x0);
-            $maxPx = max($maxPx, $x0 + 1);
+            $colW[$col] = self::catmullRom($sx - $x0);
+            $minPx = min($minPx, $x0 - 1);
+            $maxPx = max($maxPx, $x0 + 2);
         }
         foreach ($colX0 as $col => $x0) {
-            $colX0[$col] = $x0 - $minPx;
+            // Index of pixel x0 - 1 in a decoded row.
+            $colX0[$col] = $x0 - 1 - $minPx;
         }
 
         $data = array_fill(0, $n * $n, 0.0);
@@ -243,25 +248,38 @@ class TerrariumElevationSource
             [$lat] = $projection->toLatLng(0, $row);
             $sy = self::latToPixelY($lat, $zoom) - 0.5;
             $y0 = (int) floor($sy);
-            $fy = $sy - $y0;
-            $y0c = max(0, min($worldPixels - 1, $y0));
-            $y1c = max(0, min($worldPixels - 1, $y0 + 1));
+            [$w0, $w1, $w2, $w3] = self::catmullRom($sy - $y0);
+
+            $taps = [];
+            for ($k = -1; $k <= 2; $k++) {
+                $taps[] = max(0, min($worldPixels - 1, $y0 + $k));
+            }
 
             foreach (array_keys($rows) as $cached) {
-                if ($cached < $y0c) {
+                if ($cached < $taps[0]) {
                     unset($rows[$cached]);
                 }
             }
-            $top = $rows[$y0c] ??= $this->decodeRow($zoom, $y0c, $minPx, $maxPx);
-            $bottom = $rows[$y1c] ??= $this->decodeRow($zoom, $y1c, $minPx, $maxPx);
+            foreach ($taps as $py) {
+                if (! isset($rows[$py])) {
+                    $pixels = $this->decodeRow($zoom, $py, $minPx, $maxPx);
+                    $line = [];
+                    for ($col = 0; $col < $n; $col++) {
+                        $x = $colX0[$col];
+                        $w = $colW[$col];
+                        $line[$col] = $w[0] * $pixels[$x] + $w[1] * $pixels[$x + 1] + $w[2] * $pixels[$x + 2] + $w[3] * $pixels[$x + 3];
+                    }
+                    $rows[$py] = $line;
+                }
+            }
 
+            $a = $rows[$taps[0]];
+            $b = $rows[$taps[1]];
+            $c = $rows[$taps[2]];
+            $d = $rows[$taps[3]];
             $base = $row * $n;
             for ($col = 0; $col < $n; $col++) {
-                $x = $colX0[$col];
-                $fx = $colFx[$col];
-                $t = $top[$x] + ($top[$x + 1] - $top[$x]) * $fx;
-                $b = $bottom[$x] + ($bottom[$x + 1] - $bottom[$x]) * $fx;
-                $data[$base + $col] = $t + ($b - $t) * $fy;
+                $data[$base + $col] = $w0 * $a[$col] + $w1 * $b[$col] + $w2 * $c[$col] + $w3 * $d[$col];
             }
 
             if ($row % 32 === 0) {
@@ -269,7 +287,28 @@ class TerrariumElevationSource
             }
         }
 
-        return new HeightGrid($n, $data);
+        $grid = new HeightGrid($n, $data);
+        self::fillGaps($grid);
+
+        return $grid;
+    }
+
+    /**
+     * Catmull-Rom weights for the samples at -1, 0, 1, 2 around a fraction t in [0, 1).
+     *
+     * @return array{0: float, 1: float, 2: float, 3: float}
+     */
+    public static function catmullRom(float $t): array
+    {
+        $t2 = $t * $t;
+        $t3 = $t2 * $t;
+
+        return [
+            0.5 * (-$t3 + 2 * $t2 - $t),
+            0.5 * (3 * $t3 - 5 * $t2 + 2),
+            0.5 * (-3 * $t3 + 4 * $t2 + $t),
+            0.5 * ($t3 - $t2),
+        ];
     }
 
     /**
@@ -289,12 +328,79 @@ class TerrariumElevationSource
             $image = $this->image($zoom, $this->wrapX($tx, $zoom), $ty);
             $end = min($toPx, $tx * $size + $size - 1);
             for (; $px <= $end; $px++) {
-                $out[] = self::decodeHeight(imagecolorat($image, $px - $tx * $size, $inner));
+                $h = self::decodeHeight(imagecolorat($image, $px - $tx * $size, $inner));
+                $out[] = $h < self::NO_DATA_BELOW ? NAN : $h;
             }
             $px--;
         }
 
         return $out;
+    }
+
+    /**
+     * Terrarium marks missing data as black pixels (-32768 m); those samples come out as NAN.
+     * Fill them from the nearest valid samples, then blur the filled area so it blends in.
+     */
+    public static function fillGaps(HeightGrid $grid): void
+    {
+        $n = $grid->resolution;
+        $data = $grid->data;
+        $missing = [];
+        $queue = [];
+
+        foreach ($data as $i => $v) {
+            if (is_nan($v)) {
+                $missing[$i] = true;
+            }
+        }
+
+        if ($missing === []) {
+            return;
+        }
+        if (count($missing) === count($data)) {
+            $grid->data = array_fill(0, count($data), 0.0);
+
+            return;
+        }
+
+        foreach ($missing as $i => $_) {
+            $col = $i % $n;
+            foreach ([$col > 0 ? $i - 1 : -1, $col < $n - 1 ? $i + 1 : -1, $i - $n, $i + $n] as $j) {
+                if ($j >= 0 && $j < $n * $n && ! isset($missing[$j])) {
+                    $queue[] = $j;
+                }
+            }
+        }
+
+        // Nearest valid value (breadth first), remembering how far the gap reaches.
+        $depth = [];
+        foreach ($queue as $i) {
+            $depth[$i] = 0;
+        }
+        $reach = 0;
+        for ($q = 0; $q < count($queue); $q++) {
+            $i = $queue[$q];
+            $col = $i % $n;
+            foreach ([$col > 0 ? $i - 1 : -1, $col < $n - 1 ? $i + 1 : -1, $i - $n, $i + $n] as $j) {
+                if ($j >= 0 && $j < $n * $n && isset($missing[$j]) && ! isset($depth[$j])) {
+                    $depth[$j] = $depth[$i] + 1;
+                    $reach = max($reach, $depth[$j]);
+                    $data[$j] = $data[$i];
+                    $queue[] = $j;
+                }
+            }
+        }
+
+        // Diffuse the filled area (valid samples stay fixed) with a blur sized to the gap.
+        $radius = (int) max(2, min(32, round($reach / 3)));
+        for ($pass = 0; $pass < 3; $pass++) {
+            $blurred = TerrainSmoother::gaussian($data, $n, $radius);
+            foreach ($missing as $i => $_) {
+                $data[$i] = $blurred[$i];
+            }
+        }
+
+        $grid->data = $data;
     }
 
     private function image(int $zoom, int $x, int $y): GdImage

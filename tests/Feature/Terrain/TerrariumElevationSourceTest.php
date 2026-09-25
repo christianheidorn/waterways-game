@@ -96,7 +96,7 @@ class TerrariumElevationSourceTest extends TestCase
         $this->assertEqualsWithDelta(123.0, $max, 0.01);
     }
 
-    public function test_bilinearly_samples_a_gradient_across_tiles_and_caches_downloads(): void
+    public function test_bicubically_samples_a_gradient_across_tiles_and_caches_downloads(): void
     {
         $projection = new MapProjection(46.5, 7.5, 3000, 65);
         $zoom = TerrariumElevationSource::chooseZoom($projection->bounds(), $projection->cell);
@@ -128,6 +128,24 @@ class TerrariumElevationSourceTest extends TestCase
         // A second build is served entirely from the cache.
         app(TerrariumElevationSource::class)->build($projection);
         Http::assertSentCount(TerrariumElevationSource::tileCount($range));
+    }
+
+    public function test_no_data_pixels_are_filled_from_their_surroundings(): void
+    {
+        $projection = new MapProjection(46.5, 7.5, 2048, 65);
+        $zoom = TerrariumElevationSource::chooseZoom($projection->bounds(), $projection->cell);
+        [$lat, $lng] = $projection->toLatLng(32, 32);
+        $cx = TerrariumElevationSource::lngToPixelX($lng, $zoom);
+        $cy = TerrariumElevationSource::latToPixelY($lat, $zoom);
+
+        // A 40 px hole of Terrarium no-data (black, -32768 m) in a 300 m plateau.
+        self::fakeTiles(fn (int $gx, int $gy) => hypot($gx - $cx, $gy - $cy) < 40 ? -32768.0 : 300.0);
+
+        $grid = app(TerrariumElevationSource::class)->build($projection);
+
+        [$min, $max] = $grid->range();
+        $this->assertEqualsWithDelta(300.0, $min, 0.01);
+        $this->assertEqualsWithDelta(300.0, $max, 0.01);
     }
 
     public function test_throws_when_tiles_cannot_be_downloaded(): void

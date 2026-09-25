@@ -6,6 +6,7 @@ use App\Enums\MapSource;
 use App\Enums\TerrainStatus;
 use App\Jobs\GenerateMapTerrain;
 use App\Models\Map;
+use App\Services\Terrain\TerrainShaping;
 use App\Support\EnvironmentDefaults;
 use App\Support\GameManifest;
 use Illuminate\Http\RedirectResponse;
@@ -36,6 +37,7 @@ class MapController extends Controller
         $data = $this->validateTerrain($request, requireName: true);
 
         $map = Map::query()->create([
+            ...TerrainShaping::DEFAULTS,
             ...$data,
             'slug' => $this->uniqueSlug($data['name']),
             'seed' => $data['seed'] ?? random_int(1, 999_999),
@@ -137,6 +139,11 @@ class MapController extends Controller
             'center_lng' => [$realWorld ? 'required' : 'nullable', 'numeric', 'between:-180,180'],
             'height_scale' => ['sometimes', 'numeric', 'min:0.1', 'max:5'],
             'import_water' => ['sometimes', 'boolean'],
+            'lake_depth' => ['sometimes', 'numeric', 'min:0.5', 'max:100'],
+            'river_depth' => ['sometimes', 'numeric', 'min:0.2', 'max:30'],
+            'shore_angle' => ['sometimes', 'numeric', 'min:1', 'max:60'],
+            'bank_angle' => ['sometimes', 'numeric', 'min:10', 'max:80'],
+            'smoothing' => ['sometimes', 'numeric', 'min:0', 'max:1'],
             'seed' => ['nullable', 'integer', 'min:1', 'max:999999'],
         ]);
     }
@@ -180,6 +187,11 @@ class MapController extends Controller
             ...self::summary($map),
             'height_scale' => $map->height_scale,
             'import_water' => $map->import_water,
+            'lake_depth' => $map->lake_depth ?? TerrainShaping::DEFAULTS['lake_depth'],
+            'river_depth' => $map->river_depth ?? TerrainShaping::DEFAULTS['river_depth'],
+            'shore_angle' => $map->shore_angle ?? TerrainShaping::DEFAULTS['shore_angle'],
+            'bank_angle' => $map->bank_angle ?? TerrainShaping::DEFAULTS['bank_angle'],
+            'smoothing' => $map->smoothing ?? TerrainShaping::DEFAULTS['smoothing'],
             'seed' => $map->seed,
             'bounds' => $map->bounds(),
             'terrain_generated_at' => $map->terrain_generated_at?->toIso8601String(),

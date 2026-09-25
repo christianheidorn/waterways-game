@@ -31,9 +31,10 @@ class ProceduralHeightmapGenerator
      *
      * @param  (callable(float, string): void)|null  $progress  fraction 0-1 and a message
      */
-    public function proceduralWithWater(int $resolution, float $size, int $seed, ?callable $progress = null): WaterSurfaceResult
+    public function proceduralWithWater(int $resolution, float $size, int $seed, ?callable $progress = null, ?TerrainShaping $shaping = null): WaterSurfaceResult
     {
         $progress ??= static fn () => null;
+        $shaping ??= new TerrainShaping;
         $progress(0.0, 'Sculpting hills and mountains');
 
         $grid = $this->baseTerrain($resolution, $size, $seed, $progress);
@@ -44,9 +45,12 @@ class ProceduralHeightmapGenerator
         $progress(0.75, 'Shaping lake basin');
         $lake = $this->carveLake($grid, $size, $seed, $river['centre']);
 
+        // Light version of the real-world de-terracing: softens carved edges.
+        TerrainSmoother::deterrace($grid, $size / ($resolution - 1), $shaping->smoothing, 1.0, 0.35);
+
         $progress(0.85, 'Filling rivers and lakes');
 
-        return $this->water->build($grid, $size, $lake === null ? [] : [$lake], [$river['line']]);
+        return $this->water->build($grid, $size, $lake === null ? [] : [$lake], [$river['line']], 0.0, false, $shaping);
     }
 
     /**
@@ -214,7 +218,7 @@ class ProceduralHeightmapGenerator
      * Carve a flat-floored lake basin in the lowest suitable spot away from the river.
      *
      * @param  list<float>  $riverCentre
-     * @return array{outer: list<array{0: float, 1: float}>, inners: list<never>}|null
+     * @return array{outer: list<array{0: float, 1: float}>, inners: list<never>, kind: string}|null
      */
     private function carveLake(HeightGrid $grid, float $size, int $seed, array $riverCentre): ?array
     {
@@ -300,7 +304,7 @@ class ProceduralHeightmapGenerator
             $outer[] = [$cx + cos($a) * $r, $cy + sin($a) * $r];
         }
 
-        return ['outer' => $outer, 'inners' => []];
+        return ['outer' => $outer, 'inners' => [], 'kind' => 'lake'];
     }
 
     private function octavesFor(float $baseFreq, float $maxFreq, int $cap): int

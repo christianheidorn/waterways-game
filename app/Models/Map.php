@@ -25,6 +25,11 @@ use Illuminate\Support\Facades\Storage;
  * @property float|null $center_lng
  * @property float $height_scale
  * @property bool $import_water
+ * @property float $lake_depth
+ * @property float $river_depth
+ * @property float $shore_angle
+ * @property float $bank_angle
+ * @property float $smoothing
  * @property int $seed
  * @property float $min_height
  * @property float $max_height
@@ -43,7 +48,7 @@ use Illuminate\Support\Facades\Storage;
  */
 #[Fillable([
     'name', 'slug', 'description', 'source', 'resolution', 'size', 'center_lat', 'center_lng',
-    'height_scale', 'import_water', 'seed', 'min_height', 'max_height', 'spawn_x', 'spawn_z', 'spawn_yaw',
+    'height_scale', 'import_water', 'lake_depth', 'river_depth', 'shore_angle', 'bank_angle', 'smoothing', 'seed', 'min_height', 'max_height', 'spawn_x', 'spawn_z', 'spawn_yaw',
     'environment', 'terrain_status', 'terrain_progress', 'terrain_message', 'revision', 'is_default',
     'terrain_generated_at',
 ])]
@@ -67,6 +72,11 @@ class Map extends Model
             'center_lat' => 'float',
             'center_lng' => 'float',
             'height_scale' => 'float',
+            'lake_depth' => 'float',
+            'river_depth' => 'float',
+            'shore_angle' => 'float',
+            'bank_angle' => 'float',
+            'smoothing' => 'float',
             'min_height' => 'float',
             'max_height' => 'float',
             'spawn_x' => 'float',

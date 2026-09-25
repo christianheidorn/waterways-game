@@ -14,6 +14,10 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
 - **Real-world maps.** Pan, zoom and search (OpenStreetMap, satellite and topo base layers) to pick a square
   area. Real elevation comes from AWS Terrain Tiles. Lakes, rivers, canals and streams come from OpenStreetMap
   (Overpass) and are rasterised into water. The ocean is detected automatically from coastline elevation.
+  Water levels come from the elevation data (lakes: a low percentile inside the outline; rivers: a profile
+  that never rises downstream). Per-map settings control lake/river depth, how quickly water deepens, the
+  steepest allowed bank (removes cliffs where outlines and elevation disagree) and terrain smoothing
+  (removes the stair steps of whole-metre elevation data).
 - **Procedural maps** (hills, ridged mountains, a meandering river and a lake) and **flat** maps.
 - Terrain generation runs as a queued job with live progress.
 - **Terrain layers.** Up to 8 splat materials per map, each with colours, roughness, bump, noise scale, an
@@ -68,7 +72,8 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
 
 - PHP 8.3+ with `gd`, `pdo_sqlite` and `curl`, plus Composer.
 - Node 22+.
-- Outbound HTTPS to `s3.amazonaws.com` (elevation) and `overpass-api.de` (water) for real-world maps. The map
+- Outbound HTTPS to `s3.amazonaws.com` (elevation) and an Overpass server (water; `overpass-api.de`, falling
+  back to `overpass.kumi.systems` and `overpass.private.coffee`, see `OVERPASS_URLS`) for real-world maps. The map
   picker also loads tiles from `tile.openstreetmap.org`, `server.arcgisonline.com` and `opentopomap.org`, and
   searches with `nominatim.openstreetmap.org`.
 

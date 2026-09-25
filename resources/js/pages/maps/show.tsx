@@ -77,6 +77,11 @@ export default function ShowMap({ map, resolutions }: Props) {
                                             map.terrain_generated_at,
                                         )}
                                         . Revision {map.revision}.
+                                        {map.terrain_message && (
+                                            <span className="mt-1 block">
+                                                {map.terrain_message}
+                                            </span>
+                                        )}
                                     </p>
                                 ) : (
                                     <TerrainProgress
@@ -336,6 +341,11 @@ function RegenerateDialog({
         height_scale: map.height_scale,
         import_water: map.import_water,
         seed: map.seed,
+        lake_depth: map.lake_depth,
+        river_depth: map.river_depth,
+        shore_angle: map.shore_angle,
+        bank_angle: map.bank_angle,
+        smoothing: map.smoothing,
     });
 
     const submit = (e: FormEvent) => {

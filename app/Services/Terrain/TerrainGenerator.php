@@ -35,7 +35,7 @@ class TerrainGenerator
             $report((int) round($from + ($to - $from) * $fraction), $message);
         };
 
-        $warning = null;
+        $message = null;
         $report(0, 'Preparing terrain');
 
         switch ($map->source) {
@@ -50,44 +50,78 @@ class TerrainGenerator
                 break;
 
             case MapSource::Procedural:
-                $result = $this->procedural->proceduralWithWater($map->resolution, $map->size, $map->seed, $stage(5, 85));
+                $result = $this->procedural->proceduralWithWater(
+                    $map->resolution, $map->size, $map->seed, $stage(5, 85), TerrainShaping::fromMap($map),
+                );
                 break;
 
             case MapSource::RealWorld:
-                [$result, $warning] = $this->realWorld($map, $stage);
+                [$result, $message] = $this->realWorld($map, $stage);
                 break;
         }
 
         $report(90, 'Saving terrain');
-        $this->store($map, $result, $warning);
-        $report(100, $warning ?? 'Terrain ready');
+        $this->store($map, $result, $message);
+        $report(100, $message ?? 'Terrain ready');
     }
 
     /**
      * @param  callable(int, int): callable(float, string): void  $stage
-     * @return array{0: WaterSurfaceResult, 1: string|null}
+     * @return array{0: WaterSurfaceResult, 1: string|null} result and a terrain message (import summary or warning)
      */
     private function realWorld(Map $map, callable $stage): array
     {
         $projection = MapProjection::forMap($map);
-        $terrain = $this->elevation->build($projection, $stage(5, 70))->scale((float) $map->height_scale);
+        $shaping = TerrainShaping::fromMap($map);
+        $heightScale = (float) $map->height_scale;
+        $terrain = $this->elevation->build($projection, $stage(5, 65))->scale($heightScale);
+
+        $stage(65, 70)(0.0, 'Smoothing terrain');
+        // Source elevation is quantized to whole metres (× height scale).
+        TerrainSmoother::deterrace($terrain, $projection->cell, $shaping->smoothing, max(0.1, $heightScale));
+
         $seaLevel = (float) $map->resolvedEnvironment()['sea_level'];
-        $grid = ['polygons' => [], 'lines' => []];
-        $warning = null;
+        $grid = ['polygons' => [], 'lines' => [], 'coastlines' => []];
+        $features = null;
 
         if ($map->import_water) {
             $stage(70, 80)(0.0, 'Fetching water from OpenStreetMap');
             $features = $this->overpass->fetch($projection->bounds());
             $grid = $features->toGrid($projection);
-
-            if ($features->warning !== null) {
-                $warning = Str::limit('Water data unavailable: '.$features->warning, 250);
-            }
         }
 
         $stage(80, 90)(0.0, 'Building water surfaces');
+        $result = $this->water->build(
+            $terrain, $map->size, $grid['polygons'], $grid['lines'], $seaLevel, true, $shaping, $grid['coastlines'],
+        );
 
-        return [$this->water->build($terrain, $map->size, $grid['polygons'], $grid['lines'], $seaLevel, true), $warning];
+        return [$result, $this->waterMessage($features, $result)];
+    }
+
+    private function waterMessage(?WaterFeatures $features, WaterSurfaceResult $result): ?string
+    {
+        $ocean = $result->oceanDetected() ? 'ocean' : null;
+
+        if ($features === null) {
+            return $ocean === null ? null : 'Ocean detected from elevation data.';
+        }
+
+        $summary = $features->summary();
+        $imported = implode(', ', array_filter([$summary, $ocean]));
+
+        if ($features->isEmpty() && $features->warning !== null) {
+            $suffix = $ocean === null ? '' : ' Ocean detected from elevation data.';
+
+            return Str::limit('Water data unavailable: '.$features->warning, 250 - strlen($suffix)).$suffix;
+        }
+
+        $message = $imported === '' ? 'No water found in OpenStreetMap for this area.' : "Imported {$imported}.";
+
+        if ($features->warning !== null) {
+            $message .= ' '.$features->warning;
+        }
+
+        return Str::limit($message, 250);
     }
 
     private function store(Map $map, WaterSurfaceResult $result, ?string $warning): void

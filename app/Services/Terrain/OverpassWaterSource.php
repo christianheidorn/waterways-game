@@ -2,16 +2,27 @@
 
 namespace App\Services\Terrain;
 
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Sleep;
+use Illuminate\Support\Str;
 use Throwable;
 
 /**
- * Water bodies (areas) and waterways (lines) from OpenStreetMap via the Overpass API.
+ * Water bodies (areas), waterways (lines) and coastline from OpenStreetMap via the Overpass API.
+ *
+ * Selects what the standard OSM map draws as water: natural=water (any water=*), waterway=riverbank
+ * / dock, landuse=reservoir / basin as areas (closed ways and multipolygon relations, with holes),
+ * waterway=river / stream / canal / drain / ditch as lines, and natural=coastline.
  */
 class OverpassWaterSource
 {
-    public const DEFAULT_URL = 'https://overpass-api.de/api/interpreter';
+    public const DEFAULT_URLS = [
+        'https://overpass-api.de/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter',
+        'https://overpass.private.coffee/api/interpreter',
+    ];
 
     /** Default channel widths (metres) when a waterway has no numeric width tag. */
     public const LINE_WIDTHS = [
@@ -22,42 +33,138 @@ class OverpassWaterSource
         'ditch' => 1.5,
     ];
 
+    /** water=* values of areas that are part of a flowing waterway. */
+    private const RIVER_AREA_WATER = ['river', 'canal', 'stream', 'ditch', 'drain', 'rapids', 'stream_pool'];
+
+    /** Rounds over the endpoint list, and the overall time budget (seconds). */
+    private const ROUNDS = 2;
+
+    private const TIME_BUDGET = 300;
+
     private const EPSILON = 1e-9;
+
+    /**
+     * Overpass endpoints in the order they are tried.
+     *
+     * @return list<string>
+     */
+    public static function endpoints(): array
+    {
+        $urls = config('services.overpass.urls');
+        $urls = is_array($urls) && $urls !== [] ? $urls : self::DEFAULT_URLS;
+        $single = config('services.overpass.url');
+
+        if (is_string($single) && trim($single) !== '') {
+            array_unshift($urls, $single);
+        }
+
+        return array_values(array_unique(array_filter(array_map(
+            static fn ($url): string => trim((string) $url),
+            $urls,
+        ))));
+    }
 
     /**
      * @param  array{south: float, west: float, north: float, east: float}  $bounds
      */
     public function fetch(array $bounds): WaterFeatures
     {
-        try {
-            $response = Http::asForm()
-                ->connectTimeout(15)
-                ->timeout(120)
-                ->acceptJson()
-                ->post((string) config('services.overpass.url', self::DEFAULT_URL), ['data' => $this->query($bounds)]);
+        $query = $this->query($bounds);
+        $errors = [];
+        $partial = null;
+        $started = microtime(true);
 
-            if (! $response->successful()) {
-                return WaterFeatures::unavailable("Overpass returned HTTP {$response->status()}");
+        for ($round = 0; $round < self::ROUNDS; $round++) {
+            if ($round > 0) {
+                if (microtime(true) - $started > self::TIME_BUDGET / 2) {
+                    break;
+                }
+                Sleep::for(3)->seconds();
             }
 
-            $json = $response->json();
+            foreach (self::endpoints() as $url) {
+                if (microtime(true) - $started > self::TIME_BUDGET) {
+                    break 2;
+                }
 
-            if (! is_array($json) || ! isset($json['elements']) || ! is_array($json['elements'])) {
-                return WaterFeatures::unavailable('Overpass returned an unexpected response');
+                $host = parse_url($url, PHP_URL_HOST) ?: $url;
+
+                try {
+                    $response = Http::asForm()
+                        ->withUserAgent('Waterways terrain importer')
+                        ->connectTimeout(10)
+                        ->timeout(100)
+                        ->acceptJson()
+                        ->post($url, ['data' => $query]);
+                } catch (Throwable $e) {
+                    $errors[$host] = $this->describe($e);
+                    Log::warning('Overpass water query failed', ['url' => $url, 'error' => $e->getMessage()]);
+
+                    continue;
+                }
+
+                $result = $this->handle($response);
+
+                if ($result instanceof WaterFeatures) {
+                    if ($result->warning === null) {
+                        return $result;
+                    }
+                    $partial ??= $result;
+                    $errors[$host] = $result->warning;
+                } else {
+                    $errors[$host] = $result;
+                }
+
+                Log::warning('Overpass water query failed', ['url' => $url, 'error' => $errors[$host]]);
             }
-
-            $features = $this->parse($json['elements']);
-
-            if (isset($json['remark']) && str_contains(strtolower((string) $json['remark']), 'error')) {
-                return new WaterFeatures($features->polygons, $features->lines, 'Overpass: '.$json['remark']);
-            }
-
-            return $features;
-        } catch (Throwable $e) {
-            Log::warning('Overpass water query failed', ['error' => $e->getMessage()]);
-
-            return WaterFeatures::unavailable($e->getMessage());
         }
+
+        $detail = collect($errors)->map(fn (string $error, string $host) => "{$host}: {$error}")->implode('; ');
+
+        if ($partial !== null) {
+            return $partial->withWarning('Incomplete water data ('.$detail.')');
+        }
+
+        return WaterFeatures::unavailable($errors === [] ? 'no Overpass endpoint configured' : 'all Overpass servers failed ('.$detail.')');
+    }
+
+    private function describe(Throwable $e): string
+    {
+        $message = $e->getMessage();
+
+        if (Str::contains(strtolower($message), ['timed out', 'timeout'])) {
+            return 'timeout';
+        }
+
+        // "cURL error 56: CONNECT tunnel failed, response 403 (see https://…)" → the part before "(see".
+        return Str::limit(trim(Str::before($message, '(see')), 60);
+    }
+
+    /**
+     * @return WaterFeatures|string features (possibly partial, with a warning) or an error
+     */
+    private function handle(Response $response): WaterFeatures|string
+    {
+        if (! $response->successful()) {
+            return "HTTP {$response->status()}";
+        }
+
+        $json = $response->json();
+
+        if (! is_array($json) || ! isset($json['elements']) || ! is_array($json['elements'])) {
+            return 'unexpected response';
+        }
+
+        $features = $this->parse($json['elements']);
+        $remark = strtolower((string) ($json['remark'] ?? ''));
+
+        if (str_contains($remark, 'error') || str_contains($remark, 'timed out')) {
+            return $features->isEmpty()
+                ? Str::limit((string) $json['remark'], 80)
+                : $features->withWarning(Str::limit((string) $json['remark'], 80));
+        }
+
+        return $features;
     }
 
     /**
@@ -74,11 +181,12 @@ class OverpassWaterSource
               relation["natural"="water"]({$bbox});
               way["water"]({$bbox});
               relation["water"]({$bbox});
-              way["waterway"="riverbank"]({$bbox});
-              relation["waterway"="riverbank"]({$bbox});
+              way["waterway"~"^(riverbank|dock)$"]({$bbox});
+              relation["waterway"~"^(riverbank|dock)$"]({$bbox});
               way["landuse"~"^(reservoir|basin)$"]({$bbox});
               relation["landuse"~"^(reservoir|basin)$"]({$bbox});
               way["waterway"~"^(river|stream|canal|drain|ditch)$"]({$bbox});
+              way["natural"="coastline"]({$bbox});
             );
             out geom;
             OVERPASS;
@@ -91,6 +199,19 @@ class OverpassWaterSource
     {
         $polygons = [];
         $lines = [];
+        $coastlines = [];
+
+        // Ways that are members of a returned multipolygon are assembled through the relation.
+        $memberWays = [];
+        foreach ($elements as $element) {
+            if (($element['type'] ?? null) === 'relation') {
+                foreach ((array) ($element['members'] ?? []) as $member) {
+                    if (($member['type'] ?? null) === 'way' && isset($member['ref'])) {
+                        $memberWays[(int) $member['ref']] = true;
+                    }
+                }
+            }
+        }
 
         foreach ($elements as $element) {
             $tags = array_map('strval', (array) ($element['tags'] ?? []));
@@ -111,21 +232,41 @@ class OverpassWaterSource
                 continue;
             }
 
+            if ($type === 'way' && ($tags['natural'] ?? null) === 'coastline') {
+                $points = $this->points($element['geometry'] ?? []);
+                if (count($points) >= 2) {
+                    $coastlines[] = $points;
+                }
+
+                continue;
+            }
+
             if (! $this->isWaterArea($tags)) {
                 continue;
             }
 
+            $kind = $this->areaKind($tags);
+
             if ($type === 'way') {
                 $ring = $this->points($element['geometry'] ?? []);
-                if (count($ring) >= 4 && $this->same($ring[0], end($ring))) {
-                    $polygons[] = ['outer' => $ring, 'inners' => [], 'tags' => $tags];
+                $closed = count($ring) >= 4 && $this->same($ring[0], end($ring));
+
+                if (! $closed && isset($memberWays[(int) ($element['id'] ?? 0)])) {
+                    continue;
                 }
-            } elseif ($type === 'relation') {
-                array_push($polygons, ...$this->relationPolygons($element, $tags));
+                if (! $closed && count($ring) >= 3) {
+                    $ring[] = $ring[0];
+                    $closed = true;
+                }
+                if ($closed) {
+                    $polygons[] = ['outer' => $ring, 'inners' => [], 'tags' => $tags, 'kind' => $kind];
+                }
+            } elseif ($type === 'relation' && in_array($tags['type'] ?? 'multipolygon', ['multipolygon', 'boundary'], true)) {
+                array_push($polygons, ...$this->relationPolygons($element, $tags, $kind));
             }
         }
 
-        return new WaterFeatures($polygons, $lines);
+        return new WaterFeatures($polygons, $lines, null, $coastlines);
     }
 
     /**
@@ -135,8 +276,18 @@ class OverpassWaterSource
     {
         return ($tags['natural'] ?? null) === 'water'
             || isset($tags['water'])
-            || ($tags['waterway'] ?? null) === 'riverbank'
+            || in_array($tags['waterway'] ?? null, ['riverbank', 'dock'], true)
             || in_array($tags['landuse'] ?? null, ['reservoir', 'basin'], true);
+    }
+
+    /**
+     * @param  array<string, string>  $tags
+     */
+    private function areaKind(array $tags): string
+    {
+        return ($tags['waterway'] ?? null) === 'riverbank' || in_array($tags['water'] ?? null, self::RIVER_AREA_WATER, true)
+            ? 'river'
+            : 'lake';
     }
 
     /**
@@ -155,12 +306,14 @@ class OverpassWaterSource
 
     /**
      * Stitch a multipolygon relation's member ways into closed rings and group inners by outer.
+     * Tags may live on the relation only (member ways untagged); member geometry is complete
+     * (`out geom;` is not clipped to the bbox), so rings reaching outside the map still close.
      *
      * @param  array<string, mixed>  $relation
      * @param  array<string, string>  $tags
-     * @return list<array{outer: list<array{0: float, 1: float}>, inners: list<list<array{0: float, 1: float}>>, tags: array<string, string>}>
+     * @return list<array{outer: list<array{0: float, 1: float}>, inners: list<list<array{0: float, 1: float}>>, tags: array<string, string>, kind: string}>
      */
-    private function relationPolygons(array $relation, array $tags): array
+    private function relationPolygons(array $relation, array $tags, string $kind): array
     {
         $ways = ['outer' => [], 'inner' => []];
 
@@ -178,23 +331,29 @@ class OverpassWaterSource
         $outers = $this->stitch($ways['outer']);
         $inners = $this->stitch($ways['inner']);
 
-        $polygons = array_map(fn (array $ring) => ['outer' => $ring, 'inners' => [], 'tags' => $tags], $outers);
+        $polygons = array_map(fn (array $ring) => ['outer' => $ring, 'inners' => [], 'tags' => $tags, 'kind' => $kind], $outers);
+
+        if ($polygons === []) {
+            return [];
+        }
 
         foreach ($inners as $inner) {
+            $target = array_key_last($polygons);
             foreach ($polygons as $k => $polygon) {
-                if ($this->contains($polygon['outer'], $inner[0]) || $k === array_key_last($polygons)) {
-                    $polygons[$k]['inners'][] = $inner;
+                if ($this->contains($polygon['outer'], $inner[0])) {
+                    $target = $k;
                     break;
                 }
             }
+            $polygons[$target]['inners'][] = $inner;
         }
 
         return $polygons;
     }
 
     /**
-     * Join open ways end-to-end (reversing where needed) into closed rings. Rings that cannot be
-     * closed are dropped.
+     * Join ways end-to-end (reversing where needed, growing at both ends) into closed rings.
+     * Chains that cannot be closed by other ways are closed by joining their ends (≥ 3 points).
      *
      * @param  list<list<array{0: float, 1: float}>>  $ways
      * @return list<list<array{0: float, 1: float}>>
@@ -215,21 +374,28 @@ class OverpassWaterSource
         while ($open) {
             $ring = array_shift($open);
 
-            while (! $this->same($ring[0], end($ring))) {
+            while (! (count($ring) >= 4 && $this->same($ring[0], end($ring)))) {
+                $head = $ring[0];
                 $tail = end($ring);
                 $found = false;
 
                 foreach ($open as $k => $way) {
                     if ($this->same($way[0], $tail)) {
-                        $next = $way;
+                        array_pop($ring);
+                        array_push($ring, ...$way);
                     } elseif ($this->same(end($way), $tail)) {
-                        $next = array_reverse($way);
+                        array_pop($ring);
+                        array_push($ring, ...array_reverse($way));
+                    } elseif ($this->same(end($way), $head)) {
+                        array_shift($ring);
+                        $ring = [...$way, ...$ring];
+                    } elseif ($this->same($way[0], $head)) {
+                        array_shift($ring);
+                        $ring = [...array_reverse($way), ...$ring];
                     } else {
                         continue;
                     }
 
-                    array_pop($ring);
-                    array_push($ring, ...$next);
                     unset($open[$k]);
                     $found = true;
                     break;
@@ -240,7 +406,11 @@ class OverpassWaterSource
                 }
             }
 
-            if (count($ring) >= 4 && $this->same($ring[0], end($ring))) {
+            if (! $this->same($ring[0], end($ring)) && count($ring) >= 3) {
+                $ring[] = $ring[0];
+            }
+
+            if (count($ring) >= 4) {
                 $rings[] = $ring;
             }
 

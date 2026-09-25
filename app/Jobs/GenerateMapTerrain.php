@@ -28,7 +28,7 @@ class GenerateMapTerrain implements ShouldQueue
 
     public function handle(TerrainGenerator $generator): void
     {
-        // A 1025² map peaks around 250 MB of PHP arrays.
+        // A 1025² map peaks around 400 MB of PHP arrays.
         $limit = ini_get('memory_limit');
         if ($limit !== false && $limit !== '-1' && ini_parse_quantity($limit) < 1024 ** 3) {
             ini_set('memory_limit', '1G');

@@ -4,7 +4,10 @@ import type { FormEvent } from 'react';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
 import type { TerrainFormData } from '@/components/terrain-source-fields';
-import { TerrainSourceFields } from '@/components/terrain-source-fields';
+import {
+    SHAPING_DEFAULTS,
+    TerrainSourceFields,
+} from '@/components/terrain-source-fields';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -31,6 +34,7 @@ export default function CreateMap({ resolutions }: { resolutions: number[] }) {
         height_scale: 1,
         import_water: true,
         seed: null,
+        ...SHAPING_DEFAULTS,
     });
 
     const submit = (e: FormEvent) => {

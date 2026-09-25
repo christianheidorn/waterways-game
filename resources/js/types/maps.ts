@@ -54,6 +54,11 @@ export type MapBounds = {
 export type MapDetail = MapSummary & {
     height_scale: number;
     import_water: boolean;
+    lake_depth: number;
+    river_depth: number;
+    shore_angle: number;
+    bank_angle: number;
+    smoothing: number;
     seed: number;
     bounds: MapBounds | null;
     terrain_generated_at: string | null;

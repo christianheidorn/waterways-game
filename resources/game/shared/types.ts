@@ -32,6 +32,18 @@ export type EnvironmentSettings = {
     water_deep_color: string;
     /** Metres of water after which the deep colour dominates. */
     water_clarity: number;
+    water_roughness: number;
+    water_reflectivity: number;
+    water_refraction: number;
+    wave_scale: number;
+    wave_strength: number;
+    wave_speed: number;
+    wave_height: number;
+    flow_speed: number;
+    shore_foam: boolean;
+    foam_width: number;
+    foam_intensity: number;
+    rapids_foam: boolean;
     ocean_enabled: boolean;
     sea_level: number;
 };
@@ -63,6 +75,7 @@ export type GraphicsSettings = {
     terrain_lod_bias: number;
     foliage_density: number;
     foliage_distance: number;
+    water_quality: 'low' | 'medium' | 'high';
     antialias: boolean;
     bloom: boolean;
     ambient_occlusion: boolean;

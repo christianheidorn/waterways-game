@@ -746,9 +746,9 @@ export function hydraulicErosion(
         1,
         Math.min(200, Math.floor(opts.maxLifetime ?? 30)),
     );
-    const rate = Math.max(0, Math.min(1, opts.rate ?? 0.15));
+    const rate = Math.max(0, Math.min(1, opts.rate ?? 0.08));
     const gravity = 4;
-    const minSlope = 0.01 * cell;
+    const minSlope = 0.01;
     const strength = clamp01(brush.strength);
     const kernel = erosionKernel(eRadius);
     const kn = kernel.w.length;
@@ -827,8 +827,10 @@ export function hydraulicErosion(
             heightGrad(px, pz);
             const h = gH;
 
-            dirX = dirX * inertia - gGX * (1 - inertia);
-            dirZ = dirZ * inertia - gGZ * (1 - inertia);
+            // Work in slope units (metres per cell / cell size) so the simulation behaves the
+            // same on 2 m and 16 m cells and on 10 m or 1000 m tall terrain.
+            dirX = dirX * inertia - (gGX / cell) * (1 - inertia);
+            dirZ = dirZ * inertia - (gGZ / cell) * (1 - inertia);
             const len = Math.hypot(dirX, dirZ);
 
             if (len < 1e-9) {
@@ -845,72 +847,124 @@ export function hydraulicErosion(
             }
 
             heightGrad(nx, nz);
-            const deltaH = gH - h;
+            const dh = (gH - h) / cell;
             const capacity =
-                Math.max(-deltaH, minSlope) * speed * water * capacityF;
+                Math.max(-dh, minSlope) * speed * water * capacityF;
             const bw = weightAt(px, pz) * rate;
 
-            if (sediment > capacity || deltaH > 0) {
-                // Deposit: fill the pit when going uphill, otherwise a fraction of the surplus.
+            if (sediment > capacity || dh > 0) {
+                // Deposit: partially fill the pit when going uphill, otherwise a fraction of the surplus.
                 let amount =
-                    deltaH > 0
-                        ? Math.min(deltaH, sediment)
+                    dh > 0
+                        ? Math.min(dh * 0.5, sediment)
                         : (sediment - capacity) * depositF;
-                amount *= bw;
+                amount = Math.min(amount * bw, MAX_STEP);
 
                 if (amount > 0 && Number.isFinite(amount)) {
                     sediment -= amount;
+                    const m = amount * cell;
                     const i = r * res + c;
-                    data[i] += amount * (1 - fx) * (1 - fz);
-                    data[i + 1] += amount * fx * (1 - fz);
-                    data[i + res] += amount * (1 - fx) * fz;
-                    data[i + res + 1] += amount * fx * fz;
+                    data[i] += m * (1 - fx) * (1 - fz);
+                    data[i + 1] += m * fx * (1 - fz);
+                    data[i + res] += m * (1 - fx) * fz;
+                    data[i + res + 1] += m * fx * fz;
                     dirty.add(c, r);
                     dirty.add(c + 1, r + 1);
                 }
             } else {
-                let amount = Math.min((capacity - sediment) * erodeF, -deltaH);
-                amount *= bw;
+                let amount = Math.min((capacity - sediment) * erodeF, -dh);
+                amount = Math.min(amount * bw, MAX_STEP);
 
                 if (amount > 0 && Number.isFinite(amount)) {
+                    const m = amount * cell;
+
                     for (let k = 0; k < kn; k++) {
                         const ec = c + kernel.dx[k];
                         const er = r + kernel.dz[k];
-                        const removed = amount * kernel.w[k];
-                        data[er * res + ec] -= removed;
-                        sediment += removed;
+                        data[er * res + ec] -= m * kernel.w[k];
                     }
 
+                    sediment += amount;
                     dirty.add(c - eRadius, r - eRadius);
                     dirty.add(c + eRadius, r + eRadius);
                 }
             }
 
-            // Gain speed going downhill (deltaH < 0), lose it uphill.
-            const v2 = speed * speed - (deltaH * gravity) / cell;
-            speed = Math.sqrt(Math.max(0, v2));
+            // Gain speed going downhill, lose it uphill.
+            speed = Math.sqrt(Math.max(0, speed * speed - dh * gravity));
             water *= 1 - evaporation;
             px = nx;
             pz = nz;
         }
 
-        // Drop leftover sediment where the droplet died so the brush conserves mass.
+        // Spread leftover sediment over the erosion kernel where the droplet stopped (never a single cell).
         if (sediment > 0 && Number.isFinite(sediment)) {
-            const c = Math.floor(px);
-            const r = Math.floor(pz);
-            const fx = px - c;
-            const fz = pz - r;
-            const i = r * res + c;
-            data[i] += sediment * (1 - fx) * (1 - fz);
-            data[i + 1] += sediment * fx * (1 - fz);
-            data[i + res] += sediment * (1 - fx) * fz;
-            data[i + res + 1] += sediment * fx * fz;
-            dirty.add(c, r);
-            dirty.add(c + 1, r + 1);
+            const c = Math.min(maxC, Math.max(minC, Math.floor(px)));
+            const r = Math.min(maxR, Math.max(minR, Math.floor(pz)));
+            const m = Math.min(sediment, MAX_STEP * 2) * cell;
+
+            for (let k = 0; k < kn; k++) {
+                data[(r + kernel.dz[k]) * res + c + kernel.dx[k]] +=
+                    m * kernel.w[k];
+            }
+
+            dirty.add(c - eRadius, r - eRadius);
+            dirty.add(c + eRadius, r + eRadius);
         }
     }
 
-    return dirty.result();
+    const changed = dirty.result();
+
+    if (changed) {
+        removeSpikes(hf, changed);
+    }
+
+    return changed;
+}
+
+/** Max height change per droplet step, in slope units (× cell size = metres). */
+const MAX_STEP = 0.03;
+
+/**
+ * Pulls isolated single-cell spikes and pits back to their neighbourhood average so erosion
+ * can never leave needles in the terrain.
+ */
+function removeSpikes(hf: Heightfield, rect: GridRect): void {
+    const res = hf.resolution;
+    const data = hf.data;
+    const limit = hf.cell * 0.35;
+
+    for (let r = Math.max(1, rect.z0); r <= Math.min(res - 2, rect.z1); r++) {
+        for (
+            let c = Math.max(1, rect.x0);
+            c <= Math.min(res - 2, rect.x1);
+            c++
+        ) {
+            const i = r * res + c;
+            let sum = 0;
+            let lo = Infinity;
+            let hi = -Infinity;
+
+            for (let dz = -1; dz <= 1; dz++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    if (dx === 0 && dz === 0) {
+                        continue;
+                    }
+
+                    const v = data[i + dz * res + dx];
+                    sum += v;
+                    lo = Math.min(lo, v);
+                    hi = Math.max(hi, v);
+                }
+            }
+
+            const h = data[i];
+
+            if (h > hi + limit || h < lo - limit) {
+                data[i] = sum / 8;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

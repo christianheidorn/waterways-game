@@ -79,15 +79,15 @@ const SCULPT_TOOLS: ToolDef<SculptTool>[] = [
     },
     {
         value: 'erosion',
-        label: 'Erosion',
+        label: 'Slump',
         icon: Wind,
-        hint: 'Thermal erosion: slumps slopes steeper than the talus angle',
+        hint: 'Thermal erosion: loose material slides off slopes steeper than the talus angle, softening cliffs',
     },
     {
         value: 'hydro',
-        label: 'Hydro',
+        label: 'Rain',
         icon: Waves,
-        hint: 'Hydraulic erosion: rain droplets carve gullies and deposit sediment',
+        hint: 'Rain erosion: simulated raindrops run downhill, carving gullies and depositing sediment in valleys. Shapes terrain only — it does not add water',
     },
     {
         value: 'noise',
@@ -167,6 +167,7 @@ export class EditorPanel {
         private readonly editor: Editor,
         private readonly actions: {
             autoPaint: () => void;
+            softenMap: () => void;
             scatter: (ids: number[]) => void;
             clearFoliage: (ids: number[]) => void;
         },
@@ -230,6 +231,21 @@ export class EditorPanel {
                 );
                 this.body.append(this.brushSection(s.sculptTool !== 'ramp'));
                 this.body.append(...this.sculptOptions());
+                this.body.append(
+                    section(
+                        'Whole map',
+                        h(
+                            'p',
+                            { class: 'ww-muted' },
+                            'Remove stair steps and hard edges across the entire terrain (undoable).',
+                        ),
+                        button(
+                            'Soften whole map',
+                            () => this.actions.softenMap(),
+                            { icon: Blend },
+                        ),
+                    ),
+                );
                 break;
             case 'paint':
                 this.body.append(this.layerList());
@@ -506,7 +522,17 @@ export class EditorPanel {
                     unit: '°',
                     onInput: (v) => (s.talusAngle = v),
                 });
-                out.push(section('Thermal erosion', talus.el));
+                out.push(
+                    section(
+                        'Slump (thermal erosion)',
+                        h(
+                            'p',
+                            { class: 'ww-muted' },
+                            'Material slides down wherever the slope exceeds the talus angle, turning sharp cliffs into natural scree slopes.',
+                        ),
+                        talus.el,
+                    ),
+                );
                 break;
             }
             case 'hydro': {
@@ -518,7 +544,17 @@ export class EditorPanel {
                     value: s.hydroDroplets,
                     onInput: (v) => (s.hydroDroplets = v),
                 });
-                out.push(section('Hydraulic erosion', drops.el));
+                out.push(
+                    section(
+                        'Rain erosion',
+                        h(
+                            'p',
+                            { class: 'ww-muted' },
+                            'Simulates rainfall wearing the terrain down over thousands of years: water runs downhill, cuts channels into slopes and drops sediment where it slows. It only changes the terrain shape — use the Water tools to add lakes and rivers. Works best on slopes; use gentle strength and several short strokes.',
+                        ),
+                        drops.el,
+                    ),
+                );
                 break;
             }
             case 'noise': {

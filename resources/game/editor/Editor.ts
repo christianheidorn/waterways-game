@@ -319,6 +319,58 @@ export class Editor {
     }
 
     /** Re-applies the automatic material rules to the whole map (undoable). */
+    /**
+     * Softens the whole terrain: an edge-aware blur that removes stair steps and hard creases while
+     * keeping large landforms. Water beds are left alone (undoable).
+     */
+    softenMap(strength = 0.5): void {
+        const hf = this.world.heights;
+        const res = hf.resolution;
+        const rect = { x0: 0, z0: 0, x1: res - 1, z1: res - 1 };
+        const src = new Float32Array(hf.data);
+        const water = this.world.waterGrid.data;
+        const passes = Math.max(1, Math.round(strength * 4));
+        this.history.beginStroke('Soften map');
+        this.history.touch('height', rect);
+
+        for (let pass = 0; pass < passes; pass++) {
+            src.set(hf.data);
+
+            for (let r = 1; r < res - 1; r++) {
+                for (let c = 1; c < res - 1; c++) {
+                    const i = r * res + c;
+
+                    if (water[i] > NO_WATER + 1) {
+                        continue;
+                    }
+
+                    const avg =
+                        (src[i - 1] +
+                            src[i + 1] +
+                            src[i - res] +
+                            src[i + res]) *
+                            0.15 +
+                        (src[i - res - 1] +
+                            src[i - res + 1] +
+                            src[i + res - 1] +
+                            src[i + res + 1]) *
+                            0.1;
+                    // Blend less on steep ground so cliffs keep their character.
+                    const slope =
+                        Math.abs(src[i + 1] - src[i - 1]) +
+                        Math.abs(src[i + res] - src[i - res]);
+                    const keep = Math.min(1, slope / (hf.cell * 3));
+                    const k = 0.85 * (1 - keep * 0.6);
+                    hf.data[i] = src[i] + (avg - src[i]) * k;
+                }
+            }
+        }
+
+        this.history.endStroke();
+        this.onHeightsChanged(rect);
+        this.flushRebuilds();
+    }
+
     autoPaint(): void {
         const res = this.world.splat.resolution;
         const rect = { x0: 0, z0: 0, x1: res - 1, z1: res - 1 };

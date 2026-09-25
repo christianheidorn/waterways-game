@@ -29,6 +29,7 @@ import { SplatMap } from '../world/SplatMap';
 import { Terrain } from '../world/Terrain';
 import { TerrainMaterial } from '../world/TerrainMaterial';
 import { Water } from '../world/Water';
+import { WaterReflection } from '../world/WaterReflection';
 import { Api } from './Api';
 import { Bridge } from './Bridge';
 import type { BootConfig } from './config';
@@ -54,6 +55,10 @@ export class Game {
     private readonly container: HTMLElement;
     private renderer!: THREE.WebGLRenderer;
     private composer!: EffectComposer;
+    private waterTarget: THREE.WebGLRenderTarget | null = null;
+    private reflection = new WaterReflection();
+    private reflectionLevelTimer = 0;
+    private reflectionLevel: number | null = null;
     private bloomPass: UnrealBloomPass | null = null;
     private aoPass: GTAOPass | null = null;
     private scene = new THREE.Scene();
@@ -98,9 +103,15 @@ export class Game {
             this.manifest = await this.api.manifest();
 
             if (
-                this.manifest.map.terrain_status !== 'ready' ||
+                this.manifest.map.terrain_status === 'ready' &&
                 !this.manifest.assets.heightmap
             ) {
+                throw new Error(
+                    'This map has no terrain data. Regenerate the terrain from the map settings in the studio.',
+                );
+            }
+
+            if (this.manifest.map.terrain_status !== 'ready') {
                 await this.waitForTerrain();
 
                 return;
@@ -178,6 +189,8 @@ export class Game {
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFShadowMap;
         renderer.info.autoReset = false;
+        // Shadows are refreshed once per frame manually, because the water prepass renders the scene twice.
+        renderer.shadowMap.autoUpdate = false;
         renderer.domElement.className = 'ww-canvas';
         renderer.domElement.tabIndex = 0;
         this.container.prepend(renderer.domElement);
@@ -328,6 +341,10 @@ export class Game {
         );
         this.panel = new EditorPanel(this.editor, {
             autoPaint: () => this.editor.autoPaint(),
+            softenMap: () => {
+                this.editor.softenMap(0.5);
+                this.hud.flash('Terrain softened');
+            },
             scatter: (ids) => {
                 if (!ids.length) {
                     this.hud.flash('Select at least one foliage type');
@@ -489,7 +506,7 @@ export class Game {
                   : this.cameraGroundPoint();
         this.atmosphere.update(dt, focus);
         this.world.terrain.updateLod(this.camera);
-        this.world.water.update(dt);
+        this.world.water.update(dt, this.camera);
         this.world.foliage.update(dt, this.camera);
 
         const waterLevel = this.world.water.levelAt(
@@ -502,7 +519,7 @@ export class Game {
             env?.water_shallow_color,
         );
 
-        this.composer.render(dt);
+        this.renderFrame(dt);
         this.input.endFrame();
         this.trackStats(dt, performance.now() - start);
         this.tickAutosave(dt);
@@ -592,6 +609,148 @@ export class Game {
         }
     }
 
+    /**
+     * Renders the frame: first the opaque scene without water into a colour + depth target (used by the
+     * water shader for refraction, absorption and soft shores), then the full scene through the composer.
+     */
+    private renderFrame(dt: number): void {
+        const renderer = this.renderer;
+        renderer.shadowMap.needsUpdate = true;
+        const water = this.world.water;
+        this.renderReflection(dt);
+
+        if (this.waterTarget && water.hasWater()) {
+            water.group.visible = false;
+            renderer.setRenderTarget(this.waterTarget);
+            renderer.clear();
+            renderer.render(this.scene, this.camera);
+            renderer.setRenderTarget(null);
+            water.group.visible = true;
+            const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+            water.setSceneTextures(
+                {
+                    color: this.waterTarget.texture,
+                    depth: this.waterTarget.depthTexture!,
+                },
+                size.x,
+                size.y,
+            );
+            // The composer render must not redraw the shadow map a second time.
+            renderer.shadowMap.needsUpdate = false;
+        } else {
+            water.setSceneTextures(null);
+        }
+
+        this.composer.render(dt);
+    }
+
+    /** Planar reflection of the water level closest to what the viewer is looking at. */
+    private renderReflection(dt: number): void {
+        const water = this.world.water;
+
+        if (!this.reflection.enabled || !water.hasWater()) {
+            water.setReflection(null);
+
+            return;
+        }
+
+        this.reflectionLevelTimer -= dt;
+
+        if (this.reflectionLevelTimer <= 0) {
+            this.reflectionLevelTimer = 0.3;
+            const focus =
+                this.mode === 'play'
+                    ? this.player.position
+                    : this.editor.cursorValid
+                      ? this.editor.cursor
+                      : this.cameraGroundPoint();
+            const level = water.dominantLevel(focus, this.camera);
+            // Keep the previous plane when nothing is found so the reflection doesn't flicker.
+            this.reflectionLevel = level ?? this.reflectionLevel;
+        }
+
+        if (this.reflectionLevel === null) {
+            water.setReflection(null);
+
+            return;
+        }
+
+        const small = new Set(
+            this.manifest.foliage_types
+                .filter(
+                    (t) =>
+                        t.kind === 'grass' ||
+                        t.kind === 'flower' ||
+                        t.kind === 'reed',
+                )
+                .map((t) => `Foliage_${t.name}_`),
+        );
+        const hidden: THREE.Object3D[] = [];
+        this.reflection.level = this.reflectionLevel;
+        this.reflection.render(
+            this.renderer,
+            this.scene,
+            this.camera,
+            () => {
+                water.group.visible = false;
+
+                for (const child of this.world.foliage.group.children) {
+                    if (
+                        child.visible &&
+                        [...small].some((prefix) =>
+                            child.name.startsWith(prefix),
+                        )
+                    ) {
+                        child.visible = false;
+                        hidden.push(child);
+                    }
+                }
+            },
+            () => {
+                water.group.visible = true;
+
+                for (const child of hidden) {
+                    child.visible = true;
+                }
+            },
+        );
+        water.setReflection(
+            this.reflection.active
+                ? {
+                      texture: this.reflection.target.texture,
+                      matrix: this.reflection.textureMatrix,
+                      level: this.reflection.level,
+                  }
+                : null,
+        );
+    }
+
+    private resizeWaterTarget(): void {
+        const quality =
+            this.manifest?.settings.graphics.water_quality ?? 'medium';
+        const scale =
+            quality === 'high' ? 1 : quality === 'medium' ? 0.6 : 0.35;
+        const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+        this.reflection.setSize(
+            size.x,
+            size.y,
+            quality === 'high' ? 0.6 : quality === 'medium' ? 0.4 : 0,
+        );
+        const w = Math.max(1, Math.round(size.x * scale));
+        const h = Math.max(1, Math.round(size.y * scale));
+
+        if (!this.waterTarget) {
+            this.waterTarget = new THREE.WebGLRenderTarget(w, h, {
+                type: THREE.HalfFloatType,
+                depthTexture: new THREE.DepthTexture(w, h),
+            });
+            this.waterTarget.texture.minFilter = THREE.LinearFilter;
+            this.waterTarget.texture.generateMipmaps = false;
+        } else {
+            this.waterTarget.setSize(w, h);
+        }
+    }
+
     private resize(): void {
         if (!this.renderer) {
             return;
@@ -606,6 +765,7 @@ export class Game {
         this.renderer.setSize(w, h, false);
         this.composer?.setPixelRatio(this.renderer.getPixelRatio());
         this.composer?.setSize(w, h);
+        this.resizeWaterTarget();
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
     }
@@ -792,7 +952,7 @@ export class Game {
 
     private captureThumbnail(): string {
         this.world.material.hideBrush();
-        this.composer.render(0);
+        this.renderFrame(0);
         const src = this.renderer.domElement;
         const canvas = document.createElement('canvas');
         canvas.width = 640;

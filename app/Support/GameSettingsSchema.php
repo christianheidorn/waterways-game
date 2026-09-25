@@ -39,6 +39,9 @@ final class GameSettingsSchema
                 SettingField::number('terrain_lod_bias', 'Terrain detail', 1, 0.25, 4, 0.05, '×', 'Higher values keep full terrain detail further away.'),
                 SettingField::number('foliage_density', 'Foliage density', 1, 0, 1, 0.05, '×', 'Scales the number of rendered foliage instances.'),
                 SettingField::number('foliage_distance', 'Foliage distance', 1, 0.25, 3, 0.05, '×', 'Scales every foliage type\'s cull distance.'),
+                SettingField::select('water_quality', 'Water quality', 'medium', [
+                    'low' => 'Low', 'medium' => 'Medium', 'high' => 'High',
+                ], 'Resolution of the refraction/depth pass used by water.'),
                 SettingField::boolean('antialias', 'Anti-aliasing (MSAA)', true),
                 SettingField::boolean('bloom', 'Bloom', true),
                 SettingField::boolean('ambient_occlusion', 'Ambient occlusion', false, 'Screen-space ambient occlusion (GTAO). Expensive.'),

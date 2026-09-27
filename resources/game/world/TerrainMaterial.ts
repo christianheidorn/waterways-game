@@ -556,11 +556,11 @@ const FRAGMENT_ALBEDO = /* glsl */ `
         float gw = uWeatherWet;
         float flatness = smoothstep(0.93, 0.99, N.y);
         float hollow = (1.0 - macro2.b) * 0.55 + (1.0 - macro.g) * 0.45;
-        float puddle = smoothstep(0.72 - gw * 0.2, 0.78 - gw * 0.2, hollow) * flatness * smoothstep(0.3, 0.8, gw);
+        float puddle = smoothstep(0.76 - gw * 0.14, 0.82 - gw * 0.14, hollow) * flatness * smoothstep(0.3, 0.8, gw) * 0.85;
         albedo *= mix(1.0, 0.62, gw * (1.0 - wet * 0.5));
-        rough = mix(rough, rough * 0.45, gw);
+        rough = mix(rough, rough * 0.6, gw);
         albedo *= mix(1.0, 0.75, puddle);
-        rough = mix(rough, 0.04, puddle);
+        rough = mix(rough, 0.14, puddle);
         nrm = normalize(mix(nrm, N, max(gw * 0.25, puddle)));
     }
 

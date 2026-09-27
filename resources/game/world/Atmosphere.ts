@@ -474,7 +474,7 @@ export class Atmosphere {
         fogSunParams.x = this.sunDirection.x;
         fogSunParams.y = this.sunDirection.y;
         fogSunParams.z = this.sunDirection.z;
-        fogSunParams.w = smooth(-4, 2, elevation) * (1 - overcast * 0.9) * 0.8;
+        fogSunParams.w = smooth(-4, 2, elevation) * (1 - overcast * 0.9) * 0.5;
         this.baseFogDensity = c.fogDensity;
 
         for (const sky of this.skies) {
@@ -517,7 +517,7 @@ export class Atmosphere {
         } else {
             this.sun.color.set('#9fb4e0');
             this.sun.intensity =
-                0.16 *
+                0.3 *
                 smooth(-4, -12, elevation) *
                 smooth(-0.05, 0.25, this.moonDirection.y) *
                 (1 - overcast * 0.8);
@@ -537,12 +537,12 @@ export class Atmosphere {
             (1 + cov * 0.5) *
             (1 - dark * 0.6);
         this.hemi.intensity =
-            THREE.MathUtils.lerp(dayAmbient, 0.07, night) + flash * 1.4;
+            THREE.MathUtils.lerp(dayAmbient, 0.1, night) + flash * 1.1;
         this.hemi.groundColor.set('#4a4030').multiplyScalar(1 - night * 0.6);
 
         // ---- lightning flash light from the strike direction
         this.flashLight.visible = flash > 0.005;
-        this.flashLight.intensity = flash * 5;
+        this.flashLight.intensity = flash * 2.5;
         this.flashLight.position.copy(this.flashDirection).multiplyScalar(1000);
         this.flashLight.target.position.set(0, 0, 0);
         this.flashLight.target.updateMatrixWorld();

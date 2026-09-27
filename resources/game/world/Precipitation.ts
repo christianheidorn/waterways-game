@@ -98,7 +98,7 @@ export class Precipitation {
             -9.5,
             wind.y * 2.4,
             light,
-            0.55,
+            0.45,
         );
         this.updateLayer(
             this.snow,

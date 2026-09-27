@@ -925,6 +925,8 @@ body.ww-body {
     top: 12px;
     right: 12px;
     padding: 8px !important;
+    background: var(--ww-bg);
+    color: var(--ww-text);
 }
 
 .ww-gfx-toggle[data-embedded='0'] {
@@ -941,6 +943,11 @@ body.ww-body {
     flex-direction: column;
     overflow: hidden;
     z-index: 5;
+}
+
+.ww-gfx-toggle[data-embedded='0'] + .ww-gfx-menu {
+    top: 66px;
+    max-height: calc(100% - 118px);
 }
 
 .ww-gfx-header {

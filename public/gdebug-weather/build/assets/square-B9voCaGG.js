@@ -1,1 +1,0 @@
-import{r as e}from"./wayfinder-CXj6WkgN.js";var t=e(`Square`,[[`rect`,{width:`18`,height:`18`,x:`3`,y:`3`,rx:`2`,key:`afitv7`}]]);export{t};

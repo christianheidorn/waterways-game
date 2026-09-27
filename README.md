@@ -191,12 +191,11 @@ own:
 1. Scene
 2. GTAO: `ao_quality` sets the resolution scale, sample count and radius
 3. Bloom
-4. Colour grading, in scene-linear HDR: saturation, log-space contrast, vignette, and neighbourhood-clamped
-   sharpening
-5. Output: ACES tone mapping and sRGB
+4. Output: ACES tone mapping and sRGB
+5. Colour grading, display-referred: saturation, contrast, vignette, and neighbourhood-clamped sharpening
 6. FXAA or SMAA, if selected
 
-FXAA and SMAA run after tone mapping because they need display-referred input. MSAA instead uses a
+Grading, FXAA and SMAA run after tone mapping because they need display-referred input. MSAA instead uses a
 4× multisampled scene target.
 
 Passes that would do nothing are skipped. For example, the grading pass is left out when every grading value

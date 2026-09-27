@@ -42,9 +42,10 @@ class ScaledGTAOPass extends GTAOPass {
 }
 
 /**
- * Colour grading in scene-linear HDR (before tone mapping, like UE's post-process volume):
- * contrast in log space around 18% grey, saturation around luminance, vignette, and an
- * optional neighbourhood-clamped unsharp mask (CAS-like, no halos).
+ * Display-referred colour grading (after tone mapping + sRGB, like UE's tonemapper stage): contrast
+ * around mid grey, saturation around luminance, vignette, and an optional neighbourhood-clamped unsharp
+ * mask (CAS-like, no halos). Grading in scene-linear HDR was tried first, but vignette and sharpening
+ * vanished in bright regions once ACES compressed them.
  */
 const GradingShader = {
     name: 'WaterwaysGradingShader',
@@ -90,14 +91,14 @@ const GradingShader = {
             #endif
 
             float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-            col = max(mix(vec3(luma), col, saturation), 0.0);
-            col = 0.18 * pow(col / 0.18 + 1e-5, vec3(contrast));
+            col = mix(vec3(luma), col, saturation);
+            col = (col - 0.5) * contrast + 0.5;
 
             vec2 d = (vUv - 0.5) * vec2(aspect, 1.0);
             float r = length(d) / length(vec2(aspect, 1.0) * 0.5);
-            col *= 1.0 - vignette * 0.85 * smoothstep(0.3, 1.0, r);
+            col *= 1.0 - vignette * 0.75 * smoothstep(0.25, 1.0, r);
 
-            gl_FragColor = vec4(col, base.a);
+            gl_FragColor = vec4(clamp(col, 0.0, 1.0), base.a);
         }`,
 };
 
@@ -111,9 +112,10 @@ function gradingActive(g: GraphicsSettings): boolean {
 }
 
 /**
- * Post-processing chain: Render → GTAO → Bloom → Grading → Output (tone map + sRGB) → FXAA / SMAA.
+ * Post-processing chain: Render → GTAO → Bloom → Output (tone map + sRGB) → Grading → FXAA / SMAA.
  *
- * FXAA and SMAA run last because both expect display-referred (tone mapped, sRGB) input. MSAA is a
+ * GTAO and bloom work on scene-linear HDR. Grading, FXAA and SMAA expect display-referred (tone mapped,
+ * sRGB) input, so they follow the OutputPass; AA runs last so it also smooths sharpening artefacts. MSAA is a
  * multisampled scene target instead. Passes that would be no-ops are left out; the composer is only
  * rebuilt when that structure changes, everything else updates uniforms.
  *
@@ -247,12 +249,12 @@ export class PostFx {
             composer.addPass(this.bloomPass);
         }
 
+        composer.addPass(new OutputPass());
+
         if (grade) {
             this.gradePass = new ShaderPass(GradingShader);
             composer.addPass(this.gradePass);
         }
-
-        composer.addPass(new OutputPass());
 
         if (aa === 'fxaa') {
             composer.addPass(new FXAAPass());

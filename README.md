@@ -140,7 +140,11 @@ Every source is **baked in the browser** (`resources/game/tools/FoliageBaker.ts`
 Keep the foliage page open while assets show _Waiting to be optimised_.
 
 **In the game editor** the Foliage tool shows your types as tiles with thumbnails: baked model thumbnails, or
-thumbnails of the procedural mesh rendered in-game.
+thumbnails of the procedural mesh rendered in-game. Below the tiles, **Type settings** edits the last-clicked type
+without leaving the editor: density, size, slope, altitude, visible distance, shadows, alignment and underwater.
+Changes apply live and are saved to the studio library after a short pause (`PATCH /api/foliage-types/{id}`).
+Visibility and shadows update at once; density, size and placement rules apply to new painting, and
+_Re-scatter_ regenerates a type.
 
 **AI foliage palette** (✨ _AI palette_ on the foliage page):
 
@@ -151,6 +155,18 @@ thumbnails of the procedural mesh rendered in-game.
 
 Sizes are planned as real heights in metres. You approve every row and can switch its model (Meshy, card,
 procedural, keep current) before anything changes.
+
+## Player characters
+
+**Characters** (Studio → Characters) are playable, rigged and animated models:
+
+- **Generate with Meshy.** Text → 3D (or an OpenRouter concept image → 3D) in an A-pose, then Meshy rigging,
+  which includes walk and run clips. Idle, jump and swim come from Meshy's animation library. A character costs
+  about 44 Meshy credits and takes 5–10 minutes; the job polls Meshy in the background.
+- **Upload** a rigged `.glb` whose clips are named idle / walk / run / jump / swim.
+
+The studio preview plays each clip with the game's own character code. _Use as player_ sets the player for every
+map: the manifest's `character` carries the model and per-clip GLBs. Missing clips fall back to the closest one.
 
 ## Graphics quality
 

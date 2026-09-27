@@ -721,3 +721,115 @@ body.ww-body {
 .ww-row > * {
     flex: 1;
 }
+
+/* ---------------------------------------------------------------- material tiles (paint layers) */
+
+.ww-material-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.ww-material-tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid var(--ww-border);
+    border-radius: 9px;
+    background: oklch(0 0 0 / 0.25);
+    color: var(--ww-text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition:
+        border-color 0.12s,
+        transform 0.12s;
+}
+
+.ww-material-tile:hover {
+    border-color: oklch(1 0 0 / 0.3);
+}
+
+.ww-material-tile.is-active {
+    border-color: var(--ww-accent);
+    box-shadow: 0 0 0 1px var(--ww-accent);
+}
+
+.ww-material-thumb {
+    display: block;
+    height: 58px;
+    background-size: cover;
+    background-position: center;
+    background-blend-mode: multiply;
+}
+
+.ww-material-slot {
+    position: absolute;
+    top: 5px;
+    left: 5px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 6px;
+    background: oklch(0 0 0 / 0.55);
+    font-size: 10.5px;
+    line-height: 18px;
+    text-align: center;
+}
+
+.ww-material-tile.is-active .ww-material-slot {
+    background: var(--ww-accent-strong);
+}
+
+.ww-material-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 5px 7px 6px;
+    min-width: 0;
+}
+
+.ww-material-name,
+.ww-material-sub {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ww-material-name {
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.ww-material-sub {
+    color: var(--ww-muted);
+    font-size: 10.5px;
+}
+
+.ww-material-preview {
+    overflow: hidden;
+    border: 1px solid var(--ww-border);
+    border-radius: 10px;
+}
+
+.ww-material-preview-image {
+    height: 96px;
+    background-repeat: repeat;
+    background-position: center;
+    background-blend-mode: multiply;
+}
+
+.ww-material-preview-caption {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 8px 7px;
+    font-size: 12px;
+}
+
+.ww-material-preview-caption span {
+    color: var(--ww-muted);
+    font-size: 11px;
+}

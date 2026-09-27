@@ -140,6 +140,8 @@ export type TerrainMaterialRef = {
     name: string;
     /** Root-relative image URLs; only albedo is guaranteed. Normal maps use the OpenGL (+Y) convention. */
     maps: Record<MaterialMapName, string | null>;
+    /** Small preview image (falls back to the albedo map). */
+    thumbnail_url?: string | null;
     tile_size: number;
     tint: string;
     roughness_scale: number;

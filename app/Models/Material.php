@@ -127,6 +127,9 @@ class Material extends Model
             'id' => $this->id,
             'name' => $this->name,
             'maps' => $this->mapUrls(),
+            'thumbnail_url' => $this->thumbnail_path
+                ? '/storage/'.$this->thumbnail_path.'?v='.($this->updated_at?->timestamp ?? 0)
+                : ($this->mapUrls()['albedo'] ?? null),
             'tile_size' => $this->tile_size,
             'tint' => $this->tint,
             'roughness_scale' => $this->roughness_scale,

@@ -203,7 +203,7 @@ export class EditorPanel {
     refresh(): void {
         const s = this.editor.state;
         this.groupSeg.set(s.group);
-        const key = `${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => l.id + l.name + l.color).join()}:${this.editor.foliageTypes.map((t) => t.id + t.name).join()}`;
+        const key = `${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => t.id + t.name).join()}`;
 
         if (key !== this.renderedKey) {
             this.renderedKey = key;
@@ -601,34 +601,61 @@ export class EditorPanel {
 
     private layerList(): HTMLElement {
         const s = this.editor.state;
-        const list = h('div', { class: 'ww-list' });
+        const grid = h('div', { class: 'ww-material-grid' });
+        const active = this.editor.layers.find((l) => l.slot === s.paintLayer);
 
         for (const layer of this.editor.layers) {
-            const row = h(
-                'button',
-                {
-                    type: 'button',
-                    class: `ww-list-item ${layer.slot === s.paintLayer ? 'is-active' : ''}`,
-                    onClick: () => {
-                        s.paintLayer = layer.slot;
-                        this.renderedKey = '';
-                        this.editor.notify();
+            const selected = layer.slot === s.paintLayer;
+            const thumb =
+                layer.material?.thumbnail_url ??
+                layer.material?.maps.albedo ??
+                layer.texture_url;
+            const tile = h('span', {
+                class: 'ww-material-thumb',
+                style: thumb
+                    ? {
+                          backgroundImage: `url("${thumb}")`,
+                          backgroundColor: layer.tint ?? '#ffffff',
+                      }
+                    : {
+                          background: `linear-gradient(135deg, ${layer.color}, ${layer.color_secondary})`,
+                      },
+            });
+            const subtitle = layer.material
+                ? `${layer.material.name} · ${formatMetres(layer.texture_scale || layer.material.tile_size)}`
+                : 'Procedural colours';
+
+            grid.append(
+                h(
+                    'button',
+                    {
+                        type: 'button',
+                        class: `ww-material-tile ${selected ? 'is-active' : ''}`,
+                        title: `${layer.name} — ${subtitle}`,
+                        onClick: () => {
+                            s.paintLayer = layer.slot;
+                            this.renderedKey = '';
+                            this.editor.notify();
+                        },
                     },
-                },
-                h('span', {
-                    class: 'ww-swatch',
-                    style: {
-                        background: `linear-gradient(135deg, ${layer.color}, ${layer.color_secondary})`,
-                    },
-                }),
-                h('span', { class: 'ww-list-label' }, layer.name),
-                h('span', { class: 'ww-badge' }, `#${layer.slot + 1}`),
+                    tile,
+                    h(
+                        'span',
+                        { class: 'ww-material-slot' },
+                        String(layer.slot + 1),
+                    ),
+                    h(
+                        'span',
+                        { class: 'ww-material-text' },
+                        h('span', { class: 'ww-material-name' }, layer.name),
+                        h('span', { class: 'ww-material-sub' }, subtitle),
+                    ),
+                ),
             );
-            list.append(row);
         }
 
         if (!this.editor.layers.length) {
-            list.append(
+            grid.append(
                 h(
                     'p',
                     { class: 'ww-muted' },
@@ -637,15 +664,57 @@ export class EditorPanel {
             );
         }
 
+        // Larger preview of the selected material, tiled at its real-world scale relative to a 4 m swatch.
+        let preview: HTMLElement | null = null;
+        const thumb =
+            active?.material?.thumbnail_url ??
+            active?.material?.maps.albedo ??
+            active?.texture_url;
+
+        if (active) {
+            const metres =
+                active.texture_scale || active.material?.tile_size || 4;
+            const tilesAcross = Math.max(1, Math.min(8, 4 / metres));
+            preview = h(
+                'div',
+                { class: 'ww-material-preview' },
+                h('div', {
+                    class: 'ww-material-preview-image',
+                    style: thumb
+                        ? {
+                              backgroundImage: `url("${thumb}")`,
+                              backgroundSize: `${100 / tilesAcross}% auto`,
+                              backgroundColor: active.tint ?? '#ffffff',
+                          }
+                        : {
+                              background: `linear-gradient(135deg, ${active.color}, ${active.color_secondary})`,
+                          },
+                }),
+                h(
+                    'div',
+                    { class: 'ww-material-preview-caption' },
+                    h('strong', {}, active.name),
+                    h(
+                        'span',
+                        {},
+                        active.material
+                            ? `${active.material.name} · 1 tile = ${formatMetres(metres)} · swatch shows 4 m`
+                            : 'Procedural colours — assign a material in the studio',
+                    ),
+                ),
+            );
+        }
+
         return section(
             'Layers',
+            preview,
+            grid,
             h(
                 'p',
                 { class: 'ww-muted' },
                 icon(Layers, 12),
                 ' Paint the selected layer · Shift to erase',
             ),
-            list,
         );
     }
 
@@ -773,4 +842,8 @@ export class EditorPanel {
 
         return `${tool}  —  ${base}`;
     }
+}
+
+function formatMetres(m: number): string {
+    return `${Number(m.toFixed(m < 10 ? 1 : 0))} m`;
 }

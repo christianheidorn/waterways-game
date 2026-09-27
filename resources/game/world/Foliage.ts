@@ -1178,6 +1178,22 @@ transformed *= fadeK;`
                     ),
                 );
             }
+
+            // Alpha-tested leaf textures lose coverage in smaller mips (averaged alpha drops below
+            // the cutoff and distant canopies turn bare); scale alpha up with the mip level.
+            shader.fragmentShader = shader.fragmentShader.replace(
+                '#include <alphatest_fragment>',
+                `#if defined( USE_ALPHATEST ) && defined( USE_MAP )
+{
+    vec2 texel = vMapUv * vec2(textureSize(map, 0));
+    vec2 dx = dFdx(texel);
+    vec2 dy = dFdy(texel);
+    float mipLevel = max(0.0, 0.5 * log2(max(dot(dx, dx), dot(dy, dy))));
+    diffuseColor.a *= 1.0 + mipLevel * 0.25;
+}
+#endif
+#include <alphatest_fragment>`,
+            );
         };
         material.customProgramCacheKey = () =>
             `foliage-${stiffness}-${fade}-${material.side}`;

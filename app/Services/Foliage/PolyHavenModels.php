@@ -172,6 +172,20 @@ class PolyHavenModels
             }
         }
 
+        // The glTF references JPG colour maps without alpha; the baker cuts leaves out with the separate
+        // alpha maps ("Alpha", "leaves_alpha", …), fetched next to the textures under Poly Haven's names.
+        foreach ($files as $key => $variants) {
+            if (! is_string($key) || ! str_contains(strtolower($key), 'alpha') || ! is_array($variants)) {
+                continue;
+            }
+            $file = $variants[$resolution]['jpg'] ?? $variants['1k']['jpg'] ?? $variants[$resolution]['png'] ?? $variants['1k']['png'] ?? null;
+            $url = is_array($file) ? ($file['url'] ?? null) : null;
+            $name = is_string($url) ? basename((string) parse_url($url, PHP_URL_PATH)) : null;
+            if ($name && self::safeRelativePath($name) === $name) {
+                $downloads['textures/'.$name] ??= $url;
+            }
+        }
+
         $done = 0;
         foreach ($downloads as $path => $url) {
             $asset->forceFill(['status_message' => sprintf('Downloading from Poly Haven (%d/%d)…', ++$done, count($downloads))])->save();

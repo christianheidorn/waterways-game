@@ -740,7 +740,9 @@ export class EditorPanel {
                     input,
                     h('span', {
                         class: 'ww-swatch',
-                        title: type.asset ? `Model: ${type.asset.name}` : 'Procedural mesh',
+                        title: type.asset
+                            ? `Model: ${type.asset.name}`
+                            : 'Procedural mesh',
                         style: {
                             // Baked model thumbnail over the colour gradient (shown while it loads / if missing).
                             background: `${type.asset?.thumbnail_url ? `center / cover no-repeat url("${type.asset.thumbnail_url}"), ` : ''}linear-gradient(135deg, ${type.color}, ${type.color_secondary})`,

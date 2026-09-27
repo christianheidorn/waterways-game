@@ -49,7 +49,7 @@ class FoliageAssetTest extends TestCase
                 'office_chair' => ['name' => 'Office Chair', 'categories' => ['furniture'], 'tags' => [], 'polycount' => 1000],
             ]),
             'api.polyhaven.com/info/fern_02' => Http::response(['name' => 'Fern 02', 'categories' => ['plants', 'nature'], 'tags' => ['fern'], 'polycount' => 6232, 'authors' => ['Rico Cilliers' => 'All']]),
-            'api.polyhaven.com/files/fern_02' => Http::response(['gltf' => ['1k' => ['gltf' => [
+            'api.polyhaven.com/files/fern_02' => Http::response(['Alpha' => ['1k' => ['jpg' => ['url' => 'https://dl.polyhaven.org/fern_02_alpha_1k.jpg'], 'png' => ['url' => 'https://dl.polyhaven.org/fern_02_alpha_1k.png']]], 'gltf' => ['1k' => ['gltf' => [
                 'url' => 'https://dl.polyhaven.org/file/ph-assets/Models/gltf/1k/fern_02/fern_02_1k.gltf',
                 'include' => [
                     'fern_02.bin' => ['size' => $binBytes, 'url' => 'https://dl.polyhaven.org/fern_02.bin'],
@@ -61,6 +61,7 @@ class FoliageAssetTest extends TestCase
             'dl.polyhaven.org/fern_02.bin' => Http::response(str_repeat('b', 64)),
             'dl.polyhaven.org/fern_02_diff_1k.jpg' => Http::response('jpeg'),
             'dl.polyhaven.org/evil.txt' => Http::response('evil'),
+            'dl.polyhaven.org/fern_02_alpha_1k.jpg' => Http::response('alpha'),
         ]);
     }
 
@@ -108,6 +109,7 @@ class FoliageAssetTest extends TestCase
         $disk = Storage::disk('public');
         $disk->assertExists("foliage/{$asset->id}/source/fern_02.bin");
         $disk->assertExists("foliage/{$asset->id}/source/textures/fern_02_diff_1k.jpg");
+        $this->assertSame('alpha', $disk->get("foliage/{$asset->id}/source/textures/fern_02_alpha_1k.jpg"));
         $this->assertSame(str_repeat('b', 64), $disk->get("foliage/{$asset->id}/source/fern_02.bin"));
         Http::assertNotSent(fn (Request $r) => str_contains($r->url(), 'evil.txt'));
 

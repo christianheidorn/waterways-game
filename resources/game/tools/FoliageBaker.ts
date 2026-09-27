@@ -307,7 +307,7 @@ async function bakeModel(
 
         // Materials → MeshStandardMaterial, fix up alpha, cap texture sizes.
         report('Preparing materials', 0);
-        const materials = await convertMaterials(gltf, url, ctx);
+        const materials = await convertMaterials(gltf, url, input.kind, ctx);
         await tick();
 
         report('Flattening meshes', 0);
@@ -394,6 +394,23 @@ async function bakeModel(
         }
 
         const lod0 = lodGroups[0];
+
+        // Enlarged leaf cards can poke out above the crown: keep an explicit target height exact.
+        if (input.targetHeight && input.targetHeight > 0) {
+            const lodBox = new THREE.Box3().setFromObject(lod0);
+            const actual = lodBox.max.y - lodBox.min.y;
+
+            if (
+                actual > 0 &&
+                Math.abs(actual / input.targetHeight - 1) > 0.005
+            ) {
+                const f = input.targetHeight / actual;
+
+                for (const geometry of ctx.geometries) {
+                    geometry.scale(f, f, f);
+                }
+            }
+        }
 
         if (impostor) {
             report('Rendering impostor', 0);
@@ -484,6 +501,7 @@ function textureUri(
 async function convertMaterials(
     gltf: GLTF,
     url: string,
+    kind: FoliageKind,
     ctx: BakeContext,
 ): Promise<Map<THREE.Material, SourceMaterial>> {
     const parser = gltf.parser as unknown as GltfParserLike;
@@ -576,10 +594,30 @@ async function convertMaterials(
             m.depthWrite = true;
         }
 
+        // Rocks are closed scans: no need to pay for back faces (Poly Haven marks everything double-sided).
         m.side =
-            alpha || leafName || src.side === THREE.DoubleSide
+            alpha ||
+            leafName ||
+            (src.side === THREE.DoubleSide && kind !== 'rock')
                 ? THREE.DoubleSide
                 : THREE.FrontSide;
+
+        // Clones of one packed texture (KHR_texture_transform) → one texture, so the exporter
+        // writes a single metallicRoughness / occlusion image instead of merging copies.
+        if (m.roughnessMap) {
+            const same = (t: THREE.Texture | null) =>
+                !!t &&
+                t !== m.roughnessMap &&
+                t.source === m.roughnessMap!.source;
+
+            if (same(m.metalnessMap)) {
+                m.metalnessMap = m.roughnessMap;
+            }
+
+            if (same(m.aoMap)) {
+                m.aoMap = m.roughnessMap;
+            }
+        }
 
         // Base colour without an alpha channel (Poly Haven ships leaf alpha as a separate map).
         if (alpha && m.map && !textureHasAlpha(m.map)) {
@@ -905,9 +943,22 @@ function flattenScene(
     const v = new THREE.Vector3();
     gltf.scene.updateMatrixWorld(true);
 
+    // Sources that already carry LODs ("LOD0".."LODn", "Tree_LOD1", …): bake only the most
+    // detailed one (the lowest index present).
+    let minLod = Infinity;
+    gltf.scene.traverse((obj) => {
+        const lod = lodIndexOf(obj.name);
+
+        if (lod !== null) {
+            minLod = Math.min(minLod, lod);
+        }
+    });
+
     const visible = (obj: THREE.Object3D): boolean => {
         for (let o: THREE.Object3D | null = obj; o; o = o.parent) {
-            if (!o.visible) {
+            const lod = lodIndexOf(o.name);
+
+            if (!o.visible || (lod !== null && lod > minLod)) {
                 return false;
             }
         }
@@ -1090,6 +1141,14 @@ function flattenScene(
     }
 
     return parts;
+}
+
+function lodIndexOf(name: string): number | null {
+    const match =
+        /(?:^|[_\-\s.])lod[_\-\s]?(\d+)$/i.exec(name) ??
+        /^lod(\d+)$/i.exec(name);
+
+    return match ? Number(match[1]) : null;
 }
 
 /** Pivot at the base (min Y = 0), metres, optional target height. Returns the final bounds. */
@@ -1420,7 +1479,9 @@ async function buildMeshLod(
         let det = detail[i];
 
         if (keep < 1 && det.length) {
-            const out = new IndexBuilder(Math.ceil(det.length * keep * 1.2) + 16);
+            const out = new IndexBuilder(
+                Math.ceil(det.length * keep * 1.2) + 16,
+            );
             const keepComp = new Uint8Array(a.compCount);
 
             for (let c = 0; c < a.compCount; c++) {
@@ -1458,8 +1519,17 @@ async function buildMeshLod(
         let solid = a.solidIndex;
 
         if (solid.length && solidBudget < solidTris) {
-            const target = Math.max(4, (solidBudget * (solid.length / 3)) / solidTris);
-            solid = simplifyIndices(part, a, solid, target, level === 0 ? 0.25 : 0.5);
+            const target = Math.max(
+                4,
+                (solidBudget * (solid.length / 3)) / solidTris,
+            );
+            solid = simplifyIndices(
+                part,
+                a,
+                solid,
+                target,
+                level === 0 ? 0.25 : 0.5,
+            );
         }
 
         const det = kept[i];
@@ -1645,11 +1715,12 @@ function renderImpostor(
         colorSpace: THREE.SRGBColorSpace,
     });
     const scene = new THREE.Scene();
-    const ambient = new THREE.AmbientLight(0xffffff, Math.PI * 0.55);
-    const key = new THREE.DirectionalLight(0xffffff, Math.PI * 0.6);
+    // Soft, near-albedo lighting: the game lights the impostor cards again.
+    const ambient = new THREE.AmbientLight(0xffffff, Math.PI * 0.35);
+    const key = new THREE.DirectionalLight(0xffffff, Math.PI * 0.35);
     scene.add(ambient, key, key.target);
     const holder = new THREE.Group();
-    holder.add(...model.children.map((c) => (c as THREE.Mesh).clone()));
+    holder.add(...gameShadedClones(model, ctx));
     scene.add(holder);
     const camera = new THREE.OrthographicCamera(
         -radius,
@@ -1843,6 +1914,59 @@ function buildQuads(quads: Quad[]): THREE.BufferGeometry {
     return geometry;
 }
 
+/**
+ * Mesh clones whose double-sided materials skip three's back-face normal flip — the same
+ * shading the game's foliage material patch uses — so captures match the in-game look.
+ */
+function gameShadedClones(
+    model: THREE.Object3D,
+    ctx: BakeContext,
+): THREE.Mesh[] {
+    const patched = new Map<THREE.Material, THREE.Material>();
+    const patch = (material: THREE.Material): THREE.Material => {
+        if (material.side !== THREE.DoubleSide) {
+            return material;
+        }
+
+        let m = patched.get(material);
+
+        if (!m) {
+            m = material.clone();
+            m.onBeforeCompile = (shader) => {
+                shader.fragmentShader = shader.fragmentShader.replace(
+                    '#include <normal_fragment_begin>',
+                    THREE.ShaderChunk.normal_fragment_begin.replace(
+                        'normal *= faceDirection;',
+                        '',
+                    ),
+                );
+            };
+            m.customProgramCacheKey = () => 'baker-no-face-flip';
+            ctx.materials.add(m);
+            patched.set(material, m);
+        }
+
+        return m;
+    };
+    const meshes: THREE.Mesh[] = [];
+    model.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+
+        if (mesh.isMesh) {
+            const clone = mesh.clone();
+            clone.material = Array.isArray(mesh.material)
+                ? mesh.material.map(patch)
+                : patch(mesh.material);
+            mesh.updateWorldMatrix(true, false);
+            clone.matrixAutoUpdate = false;
+            clone.matrix.copy(mesh.matrixWorld);
+            meshes.push(clone);
+        }
+    });
+
+    return meshes;
+}
+
 // ---------------------------------------------------------- thumbnail
 
 async function renderThumbnail(
@@ -1859,7 +1983,7 @@ async function renderThumbnail(
 
     const scene = new THREE.Scene();
     const holder = new THREE.Group();
-    holder.add(...model.children.map((c) => (c as THREE.Mesh).clone()));
+    holder.add(...gameShadedClones(model, ctx));
     scene.add(holder);
     scene.add(new THREE.HemisphereLight(0xdcebff, 0x6b5a45, Math.PI * 0.45));
     scene.add(new THREE.AmbientLight(0xffffff, Math.PI * 0.15));
@@ -2026,14 +2150,49 @@ async function encodePng(image: RawImage): Promise<Blob> {
     const stride = width * 4;
     const filtered = new Uint8Array((stride + 1) * height);
 
+    const candidate = new Uint8Array(stride);
+
+    // Per row, pick the filter with the smallest sum of absolute residuals (libpng heuristic).
     for (let y = 0; y < height; y++) {
         const row = y * (stride + 1);
-        filtered[row] = 1; // Sub filter
+        const cur = y * stride;
+        const prev = (y - 1) * stride;
+        let best = Infinity;
 
-        for (let i = 0; i < stride; i++) {
-            const value = data[y * stride + i];
-            const left = i >= 4 ? data[y * stride + i - 4] : 0;
-            filtered[row + 1 + i] = (value - left) & 0xff;
+        for (let filter = 0; filter < 5; filter++) {
+            let cost = 0;
+
+            for (let i = 0; i < stride; i++) {
+                const x = data[cur + i];
+                const a = i >= 4 ? data[cur + i - 4] : 0;
+                const b = y > 0 ? data[prev + i] : 0;
+                const c = y > 0 && i >= 4 ? data[prev + i - 4] : 0;
+                let predictor = 0;
+
+                if (filter === 1) {
+                    predictor = a;
+                } else if (filter === 2) {
+                    predictor = b;
+                } else if (filter === 3) {
+                    predictor = (a + b) >> 1;
+                } else if (filter === 4) {
+                    const p = a + b - c;
+                    const pa = Math.abs(p - a);
+                    const pb = Math.abs(p - b);
+                    const pc = Math.abs(p - c);
+                    predictor = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+                }
+
+                const residual = (x - predictor) & 0xff;
+                candidate[i] = residual;
+                cost += residual < 128 ? residual : 256 - residual;
+            }
+
+            if (cost < best) {
+                best = cost;
+                filtered[row] = filter;
+                filtered.set(candidate, row + 1);
+            }
         }
     }
 

@@ -2,27 +2,102 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FOLIAGE_STRIDE } from '../shared/types';
-import type { FoliageFile, FoliageType } from '../shared/types';
+import type { FoliageFile, FoliageKind, FoliageType } from '../shared/types';
 import { mulberry32, SimplexNoise } from '../util/noise';
 import { createFoliageGeometry } from './FoliageGeometry';
 import type { Heightfield } from './Heightfield';
 
-const CELL_SIZE = 128;
+/**
+ * Runtime cell size per kind (m). Small, dense foliage uses small cells so frustum culling, LOD and
+ * the distance density falloff work at a finer grain; trees keep large cells (fewer draw calls).
+ * Cells are runtime-only: the foliage file stores a flat instance list per type.
+ */
+const CELL_SIZES: Record<FoliageKind, number> = {
+    conifer: 128,
+    broadleaf: 128,
+    palm: 128,
+    rock: 64,
+    bush: 64,
+    reed: 32,
+    grass: 32,
+    flower: 32,
+};
+
+/**
+ * Kinds that thin out with distance: beyond `start` × cull distance fewer instances are drawn,
+ * down to `min` × density at the cull distance. Instances are shuffled, so drawing a prefix of a
+ * cell is a uniform subset; the vertex shader shrinks the instances at the edge of that prefix so
+ * the density changes smoothly instead of popping.
+ */
+const DENSITY_FALLOFF: Partial<
+    Record<FoliageKind, { start: number; min: number }>
+> = {
+    grass: { start: 0.2, min: 0.2 },
+    flower: { start: 0.25, min: 0.25 },
+    reed: { start: 0.3, min: 0.35 },
+    bush: { start: 0.3, min: 0.35 },
+};
+
+/** Fraction of a cell's instances that are mid-transition in the density fade. */
+const RANK_FADE = 0.12;
+/** Camera movement (m) that triggers re-evaluating cell visibility / LOD / density. */
+const EVAL_MOVE = 2;
+/** Re-evaluate at least this often (s) even when the camera is still. */
+const EVAL_INTERVAL = 0.5;
+/** Per-frame time budget (ms) for (re)building cell instance buffers. */
+const BUILD_BUDGET_MS = 4;
+/**
+ * Far chunks: cells × cells blocks whose instances are drawn with the far LOD as one batch once the
+ * whole block is beyond the far LOD distance (distant forests become a few draw calls).
+ */
+const CHUNK_CELLS = 4;
+/** Default distance (m) within which foliage casts shadows (GraphicsSettings.foliage_shadow_distance). */
+const DEFAULT_SHADOW_DISTANCE = 120;
 
 type Cell = {
+    /** `${size}:${cx},${cz}` — also the undo snapshot id. */
     key: string;
     cx: number;
     cz: number;
     data: number[];
     mesh: THREE.InstancedMesh | null;
+    /** Instances the mesh's buffers can hold (reused while the cell changes). */
+    capacity: number;
+    /** Instances written into the mesh buffers. */
+    built: number;
     dirty: boolean;
+    queued: boolean;
     lod: number;
-    box: THREE.Box3;
+    /** Tight instance bounds (incl. model extents) once built; the cell footprint before that. */
+    bounds: THREE.Box3;
+    /** Evaluation stamp while listed in renderer.shown. */
+    shownStamp: number;
+    /** Evaluation stamp while a far chunk draws this cell's instances. */
+    coveredStamp: number;
+    /** While covered: build the cell anyway (the chunk is about to hand over to its cells). */
+    prebuild: boolean;
+    /** Far chunk this cell belongs to (null for kinds without a far LOD, and for chunks). */
+    chunk: Chunk | null;
 };
+
+/** A far-LOD batch over CHUNK_CELLS² cells; `data` is only filled while building. */
+type Chunk = Cell & { members: Cell[]; gx: number; gz: number };
 
 type TypeRenderer = {
     type: FoliageType;
+    cellSize: number;
     lods: THREE.BufferGeometry[];
+    /**
+     * Geometry actually drawn per LOD. For procedural meshes LOD0 is LOD0 + a slightly shrunk LOD1
+     * appended; the main pass draws the first range and the shadow pass the cheap second one.
+     */
+    drawLods: THREE.BufferGeometry[];
+    shadowProxy: {
+        geometry: THREE.BufferGeometry;
+        start: number;
+        count: number;
+        main: number;
+    } | null;
     lodDistances: number[];
     /** Material(s) per LOD — procedural LODs share one material, baked models have one set per LOD. */
     lodMaterials: (THREE.Material | THREE.Material[])[];
@@ -35,6 +110,48 @@ type TypeRenderer = {
     model: boolean;
     disposed: boolean;
     cells: Map<string, Cell>;
+    /** Same cells by packed grid index (fast lookups while evaluating). */
+    grid: Map<number, Cell>;
+    /** Far chunks by packed chunk index (kinds with ≥ 3 LODs). */
+    chunks: Map<number, Chunk>;
+    /** Union of every cell footprint that ever held data (hierarchical early-out). */
+    extent: THREE.Box3;
+    /** Cells currently shown (mesh.visible = true). */
+    shown: Cell[];
+    /** Distance fade / density falloff (per instance) for small foliage. */
+    fade: boolean;
+    falloff: { start: number; min: number } | null;
+    /** Largest distance of any LOD vertex from the instance origin, at scale 1. */
+    radius: number;
+    /** Per-type shader uniforms (updated in place, e.g. when the cull distance changes). */
+    uniforms: {
+        uFadeEnd: { value: number };
+        uFalloff: { value: THREE.Vector2 };
+    };
+};
+
+export type FoliageStats = {
+    /** Stored instances (all types). */
+    instances: number;
+    /** Instances submitted for drawing in the main pass (frustum-culled cells excluded). */
+    drawnInstances: number;
+    /** Main-pass foliage draw calls. */
+    drawCalls: number;
+    /** Main-pass foliage triangles. */
+    triangles: number;
+    /** Cells casting shadows (each costs a draw call per shadow pass when in the shadow frustum). */
+    shadowCasters: number;
+    /** Cells with a mesh / cells shown / cells total. */
+    meshes: number;
+    shownCells: number;
+    cells: number;
+    /** Cells waiting to be (re)built. */
+    pendingBuilds: number;
+    /** Main-pass draw calls / triangles / instances per foliage type name. */
+    byType: Record<
+        string,
+        { drawCalls: number; triangles: number; instances: number }
+    >;
 };
 
 export type FoliagePlacementContext = {
@@ -141,22 +258,72 @@ function affinityGroup(kind: string): keyof typeof LAND_COVER_AFFINITY {
  */
 export class Foliage {
     readonly group = new THREE.Group();
-    densityScale = 1;
-    distanceScale = 1;
     /** Called before a cell's instance list changes (used for undo snapshots). */
     onBeforeModify: ((typeId: number, cellKey: string) => void) | null = null;
     private renderers = new Map<number, TypeRenderer>();
-    private orphaned = new Map<number, Map<string, number[]>>();
+    /** Instances of types that are currently not in the type list (kept for saving / re-adding). */
+    private orphaned = new Map<number, number[]>();
     private uniforms = {
         uTime: { value: 0 },
         uWind: { value: 0.4 },
         uCamPos: { value: new THREE.Vector3() },
+        uFadeScale: { value: 1 },
+        uDensity: { value: 1 },
     };
     private gltf = new GLTFLoader();
     private random = mulberry32(Date.now() & 0xffff);
+    private density = 1;
+    private shadowDistance = DEFAULT_SHADOW_DISTANCE;
+    private lodBias = 1;
+    /** Forces a full re-evaluation of cells on the next update(). */
+    private needsEval = true;
+    private evalStamp = 0;
+    private evalTimer = 0;
+    private readonly lastEvalPos = new THREE.Vector3(Infinity, 0, 0);
+    private readonly queue: { renderer: TypeRenderer; cell: Cell }[] = [];
+    private lastCamera: THREE.Camera | null = null;
 
     constructor() {
         this.group.name = 'Foliage';
+    }
+
+    /** Fraction of instances drawn (GraphicsSettings.foliage_density). */
+    get densityScale(): number {
+        return this.density;
+    }
+
+    set densityScale(value: number) {
+        this.density = Math.max(0, value);
+        this.uniforms.uDensity.value = this.density;
+        this.needsEval = true;
+    }
+
+    /** Multiplier on every type's cull distance (GraphicsSettings.foliage_distance). */
+    get distanceScale(): number {
+        return this.uniforms.uFadeScale.value;
+    }
+
+    set distanceScale(value: number) {
+        this.uniforms.uFadeScale.value = Math.max(0.01, value);
+        this.needsEval = true;
+    }
+
+    /** Foliage further than this (m) casts no shadows (GraphicsSettings.foliage_shadow_distance). */
+    setShadowDistance(metres: number | null | undefined): void {
+        this.shadowDistance =
+            typeof metres === 'number' && Number.isFinite(metres)
+                ? Math.max(0, metres)
+                : DEFAULT_SHADOW_DISTANCE;
+        this.needsEval = true;
+    }
+
+    /** > 1 keeps detailed LODs further away, < 1 switches earlier (GraphicsSettings.foliage_lod_bias). */
+    setLodBias(bias: number | null | undefined): void {
+        this.lodBias =
+            typeof bias === 'number' && Number.isFinite(bias) && bias > 0
+                ? bias
+                : 1;
+        this.needsEval = true;
     }
 
     setTypes(types: FoliageType[]): void {
@@ -165,13 +332,7 @@ export class Foliage {
         for (const [id, renderer] of this.renderers) {
             if (!keep.has(id)) {
                 // Keep the data so re-adding the type (or saving) doesn't lose placements.
-                const cells = new Map<string, number[]>();
-
-                for (const cell of renderer.cells.values()) {
-                    cells.set(cell.key, cell.data);
-                }
-
-                this.orphaned.set(id, cells);
+                this.orphaned.set(id, flatten(renderer));
                 this.disposeRenderer(renderer);
                 this.renderers.delete(id);
             }
@@ -181,32 +342,31 @@ export class Foliage {
             const existing = this.renderers.get(type.id);
 
             if (existing && sameVisuals(existing.type, type)) {
+                // Cheap in-place update (editor sliders): cull distance, shadows, placement rules.
                 existing.type = type;
+                existing.uniforms.uFadeEnd.value = type.cull_distance;
                 continue;
             }
 
-            const cells = new Map<string, Cell>();
+            let flat: number[] | undefined;
 
             if (existing) {
-                for (const cell of existing.cells.values()) {
-                    cells.set(cell.key, { ...cell, mesh: null, dirty: true });
-                }
-
+                flat = flatten(existing);
                 this.disposeRenderer(existing);
             } else {
-                const orphan = this.orphaned.get(type.id);
-
-                if (orphan) {
-                    for (const [key, data] of orphan) {
-                        cells.set(key, this.makeCell(key, data));
-                    }
-
-                    this.orphaned.delete(type.id);
-                }
+                flat = this.orphaned.get(type.id);
+                this.orphaned.delete(type.id);
             }
 
-            this.renderers.set(type.id, this.createRenderer(type, cells));
+            const renderer = this.createRenderer(type);
+            this.renderers.set(type.id, renderer);
+
+            if (flat?.length) {
+                this.insertFlat(renderer, flat);
+            }
         }
+
+        this.needsEval = true;
     }
 
     load(file: FoliageFile | null): void {
@@ -215,10 +375,20 @@ export class Foliage {
                 this.removeCellMesh(cell);
             }
 
+            for (const chunk of renderer.chunks.values()) {
+                this.removeCellMesh(chunk);
+            }
+
             renderer.cells.clear();
+            renderer.grid.clear();
+            renderer.chunks.clear();
+            renderer.shown = [];
+            renderer.extent.makeEmpty();
         }
 
+        this.queue.length = 0;
         this.orphaned.clear();
+        this.needsEval = true;
 
         if (!file) {
             return;
@@ -227,28 +397,14 @@ export class Foliage {
         for (const [id, flat] of Object.entries(file.instances)) {
             const typeId = Number(id);
             const renderer = this.renderers.get(typeId);
-            const target = renderer ? null : new Map<string, number[]>();
 
-            for (
-                let i = 0;
-                i + FOLIAGE_STRIDE <= flat.length;
-                i += FOLIAGE_STRIDE
-            ) {
-                const key = cellKey(flat[i], flat[i + 2]);
-
-                if (renderer) {
-                    this.cellFor(renderer, key).data.push(
-                        ...flat.slice(i, i + FOLIAGE_STRIDE),
-                    );
-                } else {
-                    const list = target!.get(key) ?? [];
-                    list.push(...flat.slice(i, i + FOLIAGE_STRIDE));
-                    target!.set(key, list);
-                }
-            }
-
-            if (target) {
-                this.orphaned.set(typeId, target);
+            if (renderer) {
+                this.insertFlat(renderer, flat);
+            } else {
+                this.orphaned.set(
+                    typeId,
+                    flat.slice(0, flat.length - (flat.length % FOLIAGE_STRIDE)),
+                );
             }
         }
     }
@@ -271,10 +427,8 @@ export class Foliage {
             }
         }
 
-        for (const [id, cells] of this.orphaned) {
-            for (const data of cells.values()) {
-                add(id, data);
-            }
+        for (const [id, flat] of this.orphaned) {
+            add(id, flat);
         }
 
         return { version: 1, instances };
@@ -431,7 +585,7 @@ export class Foliage {
             for (const cell of renderer.cells.values()) {
                 this.onBeforeModify?.(id, cell.key);
                 cell.data = [];
-                cell.dirty = true;
+                this.markDirty(renderer, cell);
             }
 
             let count = 0;
@@ -708,7 +862,7 @@ export class Foliage {
 
                 if (changed) {
                     cell.data = next;
-                    cell.dirty = true;
+                    this.markDirty(renderer, cell);
                 }
             }
         }
@@ -725,17 +879,20 @@ export class Foliage {
         const normal = new THREE.Vector3();
 
         for (const renderer of this.renderers.values()) {
+            const size = renderer.cellSize;
+
             for (const cell of renderer.cells.values()) {
                 if (
-                    cell.box.max.x < minX ||
-                    cell.box.min.x > maxX ||
-                    cell.box.max.z < minZ ||
-                    cell.box.min.z > maxZ
+                    (cell.cx + 1) * size < minX ||
+                    cell.cx * size > maxX ||
+                    (cell.cz + 1) * size < minZ ||
+                    cell.cz * size > maxZ
                 ) {
                     continue;
                 }
 
                 const d = cell.data;
+                let changed = false;
 
                 for (let i = 0; i < d.length; i += FOLIAGE_STRIDE) {
                     if (
@@ -755,75 +912,525 @@ export class Foliage {
                         d[i + 6] = -Math.atan2(normal.x, normal.y);
                     }
 
-                    cell.dirty = true;
+                    changed = true;
+                }
+
+                if (changed) {
+                    this.markDirty(renderer, cell);
                 }
             }
         }
     }
 
-    /** Snapshot / restore support for undo (per type + cell). */
+    /**
+     * Snapshot / restore support for undo (per type + cell). Keys come from onBeforeModify; a key
+     * of a different cell size (the type's kind changed since) is resolved by its footprint.
+     */
     captureCell(typeId: number, key: string): number[] {
-        return [...(this.renderers.get(typeId)?.cells.get(key)?.data ?? [])];
+        const renderer = this.renderers.get(typeId);
+        const cell = parseCellKey(key);
+
+        if (!renderer || !cell) {
+            return [];
+        }
+
+        if (cell.size === renderer.cellSize) {
+            return [...(renderer.cells.get(key)?.data ?? [])];
+        }
+
+        const out: number[] = [];
+
+        for (const c of this.cellsInRect(renderer, cell)) {
+            forEachInRect(c.data, cell, (i) => {
+                for (let k = 0; k < FOLIAGE_STRIDE; k++) {
+                    out.push(c.data[i + k]);
+                }
+            });
+        }
+
+        return out;
     }
 
     restoreCell(typeId: number, key: string, data: number[]): void {
         const renderer = this.renderers.get(typeId);
+        const cell = parseCellKey(key);
 
-        if (!renderer) {
+        if (!renderer || !cell) {
             return;
         }
 
-        const cell = this.cellFor(renderer, key);
-        cell.data = [...data];
-        cell.dirty = true;
+        if (cell.size === renderer.cellSize) {
+            const target = this.cellFor(renderer, key);
+            target.data = [...data];
+            this.markDirty(renderer, target);
+
+            return;
+        }
+
+        for (const c of this.cellsInRect(renderer, cell)) {
+            const next: number[] = [];
+            let removed = false;
+
+            for (let i = 0; i < c.data.length; i += FOLIAGE_STRIDE) {
+                if (inRect(c.data[i], c.data[i + 2], cell)) {
+                    removed = true;
+                    continue;
+                }
+
+                for (let k = 0; k < FOLIAGE_STRIDE; k++) {
+                    next.push(c.data[i + k]);
+                }
+            }
+
+            if (removed) {
+                c.data = next;
+                this.markDirty(renderer, c);
+            }
+        }
+
+        this.insertFlat(renderer, data);
+    }
+
+    /** Foliage rendering statistics for the last evaluated camera. */
+    stats(): FoliageStats {
+        const stats: FoliageStats = {
+            instances: 0,
+            drawnInstances: 0,
+            drawCalls: 0,
+            triangles: 0,
+            shadowCasters: 0,
+            meshes: 0,
+            shownCells: 0,
+            cells: 0,
+            pendingBuilds: this.queue.length,
+            byType: {},
+        };
+        const camera = this.lastCamera;
+
+        if (camera) {
+            camera.updateMatrixWorld();
+            _projScreen.multiplyMatrices(
+                camera.projectionMatrix,
+                camera.matrixWorldInverse,
+            );
+            _frustum.setFromProjectionMatrix(_projScreen);
+        }
+
+        for (const renderer of this.renderers.values()) {
+            stats.cells += renderer.cells.size;
+            const typeStats = (stats.byType[renderer.type.name] ??= {
+                drawCalls: 0,
+                triangles: 0,
+                instances: 0,
+            });
+
+            for (const cell of renderer.cells.values()) {
+                stats.instances += cell.data.length / FOLIAGE_STRIDE;
+                stats.meshes += cell.mesh ? 1 : 0;
+            }
+
+            for (const cell of renderer.shown) {
+                const mesh = cell.mesh;
+
+                if (!mesh?.visible) {
+                    continue;
+                }
+
+                stats.shownCells++;
+                stats.shadowCasters += mesh.castShadow ? 1 : 0;
+
+                if (
+                    camera &&
+                    !_frustum.intersectsSphere(mesh.boundingSphere!)
+                ) {
+                    continue;
+                }
+
+                const geometry = mesh.geometry;
+                const groups = Array.isArray(mesh.material)
+                    ? Math.max(1, geometry.groups.length)
+                    : 1;
+                const indexCount = geometry.index
+                    ? Math.min(geometry.drawRange.count, geometry.index.count)
+                    : geometry.getAttribute('position').count;
+                const triangles = (indexCount / 3) * mesh.count;
+                stats.drawnInstances += mesh.count;
+                stats.drawCalls += groups;
+                stats.triangles += triangles;
+                typeStats.drawCalls += groups;
+                typeStats.triangles += triangles;
+                typeStats.instances += mesh.count;
+            }
+        }
+
+        return stats;
     }
 
     update(dt: number, camera: THREE.Camera): void {
         this.uniforms.uTime.value += dt;
         this.uniforms.uCamPos.value.copy(camera.position);
-        const cam = camera.position;
+        this.lastCamera = camera;
+        this.evalTimer -= dt;
+
+        // Visibility / LOD / density / shadows only change with distance, so cells are re-evaluated
+        // when the camera moved a bit (or something changed), not every frame.
+        if (
+            this.needsEval ||
+            this.evalTimer <= 0 ||
+            camera.position.distanceToSquared(this.lastEvalPos) >
+                EVAL_MOVE * EVAL_MOVE
+        ) {
+            this.evaluate(camera.position);
+        }
+
+        if (this.queue.length) {
+            this.processQueue(camera);
+        }
+    }
+
+    private evaluate(cam: THREE.Vector3): void {
+        this.needsEval = false;
+        this.evalTimer = EVAL_INTERVAL;
+        this.lastEvalPos.copy(cam);
+        const stamp = ++this.evalStamp;
 
         for (const renderer of this.renderers.values()) {
             const cull = renderer.type.cull_distance * this.distanceScale;
+            const previous = renderer.shown;
+            renderer.shown = [];
 
-            for (const cell of renderer.cells.values()) {
-                const dist = cell.box.distanceToPoint(cam);
-                const visible = dist < cull && cell.data.length > 0;
-
-                if (!visible) {
-                    if (cell.mesh) {
-                        cell.mesh.visible = false;
-                    }
-
-                    continue;
-                }
-
-                let lod = 0;
-
-                for (let l = renderer.lodDistances.length - 1; l > 0; l--) {
-                    if (dist > renderer.lodDistances[l] * cull) {
-                        lod = l;
-                        break;
+            // Whole type out of range (e.g. grass while flying high): skip its cells entirely.
+            if (
+                !renderer.extent.isEmpty() &&
+                renderer.extent.distanceToPoint(cam) < cull
+            ) {
+                if (renderer.lodDistances.length >= 3) {
+                    for (const chunk of renderer.chunks.values()) {
+                        this.evaluateChunk(renderer, chunk, cam, cull, stamp);
                     }
                 }
 
-                if (cell.dirty || !cell.mesh) {
-                    this.buildCellMesh(renderer, cell, lod);
-                } else if (lod !== cell.lod) {
-                    cell.mesh.geometry = renderer.lods[lod];
-                    cell.mesh.material = lodMaterial(renderer, lod);
-                    cell.lod = lod;
-                }
+                const size = renderer.cellSize;
+                const c0 = Math.floor((cam.x - cull) / size);
+                const c1 = Math.floor((cam.x + cull) / size);
+                const r0 = Math.floor((cam.z - cull) / size);
+                const r1 = Math.floor((cam.z + cull) / size);
 
-                if (cell.mesh) {
-                    cell.mesh.visible = true;
-                    const total = cell.data.length / FOLIAGE_STRIDE;
-                    cell.mesh.count = Math.max(
-                        0,
-                        Math.floor(total * this.densityScale),
-                    );
+                if ((c1 - c0 + 1) * (r1 - r0 + 1) < renderer.cells.size) {
+                    for (let cz = r0; cz <= r1; cz++) {
+                        for (let cx = c0; cx <= c1; cx++) {
+                            const cell = renderer.grid.get(gridIndex(cx, cz));
+
+                            if (cell) {
+                                this.evaluateCell(
+                                    renderer,
+                                    cell,
+                                    cam,
+                                    cull,
+                                    stamp,
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    for (const cell of renderer.cells.values()) {
+                        this.evaluateCell(renderer, cell, cam, cull, stamp);
+                    }
                 }
             }
+
+            for (const cell of previous) {
+                if (cell.shownStamp !== stamp && cell.mesh) {
+                    cell.mesh.visible = false;
+                }
+            }
+        }
+
+        if (this.queue.length > 1) {
+            this.queue.sort(
+                (a, b) =>
+                    a.cell.bounds.distanceToPoint(cam) -
+                    b.cell.bounds.distanceToPoint(cam),
+            );
+        }
+    }
+
+    private evaluateCell(
+        renderer: TypeRenderer,
+        cell: Cell,
+        cam: THREE.Vector3,
+        cull: number,
+        stamp: number,
+    ): void {
+        if (!cell.data.length) {
+            if (cell.mesh) {
+                this.removeCellMesh(cell);
+            }
+
+            return;
+        }
+
+        const dist = cell.bounds.distanceToPoint(cam);
+
+        if (dist >= cull) {
+            return;
+        }
+
+        const covered = cell.coveredStamp === stamp;
+
+        if (covered && !cell.prebuild) {
+            return;
+        }
+
+        if ((cell.dirty || !cell.mesh) && !cell.queued) {
+            cell.queued = true;
+            this.queue.push({ renderer, cell });
+        }
+
+        if (cell.mesh && !covered) {
+            this.applyCell(renderer, cell, cam, cull, dist, stamp);
+        }
+    }
+
+    /**
+     * Shows a far chunk instead of its cells when the whole chunk is beyond the far LOD distance
+     * (and inside the cull distance). Handovers never leave holes: cells stay visible until the
+     * chunk is built, and the chunk stays visible until its cells are built.
+     */
+    private evaluateChunk(
+        renderer: TypeRenderer,
+        chunk: Chunk,
+        cam: THREE.Vector3,
+        cull: number,
+        stamp: number,
+    ): void {
+        let count = 0;
+
+        for (const cell of chunk.members) {
+            count += cell.data.length;
+        }
+
+        if (!count) {
+            this.removeCellMesh(chunk);
+
+            return;
+        }
+
+        const b = chunk.bounds;
+        const near = b.distanceToPoint(cam);
+        const farLod = renderer.lodDistances.length - 1;
+        const farStart = renderer.lodDistances[farLod] * cull * this.lodBias;
+        // Instances past the cull distance are shrunk away in the vertex shader, so a chunk may
+        // straddle it.
+        const eligible = near > farStart && near < cull;
+        let prebuild = false;
+
+        if (eligible) {
+            if ((chunk.dirty || !chunk.mesh) && !chunk.queued) {
+                chunk.queued = true;
+                this.queue.push({ renderer, cell: chunk });
+            }
+
+            if (!chunk.mesh) {
+                return;
+            }
+        } else {
+            // Leaving far range: keep the chunk until every member in range has a mesh.
+            if (!chunk.mesh?.visible || near >= cull) {
+                return;
+            }
+
+            const pending = chunk.members.some(
+                (cell) =>
+                    cell.data.length > 0 &&
+                    !cell.mesh &&
+                    cell.bounds.distanceToPoint(cam) < cull,
+            );
+
+            if (!pending) {
+                return;
+            }
+
+            prebuild = true;
+        }
+
+        for (const cell of chunk.members) {
+            cell.coveredStamp = stamp;
+            cell.prebuild = prebuild;
+        }
+
+        this.applyCell(
+            renderer,
+            chunk,
+            cam,
+            cull,
+            Math.max(near, farStart + 1),
+            stamp,
+        );
+    }
+
+    private lodFor(renderer: TypeRenderer, dist: number, cull: number): number {
+        const lodScale = cull * this.lodBias;
+
+        for (let l = renderer.lodDistances.length - 1; l > 0; l--) {
+            if (dist > renderer.lodDistances[l] * lodScale) {
+                return l;
+            }
+        }
+
+        return 0;
+    }
+
+    /** Applies LOD, shadow casting and instance count to a built cell and marks it shown. */
+    private applyCell(
+        renderer: TypeRenderer,
+        cell: Cell,
+        cam: THREE.Vector3,
+        cull: number,
+        dist: number,
+        stamp: number,
+    ): void {
+        const mesh = cell.mesh!;
+        const lod = this.lodFor(renderer, dist, cull);
+
+        if (lod !== cell.lod || mesh.geometry !== renderer.drawLods[lod]) {
+            mesh.geometry = renderer.drawLods[lod];
+            mesh.material = lodMaterial(renderer, lod);
+            cell.lod = lod;
+        }
+
+        // Horizontal distance: the shadow map is centred on the ground, so an elevated editor
+        // camera still gets shadows below it.
+        const b = cell.bounds;
+        const sx = Math.max(b.min.x - cam.x, 0, cam.x - b.max.x);
+        const sz = Math.max(b.min.z - cam.z, 0, cam.z - b.max.z);
+        mesh.castShadow =
+            renderer.type.cast_shadows &&
+            lod === 0 &&
+            sx * sx + sz * sz < this.shadowDistance * this.shadowDistance;
+        mesh.count = this.drawCount(renderer, cell, cam, cull);
+        mesh.visible = mesh.count > 0;
+
+        if (cell.shownStamp !== stamp) {
+            cell.shownStamp = stamp;
+            renderer.shown.push(cell);
+        }
+    }
+
+    /**
+     * Instances to draw: a prefix of the (shuffled) cell. Small foliage thins out with distance; the
+     * count is an upper bound (nearest point of the cell, minus the re-evaluation slack) and the
+     * vertex shader fades the instances at the end of the prefix.
+     */
+    private drawCount(
+        renderer: TypeRenderer,
+        cell: Cell,
+        cam: THREE.Vector3,
+        cull: number,
+    ): number {
+        const built = cell.built;
+        const falloff = renderer.falloff;
+
+        if (!falloff || !renderer.fade) {
+            return Math.max(
+                0,
+                Math.min(built, Math.floor(built * this.density)),
+            );
+        }
+
+        const b = cell.bounds;
+        const dx = Math.max(b.min.x - cam.x, 0, cam.x - b.max.x);
+        const dz = Math.max(b.min.z - cam.z, 0, cam.z - b.max.z);
+        const near = Math.max(0, Math.hypot(dx, dz) - EVAL_MOVE);
+        const k =
+            1 - (1 - falloff.min) * smooth01(falloff.start * cull, cull, near);
+        const target = Math.min(1, this.density * k * (1 + RANK_FADE));
+
+        return Math.min(built, Math.ceil(target * built));
+    }
+
+    /** (Re)builds queued cells nearest-first within a per-frame time budget. */
+    private processQueue(camera: THREE.Camera): void {
+        const start = performance.now();
+        let built = 0;
+        camera.updateMatrixWorld();
+        _projScreen.multiplyMatrices(
+            camera.projectionMatrix,
+            camera.matrixWorldInverse,
+        );
+        _frustum.setFromProjectionMatrix(_projScreen);
+
+        // Cells in view first (the queue is already sorted by distance).
+        let order = this.queue;
+
+        if (this.queue.length > 1) {
+            const inView = this.queue.filter(({ cell }) =>
+                _frustum.intersectsBox(cell.bounds),
+            );
+
+            if (inView.length && inView.length < this.queue.length) {
+                const set = new Set(inView);
+                order = [...inView, ...this.queue.filter((e) => !set.has(e))];
+            }
+        }
+
+        let i = 0;
+
+        for (; i < order.length; i++) {
+            if (built > 0 && performance.now() - start > BUILD_BUDGET_MS) {
+                break;
+            }
+
+            const { renderer, cell } = order[i];
+            cell.queued = false;
+
+            if (renderer.disposed) {
+                continue;
+            }
+
+            if (isChunk(cell)) {
+                if (renderer.chunks.get(gridIndex(cell.gx, cell.gz)) === cell) {
+                    this.buildChunkMesh(renderer, cell);
+                    built++;
+                    // Shown by the next evaluation (its cells stay visible meanwhile).
+                    this.needsEval = true;
+                }
+
+                continue;
+            }
+
+            if (renderer.cells.get(cell.key) !== cell) {
+                continue;
+            }
+
+            this.buildCellMesh(renderer, cell);
+            built++;
+
+            if (!cell.mesh || cell.coveredStamp === this.evalStamp) {
+                if (cell.mesh && cell.coveredStamp === this.evalStamp) {
+                    cell.mesh.visible = false;
+                }
+
+                continue;
+            }
+
+            const cam = camera.position;
+            const cull = renderer.type.cull_distance * this.distanceScale;
+            const dist = cell.bounds.distanceToPoint(cam);
+
+            if (dist < cull) {
+                this.applyCell(renderer, cell, cam, cull, dist, this.evalStamp);
+            } else {
+                cell.mesh.visible = false;
+            }
+        }
+
+        // `order` may be the queue itself: keep the unprocessed tail.
+        const rest = order.slice(i);
+        this.queue.length = 0;
+
+        for (const entry of rest) {
+            this.queue.push(entry);
         }
     }
 
@@ -871,7 +1478,7 @@ export class Foliage {
         const tiltZ = type.align_to_normal
             ? -Math.atan2(normal.x, normal.y)
             : 0;
-        const key = cellKey(x, z);
+        const key = cellKey(renderer.cellSize, x, z);
         this.onBeforeModify?.(type.id, key);
         const cell = this.cellFor(renderer, key);
 
@@ -894,7 +1501,7 @@ export class Foliage {
             );
         }
 
-        cell.dirty = true;
+        this.markDirty(renderer, cell);
 
         return true;
     }
@@ -954,14 +1561,24 @@ export class Foliage {
         z: number,
         radius: number,
     ): Generator<Cell> {
-        const c0 = Math.floor((x - radius) / CELL_SIZE);
-        const c1 = Math.floor((x + radius) / CELL_SIZE);
-        const r0 = Math.floor((z - radius) / CELL_SIZE);
-        const r1 = Math.floor((z + radius) / CELL_SIZE);
+        yield* this.cellsInRect(renderer, {
+            x0: x - radius,
+            z0: z - radius,
+            x1: x + radius,
+            z1: z + radius,
+        });
+    }
+
+    private *cellsInRect(renderer: TypeRenderer, rect: Rect): Generator<Cell> {
+        const size = renderer.cellSize;
+        const c0 = Math.floor(rect.x0 / size);
+        const c1 = Math.floor(rect.x1 / size);
+        const r0 = Math.floor(rect.z0 / size);
+        const r1 = Math.floor(rect.z1 / size);
 
         for (let cz = r0; cz <= r1; cz++) {
             for (let cx = c0; cx <= c1; cx++) {
-                const cell = renderer.cells.get(`${cx},${cz}`);
+                const cell = renderer.grid.get(gridIndex(cx, cz));
 
                 if (cell) {
                     yield cell;
@@ -974,91 +1591,299 @@ export class Foliage {
         let cell = renderer.cells.get(key);
 
         if (!cell) {
-            cell = this.makeCell(key, []);
+            cell = this.makeCell(renderer, key);
             renderer.cells.set(key, cell);
+            renderer.grid.set(gridIndex(cell.cx, cell.cz), cell);
+            cell.chunk = this.chunkFor(renderer, cell);
+            cell.chunk.members.push(cell);
         }
 
         return cell;
     }
 
-    private makeCell(key: string, data: number[]): Cell {
-        const [cx, cz] = key.split(',').map(Number);
+    private chunkFor(renderer: TypeRenderer, cell: Cell): Chunk {
+        const gx = Math.floor(cell.cx / CHUNK_CELLS);
+        const gz = Math.floor(cell.cz / CHUNK_CELLS);
+        const index = gridIndex(gx, gz);
+        let chunk = renderer.chunks.get(index);
 
-        return {
-            key,
-            cx,
-            cz,
-            data,
-            mesh: null,
-            dirty: true,
-            lod: 0,
-            box: new THREE.Box3(
-                new THREE.Vector3(cx * CELL_SIZE, -1e4, cz * CELL_SIZE),
-                new THREE.Vector3(
-                    (cx + 1) * CELL_SIZE,
-                    1e4,
-                    (cz + 1) * CELL_SIZE,
-                ),
-            ),
-        };
+        if (!chunk) {
+            const size = renderer.cellSize * CHUNK_CELLS;
+            chunk = {
+                ...this.makeCell(renderer, `${size}:${gx},${gz}`),
+                key: `far${size}:${gx},${gz}`,
+                members: [],
+                gx,
+                gz,
+            };
+            chunk.bounds.min.set(gx * size, -1e4, gz * size);
+            chunk.bounds.max.set((gx + 1) * size, 1e4, (gz + 1) * size);
+            renderer.chunks.set(index, chunk);
+        }
+
+        return chunk;
     }
 
-    private buildCellMesh(
-        renderer: TypeRenderer,
-        cell: Cell,
-        lod: number,
-    ): void {
-        const count = cell.data.length / FOLIAGE_STRIDE;
-        this.removeCellMesh(cell);
-        cell.dirty = false;
-        cell.lod = lod;
+    /** Builds a far chunk from its cells, interleaved by rank so any prefix stays uniform. */
+    private buildChunkMesh(renderer: TypeRenderer, chunk: Chunk): void {
+        const entries: { rank: number; cell: Cell; offset: number }[] = [];
 
-        if (count === 0) {
+        for (const cell of chunk.members) {
+            const n = cell.data.length / FOLIAGE_STRIDE;
+
+            for (let i = 0; i < n; i++) {
+                entries.push({
+                    rank: (i + 0.5) / n,
+                    cell,
+                    offset: i * FOLIAGE_STRIDE,
+                });
+            }
+        }
+
+        entries.sort((a, b) => a.rank - b.rank);
+        const data: number[] = [];
+
+        for (const { cell, offset } of entries) {
+            for (let k = 0; k < FOLIAGE_STRIDE; k++) {
+                data.push(cell.data[offset + k]);
+            }
+        }
+
+        chunk.lod = renderer.lodDistances.length - 1;
+        chunk.data = data;
+        this.buildCellMesh(renderer, chunk);
+        // The instance data lives in the cells; the chunk only keeps its GPU buffers.
+        chunk.data = [];
+
+        if (chunk.mesh) {
+            chunk.mesh.castShadow = false;
+            chunk.mesh.visible = false;
+        }
+    }
+
+    private makeCell(renderer: TypeRenderer, key: string): Cell {
+        const parsed = parseCellKey(key)!;
+        const cell: Cell = {
+            key,
+            cx: parsed.cx,
+            cz: parsed.cz,
+            data: [],
+            mesh: null,
+            capacity: 0,
+            built: 0,
+            dirty: true,
+            queued: false,
+            lod: 0,
+            bounds: new THREE.Box3(),
+            shownStamp: -1,
+            coveredStamp: -1,
+            prebuild: false,
+            chunk: null,
+        };
+        this.resetBounds(renderer, cell);
+
+        return cell;
+    }
+
+    /** Footprint bounds (any height) until the cell is built and gets tight bounds. */
+    private resetBounds(renderer: TypeRenderer, cell: Cell): void {
+        const size = renderer.cellSize;
+        cell.bounds.min.set(cell.cx * size, -1e4, cell.cz * size);
+        cell.bounds.max.set((cell.cx + 1) * size, 1e4, (cell.cz + 1) * size);
+    }
+
+    /** Appends a flat instance list, bucketing each instance into its cell. */
+    private insertFlat(renderer: TypeRenderer, flat: number[]): void {
+        const size = renderer.cellSize;
+        let last: Cell | null = null;
+
+        for (
+            let i = 0;
+            i + FOLIAGE_STRIDE <= flat.length;
+            i += FOLIAGE_STRIDE
+        ) {
+            const cx = Math.floor(flat[i] / size);
+            const cz = Math.floor(flat[i + 2] / size);
+            let cell: Cell | undefined =
+                last && last.cx === cx && last.cz === cz
+                    ? last
+                    : renderer.grid.get(gridIndex(cx, cz));
+
+            if (!cell) {
+                cell = this.cellFor(renderer, `${size}:${cx},${cz}`);
+            }
+
+            for (let k = 0; k < FOLIAGE_STRIDE; k++) {
+                cell.data.push(flat[i + k]);
+            }
+
+            if (cell !== last) {
+                this.markDirty(renderer, cell);
+                last = cell;
+            }
+        }
+    }
+
+    private markDirty(renderer: TypeRenderer, cell: Cell): void {
+        cell.dirty = true;
+        this.needsEval = true;
+
+        const chunk = cell.chunk;
+
+        if (chunk) {
+            chunk.dirty = true;
+            const size = renderer.cellSize * CHUNK_CELLS;
+            chunk.bounds.min.set(chunk.gx * size, -1e4, chunk.gz * size);
+            chunk.bounds.max.set(
+                (chunk.gx + 1) * size,
+                1e4,
+                (chunk.gz + 1) * size,
+            );
+        }
+
+        if (!cell.data.length) {
+            this.removeCellMesh(cell);
+            this.resetBounds(renderer, cell);
+
             return;
         }
 
-        const mesh = new THREE.InstancedMesh(
-            renderer.lods[lod],
-            lodMaterial(renderer, lod),
-            count,
+        const size = renderer.cellSize;
+        renderer.extent.expandByPoint(
+            _v.set(cell.cx * size, -1e4, cell.cz * size),
         );
-        mesh.castShadow = renderer.type.cast_shadows;
-        mesh.receiveShadow = true;
+        renderer.extent.expandByPoint(
+            _v.set((cell.cx + 1) * size, 1e4, (cell.cz + 1) * size),
+        );
 
-        if (renderer.depthMaterial) {
-            mesh.customDepthMaterial = renderer.depthMaterial;
+        // Edits may move instances outside the tight bounds: widen until rebuilt.
+        const b = cell.bounds;
+        b.min.x = Math.min(b.min.x, cell.cx * size);
+        b.min.z = Math.min(b.min.z, cell.cz * size);
+        b.max.x = Math.max(b.max.x, (cell.cx + 1) * size);
+        b.max.z = Math.max(b.max.z, (cell.cz + 1) * size);
+        b.min.y = -1e4;
+        b.max.y = 1e4;
+    }
+
+    /**
+     * Writes the cell's instances into its InstancedMesh, reusing the existing buffers when they
+     * are large enough (painting grows cells a few instances at a time).
+     */
+    private buildCellMesh(renderer: TypeRenderer, cell: Cell): void {
+        const count = cell.data.length / FOLIAGE_STRIDE;
+        cell.dirty = false;
+
+        if (count === 0) {
+            this.removeCellMesh(cell);
+            cell.built = 0;
+
+            return;
         }
 
-        mesh.name = `Foliage_${renderer.type.name}_${cell.key}`;
-        const m = new THREE.Matrix4();
-        const q = new THREE.Quaternion();
-        const e = new THREE.Euler();
-        const p = new THREE.Vector3();
-        const s = new THREE.Vector3();
-        let minY = Infinity;
-        let maxY = -Infinity;
+        let mesh = cell.mesh;
+
+        if (!mesh || count > cell.capacity || count < cell.capacity / 4) {
+            this.removeCellMesh(cell);
+            // Headroom so painting doesn't reallocate on every dab.
+            const capacity = count + Math.ceil(count * 0.25) + 8;
+            mesh = new THREE.InstancedMesh(
+                renderer.drawLods[cell.lod] ?? renderer.drawLods[0],
+                lodMaterial(renderer, cell.lod),
+                capacity,
+            );
+            cell.capacity = capacity;
+            mesh.receiveShadow = true;
+            mesh.frustumCulled = true;
+            mesh.matrixAutoUpdate = false;
+            mesh.name = `Foliage_${renderer.type.name}_${cell.key}`;
+
+            if (renderer.depthMaterial) {
+                mesh.customDepthMaterial = renderer.depthMaterial;
+            }
+
+            if (renderer.fade) {
+                // r = rank of the instance within the cell (0..1): drives the density fade.
+                mesh.instanceColor = new THREE.InstancedBufferAttribute(
+                    new Float32Array(capacity * 3),
+                    3,
+                );
+            }
+
+            mesh.onBeforeShadow = () => {
+                const proxy = renderer.shadowProxy;
+
+                if (proxy && mesh!.geometry === proxy.geometry) {
+                    proxy.geometry.setDrawRange(proxy.start, proxy.count);
+                }
+            };
+            mesh.onAfterShadow = () => {
+                const proxy = renderer.shadowProxy;
+
+                if (proxy && mesh!.geometry === proxy.geometry) {
+                    proxy.geometry.setDrawRange(0, proxy.main);
+                }
+            };
+            mesh.boundingSphere = new THREE.Sphere();
+            mesh.boundingBox = new THREE.Box3();
+            cell.mesh = mesh;
+            this.group.add(mesh);
+        }
+
+        const matrices = mesh.instanceMatrix.array as Float32Array;
+        const ranks = mesh.instanceColor?.array as Float32Array | undefined;
         const d = cell.data;
+        const r = renderer.radius;
+        let minX = Infinity;
+        let minY = Infinity;
+        let minZ = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        let maxZ = -Infinity;
 
         for (let i = 0; i < count; i++) {
             const o = i * FOLIAGE_STRIDE;
-            p.set(d[o], d[o + 1], d[o + 2]);
+            const x = d[o];
+            const y = d[o + 1];
+            const z = d[o + 2];
+            const scale = d[o + 4];
+            _p.set(x, y, z);
             // Yaw first (Y), then tilt to the terrain normal (Z, X).
-            e.set(d[o + 5], d[o + 3], d[o + 6], 'XZY');
-            q.setFromEuler(e);
-            s.setScalar(d[o + 4]);
-            m.compose(p, q, s);
-            mesh.setMatrixAt(i, m);
-            minY = Math.min(minY, p.y);
-            maxY = Math.max(maxY, p.y);
+            _e.set(d[o + 5], d[o + 3], d[o + 6], 'XZY');
+            _q.setFromEuler(_e);
+            _s.setScalar(scale);
+            _m.compose(_p, _q, _s);
+            _m.toArray(matrices, i * 16);
+
+            if (ranks) {
+                ranks[i * 3] = (i + 0.5) / count;
+            }
+
+            const e = r * scale;
+            minX = Math.min(minX, x - e);
+            maxX = Math.max(maxX, x + e);
+            minZ = Math.min(minZ, z - e);
+            maxZ = Math.max(maxZ, z + e);
+            minY = Math.min(minY, y - e * 0.25);
+            maxY = Math.max(maxY, y + e);
         }
 
+        mesh.instanceMatrix.clearUpdateRanges();
+        mesh.instanceMatrix.addUpdateRange(0, count * 16);
         mesh.instanceMatrix.needsUpdate = true;
-        mesh.computeBoundingSphere();
-        mesh.frustumCulled = true;
-        cell.box.min.y = minY - 2;
-        cell.box.max.y = maxY + 30;
-        cell.mesh = mesh;
-        this.group.add(mesh);
+
+        if (mesh.instanceColor) {
+            mesh.instanceColor.clearUpdateRanges();
+            mesh.instanceColor.addUpdateRange(0, count * 3);
+            mesh.instanceColor.needsUpdate = true;
+        }
+
+        cell.built = count;
+        mesh.count = count;
+        cell.bounds.min.set(minX, minY, minZ);
+        cell.bounds.max.set(maxX, maxY, maxZ);
+        mesh.boundingBox!.copy(cell.bounds);
+        cell.bounds.getBoundingSphere(mesh.boundingSphere!);
     }
 
     private removeCellMesh(cell: Cell): void {
@@ -1066,13 +1891,12 @@ export class Foliage {
             this.group.remove(cell.mesh);
             cell.mesh.dispose();
             cell.mesh = null;
+            cell.capacity = 0;
+            cell.built = 0;
         }
     }
 
-    private createRenderer(
-        type: FoliageType,
-        cells: Map<string, Cell>,
-    ): TypeRenderer {
+    private createRenderer(type: FoliageType): TypeRenderer {
         const set = createFoliageGeometry(
             type.kind,
             new THREE.Color(type.color),
@@ -1085,26 +1909,54 @@ export class Foliage {
             metalness: 0,
             side: set.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
         });
-        const fade =
-            type.kind === 'grass' ||
-            type.kind === 'flower' ||
-            type.kind === 'reed';
-        this.patchMaterial(material, type, fade);
+        const falloff = DENSITY_FALLOFF[type.kind] ?? null;
+        const renderer: TypeRenderer = {
+            type,
+            cellSize: CELL_SIZES[type.kind] ?? 64,
+            lods: set.lods,
+            drawLods: set.lods,
+            shadowProxy: null,
+            lodDistances: set.lodDistances,
+            lodMaterials: set.lods.map(() => material),
+            depthMaterial: null,
+            model: false,
+            disposed: false,
+            cells: new Map(),
+            grid: new Map(),
+            chunks: new Map(),
+            extent: new THREE.Box3(),
+            shown: [],
+            fade: falloff !== null,
+            falloff,
+            radius: geometryRadius(set.lods),
+            uniforms: {
+                uFadeEnd: { value: type.cull_distance },
+                uFalloff: {
+                    value: new THREE.Vector2(
+                        falloff?.start ?? 1,
+                        falloff?.min ?? 1,
+                    ),
+                },
+            },
+        };
+        this.patchMaterial(material, renderer);
         const depthMaterial = new THREE.MeshDepthMaterial({
             depthPacking: THREE.RGBADepthPacking,
         });
-        this.patchMaterial(depthMaterial, type, fade);
+        this.patchMaterial(depthMaterial, renderer);
+        renderer.depthMaterial = depthMaterial;
 
-        const renderer: TypeRenderer = {
-            type,
-            lods: set.lods,
-            lodDistances: set.lodDistances,
-            lodMaterials: set.lods.map(() => material),
-            depthMaterial,
-            model: false,
-            disposed: false,
-            cells,
-        };
+        // Shadow proxy: the shadow pass of LOD0 draws a slightly shrunk LOD1 instead.
+        if (set.lods.length > 1 && !set.doubleSided) {
+            renderer.shadowProxy = createShadowProxy(set.lods[0], set.lods[1]);
+
+            if (renderer.shadowProxy) {
+                renderer.drawLods = [
+                    renderer.shadowProxy.geometry,
+                    ...set.lods.slice(1),
+                ];
+            }
+        }
 
         if (type.model_url) {
             void this.loadModel(renderer, type.model_url);
@@ -1113,12 +1965,13 @@ export class Foliage {
         return renderer;
     }
 
-    /** Wind sway + distance fade injected into the standard material. */
+    /** Wind sway, distance fade and density falloff injected into a standard / depth material. */
     private patchMaterial(
         material: THREE.Material,
-        type: FoliageType,
-        fade: boolean,
+        renderer: TypeRenderer,
     ): void {
+        const type = renderer.type;
+        const fade = renderer.fade;
         const stiffness =
             type.kind === 'rock'
                 ? 0
@@ -1132,8 +1985,10 @@ export class Foliage {
             shader.uniforms.uTime = this.uniforms.uTime;
             shader.uniforms.uWind = this.uniforms.uWind;
             shader.uniforms.uCamPos = this.uniforms.uCamPos;
-            shader.uniforms.uFadeEnd = { value: type.cull_distance };
-            shader.uniforms.uFadeScale = { value: this.distanceScale };
+            shader.uniforms.uFadeScale = this.uniforms.uFadeScale;
+            shader.uniforms.uDensity = this.uniforms.uDensity;
+            shader.uniforms.uFadeEnd = renderer.uniforms.uFadeEnd;
+            shader.uniforms.uFalloff = renderer.uniforms.uFalloff;
             shader.vertexShader = shader.vertexShader
                 .replace(
                     '#include <common>',
@@ -1143,7 +1998,17 @@ uniform float uTime;
 uniform float uWind;
 uniform vec3 uCamPos;
 uniform float uFadeEnd;
-uniform float uFadeScale;`,
+uniform float uFadeScale;
+uniform float uDensity;
+uniform vec2 uFalloff;`,
+                )
+                // instanceColor carries the per-instance rank (density fade), not a colour.
+                .replace(
+                    '#include <color_vertex>',
+                    THREE.ShaderChunk.color_vertex.replace(
+                        'vColor.rgb *= instanceColor.rgb;',
+                        '',
+                    ),
                 )
                 .replace(
                     '#include <begin_vertex>',
@@ -1159,13 +2024,18 @@ float sway = (sin(uTime * 1.9 + phase) * 0.6 + sin(uTime * 3.7 + phase * 1.7) * 
 float bend = wind * wind * uWind * ${stiffness.toFixed(2)};
 transformed.x += sway * bend * 0.35;
 transformed.z += sway * bend * 0.22;
+float camDist = distance(instPos.xz, uCamPos.xz);
+float fadeEnd = uFadeEnd * uFadeScale;
+float fadeK = 1.0 - smoothstep(fadeEnd * ${fade ? '0.7' : '0.92'}, fadeEnd, camDist);
 ${
     fade
-        ? `float camDist = distance(instPos.xz, uCamPos.xz);
-float fadeK = 1.0 - smoothstep(uFadeEnd * uFadeScale * 0.7, uFadeEnd * uFadeScale, camDist);
-transformed *= fadeK;`
+        ? `#ifdef USE_INSTANCING_COLOR
+float densityT = uDensity * (1.0 - (1.0 - uFalloff.y) * smoothstep(uFalloff.x * fadeEnd, fadeEnd, camDist)) * ${(1 + RANK_FADE).toFixed(3)};
+fadeK *= 1.0 - smoothstep(densityT - ${RANK_FADE.toFixed(3)}, densityT, instanceColor.r);
+#endif`
         : ''
-}`,
+}
+transformed *= fadeK;`,
                 );
 
             // Blade normals are bent upwards; flipping them on back faces would render grass dark.
@@ -1196,7 +2066,7 @@ transformed *= fadeK;`
             );
         };
         material.customProgramCacheKey = () =>
-            `foliage-${stiffness}-${fade}-${material.side}`;
+            `foliage2-${stiffness}-${fade}-${material.side}`;
     }
 
     /**
@@ -1275,10 +2145,6 @@ transformed *= fadeK;`
             }
 
             const type = renderer.type;
-            const fade =
-                type.kind === 'grass' ||
-                type.kind === 'flower' ||
-                type.kind === 'reed';
             const tint = new THREE.Color(type.tint || '#ffffff');
             const unique = new Set(lodMaterials.flat());
 
@@ -1289,15 +2155,19 @@ transformed *= fadeK;`
                     colored.color.multiply(tint);
                 }
 
-                this.patchMaterial(mat, type, fade);
+                this.patchMaterial(mat, renderer);
             }
 
             const previous = {
                 lods: renderer.lods,
+                proxy: renderer.shadowProxy?.geometry ?? null,
                 materials: renderer.lodMaterials,
                 depth: renderer.depthMaterial,
             };
             renderer.lods = lods;
+            renderer.drawLods = lods;
+            renderer.shadowProxy = null;
+            renderer.radius = geometryRadius(lods);
             renderer.lodMaterials = lodMaterials;
             renderer.lodDistances = pickLodDistances(
                 type,
@@ -1307,14 +2177,29 @@ transformed *= fadeK;`
             renderer.depthMaterial = null;
             renderer.model = true;
 
+            // Swap existing meshes over right away (the stand-in geometry is disposed below);
+            // the rebuild then refreshes their bounds for the model's size.
             for (const cell of renderer.cells.values()) {
-                cell.dirty = true;
+                if (cell.mesh) {
+                    cell.lod = Math.min(cell.lod, lods.length - 1);
+                    cell.mesh.geometry = lods[cell.lod];
+                    cell.mesh.material = lodMaterial(renderer, cell.lod);
+                    cell.mesh.customDepthMaterial = undefined;
+                }
+
+                this.markDirty(renderer, cell);
             }
 
-            // Procedural stand-ins are no longer referenced once dirty cells rebuild.
+            for (const chunk of renderer.chunks.values()) {
+                this.removeCellMesh(chunk);
+                chunk.dirty = true;
+            }
+
             for (const g of previous.lods) {
                 g.dispose();
             }
+
+            previous.proxy?.dispose();
 
             for (const m of new Set(previous.materials.flat())) {
                 m.dispose();
@@ -1329,13 +2214,18 @@ transformed *= fadeK;`
     private disposeRenderer(renderer: TypeRenderer): void {
         renderer.disposed = true;
 
-        for (const cell of renderer.cells.values()) {
+        for (const cell of [
+            ...renderer.cells.values(),
+            ...renderer.chunks.values(),
+        ]) {
             this.removeCellMesh(cell);
         }
 
-        for (const g of renderer.lods) {
+        for (const g of new Set([...renderer.lods, ...renderer.drawLods])) {
             g.dispose();
         }
+
+        renderer.shown = [];
 
         for (const m of new Set(renderer.lodMaterials.flat())) {
             if (renderer.model) {
@@ -1404,8 +2294,139 @@ function shuffleInstances(data: number[], rand: () => number): void {
     }
 }
 
-function cellKey(x: number, z: number): string {
-    return `${Math.floor(x / CELL_SIZE)},${Math.floor(z / CELL_SIZE)}`;
+type Rect = { x0: number; z0: number; x1: number; z1: number };
+
+function cellKey(size: number, x: number, z: number): string {
+    return `${size}:${Math.floor(x / size)},${Math.floor(z / size)}`;
+}
+
+/** Parses `${size}:${cx},${cz}` (or a legacy `${cx},${cz}` of the old 128 m grid). */
+function parseCellKey(
+    key: string,
+): (Rect & { size: number; cx: number; cz: number }) | null {
+    const m = /^(?:(\d+(?:\.\d+)?):)?(-?\d+),(-?\d+)$/.exec(key);
+
+    if (!m) {
+        return null;
+    }
+
+    const size = m[1] ? Number(m[1]) : 128;
+    const cx = Number(m[2]);
+    const cz = Number(m[3]);
+
+    return {
+        size,
+        cx,
+        cz,
+        x0: cx * size,
+        z0: cz * size,
+        x1: (cx + 1) * size,
+        z1: (cz + 1) * size,
+    };
+}
+
+/** Whether a position lies in a cell rect (half-open, matching cell bucketing). */
+function inRect(x: number, z: number, r: Rect): boolean {
+    return x >= r.x0 && x < r.x1 && z >= r.z0 && z < r.z1;
+}
+
+function forEachInRect(
+    data: number[],
+    rect: Rect,
+    fn: (offset: number) => void,
+): void {
+    for (let i = 0; i < data.length; i += FOLIAGE_STRIDE) {
+        if (inRect(data[i], data[i + 2], rect)) {
+            fn(i);
+        }
+    }
+}
+
+/** Packs cell grid coordinates into one number (cells span ±32k cells). */
+function gridIndex(cx: number, cz: number): number {
+    return (cx + 32768) * 65536 + (cz + 32768);
+}
+
+function isChunk(cell: Cell): cell is Chunk {
+    return (cell as Chunk).members !== undefined;
+}
+
+/** All instances of a renderer as one flat list. */
+function flatten(renderer: TypeRenderer): number[] {
+    const out: number[] = [];
+
+    for (const cell of renderer.cells.values()) {
+        for (const v of cell.data) {
+            out.push(v);
+        }
+    }
+
+    return out;
+}
+
+/** Largest distance of any vertex from the model origin across all LODs (scale 1). */
+function geometryRadius(lods: THREE.BufferGeometry[]): number {
+    let radius = 0.5;
+
+    for (const geometry of lods) {
+        if (!geometry.boundingSphere) {
+            geometry.computeBoundingSphere();
+        }
+
+        const sphere = geometry.boundingSphere!;
+        radius = Math.max(radius, sphere.center.length() + sphere.radius);
+    }
+
+    return radius;
+}
+
+/**
+ * LOD0 with a slightly shrunk copy of LOD1 appended. The main pass draws the LOD0 range; the shadow
+ * pass switches the draw range to the LOD1 copy, so shadows cost LOD1 triangles. Shrinking it
+ * towards the trunk keeps the proxy inside the detailed mesh (no self-shadowing acne).
+ */
+function createShadowProxy(
+    lod0: THREE.BufferGeometry,
+    lod1: THREE.BufferGeometry,
+): TypeRenderer['shadowProxy'] {
+    if (!lod0.index || !lod1.index) {
+        return null;
+    }
+
+    const names = Object.keys(lod0.attributes);
+
+    if (
+        names.length !== Object.keys(lod1.attributes).length ||
+        names.some((n) => !lod1.getAttribute(n))
+    ) {
+        return null;
+    }
+
+    const proxy = lod1.clone();
+    const pos = proxy.getAttribute('position') as THREE.BufferAttribute;
+
+    for (let i = 0; i < pos.count; i++) {
+        pos.setXYZ(i, pos.getX(i) * 0.9, pos.getY(i) * 0.97, pos.getZ(i) * 0.9);
+    }
+
+    const merged = mergeGeometries([lod0, proxy], false);
+    proxy.dispose();
+
+    if (!merged) {
+        return null;
+    }
+
+    const main = lod0.index.count;
+    merged.setDrawRange(0, main);
+    merged.boundingBox = lod0.boundingBox?.clone() ?? null;
+    merged.boundingSphere = lod0.boundingSphere?.clone() ?? null;
+
+    return {
+        geometry: merged,
+        start: main,
+        count: lod1.index.count,
+        main,
+    };
 }
 
 function sameVisuals(a: FoliageType, b: FoliageType): boolean {
@@ -1418,9 +2439,7 @@ function sameVisuals(a: FoliageType, b: FoliageType): boolean {
             (b.tint || '#ffffff').toLowerCase() &&
         (a.asset?.id ?? null) === (b.asset?.id ?? null) &&
         (a.asset?.lod_distances ?? []).join() ===
-            (b.asset?.lod_distances ?? []).join() &&
-        a.cull_distance === b.cull_distance &&
-        a.cast_shadows === b.cast_shadows
+            (b.asset?.lod_distances ?? []).join()
     );
 }
 
@@ -1686,3 +2705,11 @@ function disposeObject(root: THREE.Object3D): void {
 }
 
 const _normal = new THREE.Vector3();
+const _v = new THREE.Vector3();
+const _p = new THREE.Vector3();
+const _s = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+const _e = new THREE.Euler();
+const _m = new THREE.Matrix4();
+const _frustum = new THREE.Frustum();
+const _projScreen = new THREE.Matrix4();

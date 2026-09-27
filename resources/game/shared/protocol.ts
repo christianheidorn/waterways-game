@@ -27,6 +27,10 @@ export type GameStats = {
     triangles: number;
     position: { x: number; y: number; z: number };
     foliageInstances: number;
+    /** Foliage instances / draw calls / triangles submitted in the main pass (see Foliage.stats()). */
+    foliageDrawn?: number;
+    foliageDrawCalls?: number;
+    foliageTriangles?: number;
     /** Effective render scale (× device pixel ratio) while dynamic resolution is active. */
     renderScale?: number;
     /** GPU time of the last measured frame (ms), when EXT_disjoint_timer_query is available. */

@@ -523,6 +523,10 @@ function buildConifer(
     const span = H - bottom;
     const maxR = H * (0.2 + rng() * 0.05);
 
+    if (lod >= 2) {
+        return farConifer(pal, n3, H, bottom, maxR, baseR, axisAt(H));
+    }
+
     for (let k = 0; k < tiers; k++) {
         const f = k / (tiers - 1);
         const rimY = bottom + span * (k / tiers) * 0.88;
@@ -682,6 +686,10 @@ function buildBroadleaf(
         });
     }
 
+    if (lod >= 2) {
+        return farBroadleaf(pal, n3, blobs, path[0], top, H);
+    }
+
     if (hi) {
         for (let k = 0; k < 2; k++) {
             const d = randomHorizontal(rng);
@@ -767,6 +775,10 @@ function buildPalm(
 
     addTube(trunk, path, radii, hi ? 8 : 5, true);
     const crown = path[segs];
+
+    if (lod >= 2) {
+        return farPalm(pal, n3, rng, crown, H);
+    }
 
     const fronds = new PartBuilder();
     const count = hi ? 9 : 6;
@@ -896,6 +908,10 @@ function buildBush(
     const Hb = 1.45 + rng() * 0.5;
     const b = new PartBuilder();
     const center = new THREE.Vector3(0, Hb * 0.4, 0);
+
+    if (lod >= 2) {
+        return farBush(pal, n3, Hb);
+    }
 
     addBlob(
         b,
@@ -1263,7 +1279,10 @@ function buildRock(
         cuts.push({ n, d: 0.72 + rng() * 0.18 });
     }
 
-    const src = new THREE.IcosahedronGeometry(1, lod === 0 ? 3 : 1);
+    const src = new THREE.IcosahedronGeometry(
+        1,
+        lod === 0 ? 3 : lod === 1 ? 1 : 0,
+    );
     src.deleteAttribute('normal');
     src.deleteAttribute('uv');
     const geo = mergeVertices(src);
@@ -1333,6 +1352,265 @@ function buildRock(
     ];
 }
 
+// ---------------------------------------------------------------------------------------------
+// Far LODs: a handful of triangles per plant so distant forests cost almost nothing. They keep
+// the silhouette, proportions and average colour of the detailed meshes.
+// ---------------------------------------------------------------------------------------------
+
+/** Cone around the Y axis: side fan (+ optional underside fan). aux = 1 on the rim, 0 at the apex. */
+function addCone(
+    b: PartBuilder,
+    cx: number,
+    cz: number,
+    rimY: number,
+    apexY: number,
+    radius: number,
+    sides: number,
+    rot: number,
+    underside: boolean,
+): void {
+    const apex = b.vertex(cx, apexY, cz, 0);
+    const ring: number[] = [];
+
+    for (let j = 0; j < sides; j++) {
+        const a = rot + (j / sides) * TAU;
+        ring.push(
+            b.vertex(
+                cx + Math.cos(a) * radius,
+                rimY,
+                cz + Math.sin(a) * radius,
+                1,
+            ),
+        );
+    }
+
+    for (let j = 0; j < sides; j++) {
+        b.tri(apex, ring[(j + 1) % sides], ring[j]);
+    }
+
+    if (underside) {
+        const under = b.vertex(cx, rimY + (apexY - rimY) * 0.2, cz, -1);
+
+        for (let j = 0; j < sides; j++) {
+            b.tri(under, ring[j], ring[(j + 1) % sides]);
+        }
+    }
+}
+
+function farTrunk(
+    pal: Palette,
+    n3: Noise3,
+    base: THREE.Vector3,
+    top: THREE.Vector3,
+    radius: number,
+): THREE.BufferGeometry {
+    const trunk = new PartBuilder();
+    addTube(trunk, [base, top], [radius, radius * 0.6], 3, false);
+
+    return trunk.finish((p, _n, t, out) => {
+        barkColor(out, pal, n3(p.x * 4, p.y * 0.7, p.z * 4), t);
+
+        return 0.2 * t * t;
+    });
+}
+
+/** Two stacked cones + a 3-sided trunk (≈ 24 triangles). */
+function farConifer(
+    pal: Palette,
+    n3: Noise3,
+    H: number,
+    bottom: number,
+    maxR: number,
+    baseR: number,
+    apex: [number, number],
+): THREE.BufferGeometry[] {
+    const crown = new PartBuilder();
+    const [ax, az] = apex;
+    const span = H - bottom;
+    addCone(
+        crown,
+        ax * 0.3,
+        az * 0.3,
+        bottom,
+        bottom + span * 0.72,
+        maxR,
+        6,
+        0,
+        true,
+    );
+    addCone(crown, ax, az, bottom + span * 0.38, H, maxR * 0.62, 6, 0.5, false);
+
+    return [
+        farTrunk(
+            pal,
+            n3,
+            new THREE.Vector3(0, 0, 0),
+            new THREE.Vector3(ax * 0.3, bottom + span * 0.1, az * 0.3),
+            baseR * 1.3,
+        ),
+        crown.finish((p, n, u, out) => {
+            const hN = clamp01(p.y / H);
+            out.copy(pal.primary);
+            vary(out, n3(p.x * 0.5, p.y * 0.5, p.z * 0.5), 0.15);
+            // Average of the detailed crown: darker inside the tiers, brighter tips.
+            let ao = u < 0 ? 0.3 : 0.78;
+            ao *= lerp(0.72, 1.02, hN) * (0.75 + 0.25 * (n.y * 0.5 + 0.5));
+            out.multiplyScalar(ao);
+
+            return u < 0 ? 0.3 * hN : 0.25 * hN + 0.6 * u;
+        }),
+    ];
+}
+
+/** One ellipsoid enclosing the canopy blobs + a 3-sided trunk (≈ 30 triangles). */
+function farBroadleaf(
+    pal: Palette,
+    n3: Noise3,
+    blobs: { c: THREE.Vector3; r: number }[],
+    base: THREE.Vector3,
+    top: THREE.Vector3,
+    H: number,
+): THREE.BufferGeometry[] {
+    const box = new THREE.Box3();
+
+    for (const bl of blobs) {
+        box.expandByPoint(
+            new THREE.Vector3(
+                bl.c.x - bl.r,
+                bl.c.y - bl.r * 0.82,
+                bl.c.z - bl.r,
+            ),
+        );
+        box.expandByPoint(
+            new THREE.Vector3(
+                bl.c.x + bl.r,
+                bl.c.y + bl.r * 0.82,
+                bl.c.z + bl.r,
+            ),
+        );
+    }
+
+    box.max.y = Math.min(box.max.y, H);
+    const c = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const leaves = new PartBuilder();
+    // Blobs don't fill their bounding box: shrink so the silhouette area matches.
+    addLowEllipsoid(
+        leaves,
+        c,
+        size.x * 0.43,
+        size.y * 0.47,
+        size.z * 0.43,
+        6,
+        2,
+    );
+    const bottom = c.y - size.y * 0.47;
+
+    return [
+        farTrunk(pal, n3, base, top.clone().setY(Math.min(top.y, c.y)), 0.3),
+        leaves.finish((p, n, _aux, out) => {
+            const yN = clamp01((p.y - bottom) / Math.max(0.1, H - bottom));
+            out.copy(pal.primary);
+            vary(out, n3(p.x * 0.45, p.y * 0.45, p.z * 0.45), 0.2);
+            out.lerp(pal.tip, smoothstep(0.55, 1, n.y) * 0.25 * yN);
+            out.lerp(pal.deep, 0.22);
+            out.multiplyScalar(lerp(0.55, 1.0, yN));
+
+            return 0.25 + 0.5 * yN;
+        }),
+    ];
+}
+
+/** 5 drooping frond cards (double-sided) + a 3-sided trunk (≈ 32 triangles). */
+function farPalm(
+    pal: Palette,
+    n3: Noise3,
+    rng: Rng,
+    crown: THREE.Vector3,
+    H: number,
+): THREE.BufferGeometry[] {
+    const fronds = new PartBuilder();
+    const count = 5;
+    const yaw0 = rng() * TAU;
+    const side = new THREE.Vector3();
+
+    for (let k = 0; k < count; k++) {
+        const yaw = yaw0 + (k / count) * TAU;
+        const dir = new THREE.Vector3(Math.cos(yaw), 0, Math.sin(yaw));
+        side.crossVectors(UP, dir).normalize();
+        const L = 3.6;
+        const mid = crown
+            .clone()
+            .addScaledVector(dir, L * 0.5)
+            .setY(crown.y + 0.35);
+        const tip = crown
+            .clone()
+            .addScaledVector(dir, L * 0.95)
+            .setY(crown.y - 1.1);
+        const w = 0.55;
+        const c0 = fronds.vertexV(crown, 0);
+        const l = fronds.vertex(
+            mid.x - side.x * w,
+            mid.y - 0.15,
+            mid.z - side.z * w,
+            0.5,
+        );
+        const r = fronds.vertex(
+            mid.x + side.x * w,
+            mid.y - 0.15,
+            mid.z + side.z * w,
+            0.5,
+        );
+        const t = fronds.vertexV(tip, 1);
+        fronds.quad(c0, l, t, r);
+    }
+
+    fronds.addBackfaces();
+
+    return [
+        farTrunk(pal, n3, new THREE.Vector3(), crown, 0.24),
+        fronds.finish((p, n, u, out) => {
+            out.copy(pal.primary);
+            vary(out, n3(p.x * 0.8, p.y * 0.8, p.z * 0.8), 0.15);
+            out.multiplyScalar(
+                lerp(0.6, 0.95, smoothstep(0, 0.5, u)) *
+                    (n.y < 0 ? 0.72 : 1) *
+                    lerp(0.9, 1, clamp01(p.y / H)),
+            );
+
+            return 0.35 + 0.65 * u;
+        }),
+    ];
+}
+
+/** One ellipsoid (≈ 20 triangles). */
+function farBush(pal: Palette, n3: Noise3, Hb: number): THREE.BufferGeometry[] {
+    const b = new PartBuilder();
+    addLowEllipsoid(
+        b,
+        new THREE.Vector3(0, Hb * 0.45, 0),
+        Hb * 0.62,
+        Hb * 0.48,
+        Hb * 0.62,
+        5,
+        2,
+    );
+    b.groundTo(-0.06);
+
+    return [
+        b.finish((p, nrm, _a, out) => {
+            const yN = clamp01(p.y / Hb);
+            out.copy(pal.primary);
+            vary(out, n3(p.x * 1.6, p.y * 1.6, p.z * 1.6), 0.2);
+            out.lerp(pal.tip, smoothstep(0.5, 1, nrm.y) * 0.25 * yN);
+            out.lerp(pal.deep, 0.3 + (1 - yN) * 0.3);
+            out.multiplyScalar(lerp(0.55, 1.0, smoothstep(0, 0.8, yN)));
+
+            return 0.1 + 0.6 * yN;
+        }),
+    ];
+}
+
 const BUILDERS: Record<
     FoliageKind,
     (pal: Palette, seed: number, lod: number) => THREE.BufferGeometry[]
@@ -1347,15 +1625,19 @@ const BUILDERS: Record<
     rock: buildRock,
 };
 
+/**
+ * LOD switch distances as a fraction of the cull distance. Trees, bushes and rocks get a third,
+ * very cheap far LOD (a few dozen triangles) so distant forests stay affordable.
+ */
 const LOD_DISTANCES: Record<FoliageKind, number[]> = {
-    conifer: [0, 0.3],
-    broadleaf: [0, 0.3],
-    palm: [0, 0.3],
-    bush: [0, 0.35],
+    conifer: [0, 0.16, 0.4],
+    broadleaf: [0, 0.16, 0.4],
+    palm: [0, 0.18, 0.42],
+    bush: [0, 0.3, 0.6],
     grass: [0, 0.45],
     flower: [0, 0.4],
     reed: [0, 0.4],
-    rock: [0, 0.35],
+    rock: [0, 0.3, 0.6],
 };
 
 function merge(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {

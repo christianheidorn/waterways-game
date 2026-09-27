@@ -85,26 +85,98 @@ export type AiModels = {
     text: AiTextModel[];
 };
 
-/** One row of POST /api/maps/{map}/ai/suggest-materials. */
-export type SuggestedLayer = {
-    slot: number;
+export type PlanAction = 'keep' | 'change' | 'remove' | 'add';
+
+export type PlanLibraryMaterial = {
+    type: 'library';
+    material_id: number;
     name: string;
-    material_id: number | null;
-    generate_prompt: string | null;
     category: string;
+    source: MaterialSource;
+    status: MaterialStatus;
+    tile_size: number;
+    thumbnail_url: string | null;
+};
+
+export type PlanImportMaterial = {
+    type: 'import';
+    source: BrowseSource;
+    ref: string;
+    resolution: '1k' | '2k';
+    name: string;
+    category: string;
+    thumbnail_url: string | null;
+    /** Measured scan width in metres (null = unknown). */
+    tile_size: number | null;
+    /** Aerial / very large scan: the plan picks a ground-level tile size. */
+    aerial: boolean;
+    license: string;
+    source_url: string;
+};
+
+export type PlanGenerateMaterial = {
+    type: 'generate';
+    prompt: string;
+    category: string;
+};
+
+export type PlanMaterial =
+    | PlanLibraryMaterial
+    | PlanImportMaterial
+    | PlanGenerateMaterial
+    | { type: 'procedural' };
+
+export type PlanSettings = {
+    /** Metres per texture repeat. */
+    texture_scale: number;
     tint: string;
+    roughness_scale: number;
+    normal_strength: number;
     auto_min_height: number | null;
     auto_max_height: number | null;
     auto_min_slope: number | null;
     auto_max_slope: number | null;
     auto_priority: number;
-    reason: string;
 };
 
-export type MaterialSuggestion = {
-    summary: string;
-    layers: SuggestedLayer[];
+export type PlanCurrent = {
+    name: string;
+    color: string;
+    color_secondary: string;
+    material: PlanMaterial;
+    settings: PlanSettings;
+    /** Share of the painted terrain in percent (null without a splat map). */
+    coverage: number | null;
 };
+
+/** One slot of the AI layer plan. */
+export type PlanLayer = {
+    slot: number;
+    action: PlanAction;
+    name: string;
+    reason: string;
+    /** null for removals. */
+    material: PlanMaterial | null;
+    settings: PlanSettings | null;
+    /** null for layers added to a free slot. */
+    current: PlanCurrent | null;
+};
+
+/** POST /api/maps/{map}/ai/suggest-materials. */
+export type LayerPlan = {
+    summary: string;
+    notes: string[];
+    layers: PlanLayer[];
+    /** WorldCover class → slot, real-world maps with land cover only. */
+    landcover_mapping: Record<string, number> | null;
+    current_landcover_mapping: Record<string, number> | null;
+    estimate: { imports: number; generations: number; generation_note: string };
+    /** Removing a slot painted above this percentage is unticked by default. */
+    painted_threshold: number;
+    unavailable_sources: string[];
+};
+
+export type RepaintMode = 'none' | 'auto_rules' | 'landcover';
 
 export type AiLayerChange = {
     slot: number;

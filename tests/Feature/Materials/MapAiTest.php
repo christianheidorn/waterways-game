@@ -2,7 +2,6 @@
 
 namespace Tests\Feature\Materials;
 
-use App\Jobs\GenerateMaterial;
 use App\Models\Map;
 use App\Models\Material;
 use App\Services\Materials\MaterialLibrary;
@@ -10,7 +9,6 @@ use App\Support\DefaultTerrainLayers;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Tests\Concerns\CreatesTestImages;
 use Tests\Concerns\FakesOpenRouter;
@@ -31,56 +29,12 @@ class MapAiTest extends TestCase
         parent::setUp();
         Storage::fake('public');
         Storage::fake('local');
+        // The layer planner also browses Poly Haven / ambientCG: unfaked requests fail (→ omitted).
+        Http::preventStrayRequests();
 
         $this->map = Map::factory()->create(['min_height' => 100, 'max_height' => 900, 'center_lat' => 46.36, 'center_lng' => 14.09]);
         DefaultTerrainLayers::createFor($this->map);
         $this->grass = app(MaterialLibrary::class)->create(['name' => 'Lush grass', 'category' => 'grass', 'tile_size' => 2.5, 'status' => 'ready', 'albedo_path' => 'materials/x/albedo.jpg']);
-    }
-
-    public function test_material_suggestions_are_validated_and_clamped(): void
-    {
-        $this->configureAi();
-        // 30 = grassland, 10 = tree cover, 200 = unknown class (ignored)
-        Storage::disk('local')->put("maps/{$this->map->id}/landcover.u8", str_repeat(chr(30), 60).str_repeat(chr(10), 30).str_repeat(chr(200), 10));
-
-        $reply = "Here is my plan:\n```json\n".json_encode([
-            'summary' => 'Alpine valley: meadows below, rock above.',
-            'hacker' => 'ignored',
-            'layers' => [
-                ['slot' => 0, 'name' => 'Valley grass', 'material_id' => $this->grass->id, 'category' => 'grass', 'tint' => '#AABBCC',
-                    'auto_min_height' => -99999, 'auto_max_height' => 99999, 'auto_min_slope' => 50, 'auto_max_slope' => 10, 'auto_priority' => 99, 'reason' => 'Base', 'evil' => true],
-                ['slot' => 0, 'name' => 'Duplicate slot'],
-                ['slot' => 9, 'name' => 'Out of range slot'],
-                ['slot' => 3, 'name' => 'Limestone', 'material_id' => 424242, 'generate_prompt' => 'pale grey limestone with cracks', 'category' => 'lava', 'tint' => 'blue', 'auto_min_slope' => '35', 'auto_priority' => '5'],
-                'not an array',
-            ],
-        ])."\n```";
-        $this->fakeOpenRouter(chat: $reply);
-
-        $this->postJson("/api/maps/{$this->map->slug}/ai/suggest-materials")
-            ->assertOk()
-            ->assertJsonPath('summary', 'Alpine valley: meadows below, rock above.')
-            ->assertJsonMissingPath('hacker')
-            ->assertJsonCount(2, 'layers')
-            ->assertJsonPath('layers.0', [
-                'slot' => 0, 'name' => 'Valley grass', 'material_id' => $this->grass->id, 'generate_prompt' => null, 'category' => 'grass',
-                'tint' => '#aabbcc', 'auto_min_height' => -900, 'auto_max_height' => 1900, 'auto_min_slope' => 10, 'auto_max_slope' => 50,
-                'auto_priority' => 10, 'reason' => 'Base',
-            ])
-            ->assertJsonPath('layers.1.slot', 3)
-            ->assertJsonPath('layers.1.material_id', null)
-            ->assertJsonPath('layers.1.generate_prompt', 'pale grey limestone with cracks')
-            ->assertJsonPath('layers.1.category', 'rock')
-            ->assertJsonPath('layers.1.tint', '#ffffff')
-            ->assertJsonPath('layers.1.auto_min_slope', 35)
-            ->assertJsonPath('layers.1.auto_priority', 5);
-
-        $chat = Http::recorded(fn (Request $r) => str_ends_with($r->url(), '/chat/completions'))->first()[0]->data();
-        $prompt = $chat['messages'][1]['content'][0]['text'];
-        $this->assertStringContainsString('"grassland": 60', $prompt);
-        $this->assertStringContainsString('"tree cover": 30', $prompt);
-        $this->assertStringContainsString('"lat": 46.36', $prompt);
-        $this->assertStringContainsString('Lush grass', $prompt);
     }
 
     public function test_ai_endpoints_report_missing_configuration_and_upstream_errors(): void
@@ -90,31 +44,6 @@ class MapAiTest extends TestCase
         $this->configureAi();
         $this->fakeOpenRouter(chat: 'I cannot help with that.');
         $this->postJson("/api/maps/{$this->map->slug}/ai/suggest-materials")->assertStatus(502)->assertJsonPath('message', fn ($m) => str_contains($m, 'did not return valid JSON'));
-    }
-
-    public function test_applying_a_suggestion_upserts_layers_and_queues_generation(): void
-    {
-        Queue::fake();
-        $this->configureAi();
-        $this->map->layers()->where('slot', 5)->delete();
-
-        $this->post("/maps/{$this->map->slug}/ai/apply-suggestion", ['layers' => [
-            ['slot' => 0, 'name' => 'Valley grass', 'material_id' => $this->grass->id, 'category' => 'grass', 'tint' => '#eeffee', 'auto_priority' => 0],
-            ['slot' => 5, 'name' => 'Peat bog', 'material_id' => null, 'generate_prompt' => 'dark wet peat with sphagnum moss', 'category' => 'mud',
-                'auto_min_height' => 100, 'auto_max_height' => 300, 'auto_min_slope' => 0, 'auto_max_slope' => 5, 'auto_priority' => 3],
-        ]])->assertRedirect()->assertSessionHasNoErrors();
-
-        $grassLayer = $this->map->layers()->where('slot', 0)->sole();
-        $this->assertSame(['Valley grass', $this->grass->id, '#eeffee', 2.5], [$grassLayer->name, $grassLayer->material_id, $grassLayer->tint, $grassLayer->texture_scale]);
-
-        $bog = $this->map->layers()->where('slot', 5)->sole();
-        $generated = Material::query()->where('source', 'ai')->sole();
-        $this->assertSame(['Peat bog', $generated->id, 3, 300.0], [$bog->name, $bog->material_id, $bog->auto_priority, $bog->auto_max_height]);
-        $this->assertSame(['processing', 'mud'], [$generated->status, $generated->category]);
-        $this->assertNull($bog->toGameArray()['material'], 'The game ignores the material until it is ready.');
-        Queue::assertPushed(GenerateMaterial::class, fn (GenerateMaterial $job) => $job->material->is($generated) && $job->options['prompt'] === 'dark wet peat with sphagnum moss');
-
-        $this->post("/maps/{$this->map->slug}/ai/apply-suggestion", ['layers' => [['slot' => 11, 'name' => 'x']]])->assertSessionHasErrors('layers.0.slot');
     }
 
     public function test_screenshot_review_is_validated_against_the_environment_schema(): void

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Map;
 use App\Services\Ai\AiNotConfiguredException;
+use App\Services\Ai\LayerPlanner;
 use App\Services\Ai\MapAiAssistant;
 use App\Services\Ai\OpenRouterException;
 use Closure;
@@ -13,7 +14,7 @@ use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
 /**
- * Claude-assisted art direction for a map: material suggestions, screenshot review and applying
+ * Claude-assisted art direction for a map: layer plans, screenshot review and applying
  * the reviewed changes live.
  */
 class MapAiController extends Controller
@@ -21,9 +22,14 @@ class MapAiController extends Controller
     /** Max decoded screenshot size. */
     public const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 
-    public function suggestMaterials(Map $map, MapAiAssistant $assistant): JsonResponse
+    /**
+     * Full AI layer plan (every used slot: keep / change / remove, plus added layers) for review.
+     */
+    public function suggestMaterials(Request $request, Map $map, LayerPlanner $planner): JsonResponse
     {
-        return $this->ai(fn () => $assistant->suggestMaterials($map));
+        $data = $request->validate(['direction' => ['nullable', 'string', 'max:500']]);
+
+        return $this->ai(fn () => $planner->plan($map, $data['direction'] ?? null));
     }
 
     public function review(Request $request, Map $map, MapAiAssistant $assistant): JsonResponse

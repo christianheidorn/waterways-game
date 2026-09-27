@@ -64,7 +64,8 @@ class MaterialCandidates
             $budget = max(self::MIN_IMPORTS, self::MAX_TOTAL - count($library));
             // Already imported materials are offered as library entries only.
             $notImported = fn (array $c) => ! $imported->has($c['source'].':'.$c['ref']);
-            $polyHaven = array_values(array_filter($this->polyHavenCandidates(), $notImported));
+            // Round-robin over categories so a capped list still offers grass, rock, sand, snow, …
+            $polyHaven = self::interleave(array_values(array_filter($this->polyHavenCandidates(), $notImported)));
             $ambientCg = array_values(array_filter($this->ambientCgCandidates(), $notImported));
 
             // Poly Haven has measured scan sizes, so it gets the larger share.
@@ -273,6 +274,28 @@ class MaterialCandidates
         }
 
         return array_values($out);
+    }
+
+    /**
+     * Most popular of each category first, then the second of each, …
+     *
+     * @param  list<array<string, mixed>>  $candidates  sorted by popularity
+     * @return list<array<string, mixed>>
+     */
+    private static function interleave(array $candidates): array
+    {
+        $groups = collect($candidates)->groupBy('category')->map->values();
+        $out = [];
+
+        for ($i = 0; count($out) < count($candidates); $i++) {
+            foreach ($groups as $group) {
+                if (isset($group[$i])) {
+                    $out[] = $group[$i];
+                }
+            }
+        }
+
+        return $out;
     }
 
     /**

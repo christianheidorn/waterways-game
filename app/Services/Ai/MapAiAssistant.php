@@ -2,21 +2,19 @@
 
 namespace App\Services\Ai;
 
-use App\Jobs\GenerateMaterial;
 use App\Models\Map;
 use App\Models\Material;
 use App\Models\TerrainLayer;
-use App\Services\Materials\MaterialLibrary;
 use App\Services\Terrain\TerrainStorage;
 use App\Support\AiSettings;
-use App\Support\DefaultTerrainLayers;
 use App\Support\EnvironmentDefaults;
 use App\Support\SettingField;
 use Illuminate\Support\Str;
 use Throwable;
 
 /**
- * Claude-assisted terrain art direction: material suggestions per layer and screenshot reviews.
+ * Claude-assisted terrain art direction: screenshot reviews and shared map facts (layer planning
+ * lives in LayerPlanner).
  *
  * Everything the model returns is treated as untrusted: unknown keys are dropped, numbers are
  * clamped to the schema ranges and only existing material ids / layer slots are kept.
@@ -36,186 +34,7 @@ class MapAiAssistant
         private readonly OpenRouterClient $client,
         private readonly AiSettings $settings,
         private readonly TerrainStorage $terrain,
-        private readonly MaterialLibrary $library,
     ) {}
-
-    // ---------------------------------------------------------------------------------------
-    // Material suggestions
-    // ---------------------------------------------------------------------------------------
-
-    /**
-     * @return array{summary: string, layers: list<array<string, mixed>>}
-     */
-    public function suggestMaterials(Map $map): array
-    {
-        $system = <<<'TXT'
-You are a senior environment artist setting up the terrain materials of a realistic open-world game map.
-You get facts about the map (location, size, height range, water, land cover) plus its current terrain layers and the
-material library. Choose up to 8 terrain layers (slots 0-7) that make this landscape look believable:
-- slot 0 is the base layer that covers everything no rule claims; other layers paint automatically by height (metres,
-  absolute, same datum as the map height range) and slope (degrees 0-90); where rules overlap, higher auto_priority (0-10) wins.
-- Prefer materials from the library (material_id). Only when nothing suitable exists, set material_id to null and give a
-  short generate_prompt (max 40 words) describing the ground surface for an AI texture generator.
-- tint is a hex colour multiplied onto the material (#ffffff = unchanged); use subtle tints to harmonise with the biome.
-- Keep slot names short (e.g. "Grass", "Forest floor", "Rock").
-Answer with a single JSON object only, no prose:
-{"summary": string, "layers": [{"slot": int, "name": string, "material_id": int|null, "generate_prompt": string|null,
-"category": string, "tint": "#rrggbb", "auto_min_height": number|null, "auto_max_height": number|null,
-"auto_min_slope": number|null, "auto_max_slope": number|null, "auto_priority": int, "reason": string}]}
-TXT;
-
-        $user = "Map facts:\n".json_encode($this->mapFacts($map), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
-            ."\n\nMaterial library:\n".json_encode($this->libraryList(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
-            ."\n\nMaterial categories: ".implode(', ', array_keys(Material::CATEGORIES));
-
-        $raw = $this->client->chatJson($this->settings->textModel(), $system, $user, 4000);
-
-        return $this->sanitizeSuggestion($raw, $map);
-    }
-
-    /**
-     * @param  array<string, mixed>  $raw
-     * @return array{summary: string, layers: list<array<string, mixed>>}
-     */
-    public function sanitizeSuggestion(array $raw, Map $map): array
-    {
-        $materialIds = Material::query()->where('status', '!=', 'failed')->pluck('id')->all();
-        $minH = $map->min_height - 1000;
-        $maxH = $map->max_height + 1000;
-        $defaults = $this->defaultDefinitions($map);
-
-        $layers = [];
-        foreach (array_slice(is_array($raw['layers'] ?? null) ? array_values($raw['layers']) : [], 0, 16) as $entry) {
-            if (! is_array($entry) || ! isset($entry['slot']) || ! is_numeric($entry['slot'])) {
-                continue;
-            }
-
-            $slot = (int) $entry['slot'];
-            if ($slot < 0 || $slot >= TerrainLayer::MAX_LAYERS || isset($layers[$slot])) {
-                continue;
-            }
-
-            $name = $this->string($entry['name'] ?? null, 60) ?? ($defaults[$slot]['name'] ?? 'Layer '.($slot + 1));
-            $materialId = isset($entry['material_id']) && is_numeric($entry['material_id']) && in_array((int) $entry['material_id'], $materialIds, true)
-                ? (int) $entry['material_id']
-                : null;
-            $prompt = $materialId === null ? $this->string($entry['generate_prompt'] ?? null, 500) : null;
-
-            [$minHeight, $maxHeight] = $this->orderedPair(
-                $this->clampOrNull($entry['auto_min_height'] ?? null, $minH, $maxH),
-                $this->clampOrNull($entry['auto_max_height'] ?? null, $minH, $maxH),
-            );
-            [$minSlope, $maxSlope] = $this->orderedPair(
-                $this->clampOrNull($entry['auto_min_slope'] ?? null, 0, 90),
-                $this->clampOrNull($entry['auto_max_slope'] ?? null, 0, 90),
-            );
-
-            $category = is_string($entry['category'] ?? null) && isset(Material::CATEGORIES[$entry['category']])
-                ? $entry['category']
-                : MaterialLibrary::guessCategory([$name, (string) $prompt]);
-
-            $layers[$slot] = [
-                'slot' => $slot,
-                'name' => $name,
-                'material_id' => $materialId,
-                'generate_prompt' => $prompt,
-                'category' => $category,
-                'tint' => is_string($entry['tint'] ?? null) && preg_match(self::COLOR, $entry['tint']) === 1 ? strtolower($entry['tint']) : '#ffffff',
-                'auto_min_height' => $minHeight,
-                'auto_max_height' => $maxHeight,
-                'auto_min_slope' => $minSlope,
-                'auto_max_slope' => $maxSlope,
-                'auto_priority' => (int) ($this->clampOrNull($entry['auto_priority'] ?? null, 0, 10) ?? 0),
-                'reason' => $this->string($entry['reason'] ?? null, 300) ?? '',
-            ];
-        }
-
-        ksort($layers);
-
-        return [
-            'summary' => $this->string($raw['summary'] ?? null, 1500) ?? '',
-            'layers' => array_values($layers),
-        ];
-    }
-
-    /**
-     * Upsert the suggested layers. Entries with a generate_prompt and no material get a new AI
-     * material (queued) linked right away; the game ignores it until it is ready.
-     *
-     * @param  list<array<string, mixed>>  $layers  already sanitized
-     * @return array{layers: int, generating: int, skipped_generation: int}
-     */
-    public function applySuggestion(Map $map, array $layers): array
-    {
-        $defaults = $this->defaultDefinitions($map);
-        $aiConfigured = $this->settings->configured();
-        $result = ['layers' => 0, 'generating' => 0, 'skipped_generation' => 0];
-
-        foreach ($layers as $entry) {
-            $slot = $entry['slot'];
-            /** @var TerrainLayer|null $layer */
-            $layer = $map->layers()->where('slot', $slot)->first();
-            $materialId = $entry['material_id'];
-            $job = null;
-
-            if ($materialId === null && $entry['generate_prompt'] !== null) {
-                if ($aiConfigured) {
-                    $material = $this->library->create([
-                        'name' => MaterialPrompts::summary($entry['generate_prompt']),
-                        'category' => $entry['category'],
-                        'source' => 'ai',
-                        'license' => 'AI generated',
-                        'status' => 'processing',
-                        'status_message' => 'Queued…',
-                        'ai_prompt' => $entry['generate_prompt'],
-                        'ai_model' => $this->settings->imageModel(),
-                    ]);
-                    $materialId = $material->id;
-                    $job = new GenerateMaterial($material, ['prompt' => $entry['generate_prompt'], 'category' => $entry['category']]);
-                    $result['generating']++;
-                } else {
-                    $result['skipped_generation']++;
-                }
-            }
-
-            $attributes = [
-                'name' => $entry['name'],
-                'tint' => $entry['tint'],
-                'auto_min_height' => $entry['auto_min_height'],
-                'auto_max_height' => $entry['auto_max_height'],
-                'auto_min_slope' => $entry['auto_min_slope'],
-                'auto_max_slope' => $entry['auto_max_slope'],
-                'auto_priority' => $entry['auto_priority'],
-            ];
-
-            // Keep the current material when the model suggested nothing new for this slot.
-            if ($materialId !== null || $entry['generate_prompt'] === null) {
-                $attributes['material_id'] = $materialId;
-            }
-
-            if (($attributes['material_id'] ?? null) !== null && $attributes['material_id'] !== $layer?->material_id) {
-                $attributes['texture_scale'] = (float) (Material::query()->whereKey($attributes['material_id'])->value('tile_size') ?? 2);
-            }
-
-            if ($layer) {
-                $layer->update($attributes);
-            } else {
-                $base = $defaults[$slot] ?? $defaults[0];
-                $map->layers()->create([...$base, ...$attributes, 'slot' => $slot]);
-            }
-            $result['layers']++;
-
-            if ($job !== null) {
-                try {
-                    dispatch($job);
-                } catch (Throwable $e) {
-                    report($e);
-                }
-            }
-        }
-
-        return $result;
-    }
 
     // ---------------------------------------------------------------------------------------
     // Screenshot review
@@ -535,16 +354,6 @@ TXT;
         ], fn ($v) => $v !== null), array_values(array_filter(EnvironmentDefaults::group()->fields, fn (SettingField $f) => $f->type !== 'text')));
     }
 
-    /**
-     * @return array<int, array<string, mixed>>
-     */
-    private function defaultDefinitions(Map $map): array
-    {
-        $definitions = DefaultTerrainLayers::definitions($map->min_height, $map->max_height, (float) ($map->resolvedEnvironment()['sea_level'] ?? 0));
-
-        return collect($definitions)->keyBy('slot')->all();
-    }
-
     private function fieldValue(SettingField $field, mixed $value): mixed
     {
         return match ($field->type) {
@@ -563,14 +372,6 @@ TXT;
         }
 
         return max($min, min($max, (float) $value));
-    }
-
-    /**
-     * @return array{0: float|null, 1: float|null}
-     */
-    private function orderedPair(?float $a, ?float $b): array
-    {
-        return $a !== null && $b !== null && $a > $b ? [$b, $a] : [$a, $b];
     }
 
     private function string(mixed $value, int $max): ?string

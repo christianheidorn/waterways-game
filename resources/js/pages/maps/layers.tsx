@@ -115,6 +115,8 @@ export default function MapLayers({
     // Only one live WebGL preview at a time (browsers cap WebGL contexts).
     const [previewLayerId, setPreviewLayerId] = useState<number | null>(null);
     const [libraryRequested, setLibraryRequested] = useState(false);
+    // Bumped after an AI plan is applied so the layer forms pick up the new values.
+    const [planApplied, setPlanApplied] = useState(0);
 
     const ensureLibrary = () => {
         if (materials !== undefined || libraryRequested) {
@@ -193,14 +195,17 @@ export default function MapLayers({
 
                 <AiSuggestCard
                     map={map}
-                    materials={materials}
+                    library={library}
+                    categories={categories}
+                    onNeedLibrary={ensureLibrary}
+                    onApplied={() => setPlanApplied((n) => n + 1)}
                     aiConfigured={ai?.configured}
                 />
 
                 <div className="grid gap-6 xl:grid-cols-2">
                     {layers.map((layer) => (
                         <LayerCard
-                            key={`${layer.id}-${layer.material_id ?? 0}`}
+                            key={`${layer.id}-${layer.material_id ?? 0}-${planApplied}`}
                             map={map}
                             layer={layer}
                             canDelete={layers.length > 1}

@@ -34,7 +34,7 @@ const sidebarNavItems: NavItem[] = [
         icon: Gamepad2,
     },
     {
-        title: 'AI (OpenRouter)',
+        title: 'AI (OpenRouter & Meshy)',
         href: aiSettings.edit(),
         icon: Sparkles,
     },

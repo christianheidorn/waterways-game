@@ -71,7 +71,7 @@ export const PRESET_INFO: Record<
     cinematic: {
         label: 'Cinematic',
         description:
-            'Screenshots and trailers. 1.5× supersampling with MSAA, maximum distances and AO quality.',
+            'Screenshots and trailers. 1.25× supersampling with MSAA, maximum distances and AO quality.',
         performance: '≈ 3× slower than High — not for real-time play',
     },
 };
@@ -177,10 +177,10 @@ export const PRESETS: Record<PresetName, PresetValues> = {
         cloud_quality: 'high',
         water_quality: 'high',
         foliage_density: 1,
-        foliage_distance: 2.5,
-        foliage_shadow_distance: 500,
-        foliage_lod_bias: 2.5,
-        render_scale: 1.5,
+        foliage_distance: 2,
+        foliage_shadow_distance: 350,
+        foliage_lod_bias: 1.8,
+        render_scale: 1.25,
         sharpen: 0,
     },
 };

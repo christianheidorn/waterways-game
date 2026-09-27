@@ -11,6 +11,9 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { antiAliasingMode } from '../shared/graphicsPresets';
 import type { GraphicsSettings } from '../shared/types';
 
+/** Pre-tone-mapping luminance × exposure above which pixels bloom (ACES is ≈ white by ~4). */
+const BLOOM_DISPLAY_THRESHOLD = 4.5;
+
 /** GTAO parameters per ao_quality: resolution scale, AO samples, denoise samples, world radius. */
 const AO_QUALITY = {
     low: { scale: 0.5, samples: 8, pdSamples: 8, radius: 2 },
@@ -197,6 +200,14 @@ export class PostFx {
     }
 
     render(dt: number): void {
+        if (this.bloomPass) {
+            // Bloom only what ends up near white on screen: the HDR threshold follows exposure
+            // (which changes with time of day and weather), so bright skies and haze don't veil the image.
+            this.bloomPass.threshold =
+                BLOOM_DISPLAY_THRESHOLD /
+                Math.max(0.05, this.renderer.toneMappingExposure);
+        }
+
         this.composer.render(dt);
     }
 
@@ -243,8 +254,8 @@ export class PostFx {
             this.bloomPass = new UnrealBloomPass(
                 new THREE.Vector2(w, h),
                 0.12,
-                0.45,
-                3.5,
+                0.35,
+                BLOOM_DISPLAY_THRESHOLD,
             );
             composer.addPass(this.bloomPass);
         }

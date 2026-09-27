@@ -141,7 +141,8 @@ export class Game {
                 heights: this.world.heights,
                 material: this.world.material,
                 water: this.world.water,
-                setFoliageWind: (s, x, z) => this.world.foliage.setWind(s, x, z),
+                setFoliageWind: (s, x, z) =>
+                    this.world.foliage.setWind(s, x, z),
             });
             this.graphicsDefaults = normalizeGraphics(
                 this.manifest.settings.graphics,

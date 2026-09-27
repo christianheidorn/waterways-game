@@ -543,6 +543,6 @@ function ModelField({
 AiSettingsPage.layout = {
     breadcrumbs: [
         { title: 'Settings', href: gameSettings.edit('player') },
-        { title: 'AI (OpenRouter)', href: aiSettings.edit() },
+        { title: 'AI (OpenRouter & Meshy)', href: aiSettings.edit() },
     ],
 };

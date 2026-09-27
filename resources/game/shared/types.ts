@@ -96,7 +96,9 @@ export type CharacterRef = {
     name: string;
     model_url: string;
     /** Extra animation GLBs (same skeleton) per clip; clips inside model_url are also used. */
-    animations: Partial<Record<'idle' | 'walk' | 'run' | 'jump' | 'swim', string>>;
+    animations: Partial<
+        Record<'idle' | 'walk' | 'run' | 'jump' | 'swim', string>
+    >;
     height: number;
 };
 

@@ -165,13 +165,13 @@ leave these values alone:
 - artistic values: bloom intensity, saturation, contrast, vignette
 - frame-rate values: dynamic resolution, target FPS, FPS limit
 
-| Preset    | Draw dist. | Shadows (dist.) | AA   | AO          | Terrain tex. / aniso | Foliage density / dist. / shadow | Render scale       |
-| --------- | ---------- | --------------- | ---- | ----------- | -------------------- | -------------------------------- | ------------------ |
-| Low       | 4 km       | low (90 m)      | FXAA | off         | 512 / 2×             | 0.4 / 0.5× / off                 | 0.7 + sharpen      |
-| Medium    | 7 km       | medium (150 m)  | FXAA | off         | 1K / 4×              | 0.7 / 0.75× / 60 m               | 0.85 + sharpen     |
-| High      | 12 km      | high (220 m)    | SMAA | off         | 1K / 8×              | 1 / 1× / 120 m                   | 1                  |
-| Epic      | 20 km      | ultra (400 m)   | SMAA | GTAO medium | 2K / 16×             | 1 / 1.5× / 250 m                 | 1                  |
-| Cinematic | 30 km      | ultra (700 m)   | MSAA | GTAO high   | 2K / 16×             | 1 / 2.5× / 500 m                 | 1.5 (supersampled) |
+| Preset    | Draw dist. | Shadows (dist.) | AA   | AO          | Terrain tex. / aniso | Foliage density / dist. / shadow | Render scale        |
+| --------- | ---------- | --------------- | ---- | ----------- | -------------------- | -------------------------------- | ------------------- |
+| Low       | 4 km       | low (90 m)      | FXAA | off         | 512 / 2×             | 0.4 / 0.5× / off                 | 0.7 + sharpen       |
+| Medium    | 7 km       | medium (150 m)  | FXAA | off         | 1K / 4×              | 0.7 / 0.75× / 60 m               | 0.85 + sharpen      |
+| High      | 12 km      | high (220 m)    | SMAA | off         | 1K / 8×              | 1 / 1× / 120 m                   | 1                   |
+| Epic      | 20 km      | ultra (400 m)   | SMAA | GTAO medium | 2K / 16×             | 1 / 1.5× / 250 m                 | 1                   |
+| Cinematic | 30 km      | ultra (700 m)   | MSAA | GTAO high   | 2K / 16×             | 1 / 2× / 350 m                   | 1.25 (supersampled) |
 
 **Scalability groups.** Like UE's `sg.*` groups, you can set each group to Low, Medium, High or Epic on its
 own:

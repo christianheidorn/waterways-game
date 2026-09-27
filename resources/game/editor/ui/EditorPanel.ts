@@ -31,6 +31,7 @@ import {
 } from '../../ui/dom';
 import type { FalloffType } from '../Brush';
 import type { Editor, FoliageTool, SculptTool, WaterTool } from '../Editor';
+import { FoliageThumbnails } from '../FoliageThumbnails';
 
 type ToolDef<T extends string> = {
     value: T;
@@ -162,6 +163,8 @@ export class EditorPanel {
     private groupSeg: ReturnType<typeof segmented<EditorToolGroup>>;
     private renderedKey = '';
     private refreshers: Array<() => void> = [];
+    /** Rendered previews for foliage types without a baked thumbnail. */
+    private readonly foliageThumbs = new FoliageThumbnails();
 
     constructor(
         private readonly editor: Editor,
@@ -192,6 +195,7 @@ export class EditorPanel {
             this.body,
         );
         editor.subscribe(() => this.refresh());
+        this.foliageThumbs.onChange = () => this.refresh();
         this.refresh();
     }
 
@@ -203,7 +207,7 @@ export class EditorPanel {
     refresh(): void {
         const s = this.editor.state;
         this.groupSeg.set(s.group);
-        const key = `${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => t.id + t.name + (t.asset?.thumbnail_url ?? '')).join()}`;
+        const key = `${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}${t.min_scale}${t.max_scale}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}`;
 
         if (key !== this.renderedKey) {
             this.renderedKey = key;
@@ -720,42 +724,74 @@ export class EditorPanel {
 
     private foliageList(): HTMLElement {
         const s = this.editor.state;
-        const list = h('div', { class: 'ww-list' });
+        const types = this.editor.foliageTypes;
+        const grid = h('div', {
+            class: 'ww-material-grid ww-foliage-grid',
+            role: 'group',
+            'aria-label': 'Foliage types to paint (multi-select)',
+        });
+        const count = h('span', {});
+        const syncCount = () => {
+            const n = types.filter((t) => s.foliageSelection.has(t.id)).length;
+            count.textContent = n
+                ? `${n} of ${types.length} selected`
+                : 'Nothing selected';
+        };
 
-        for (const type of this.editor.foliageTypes) {
-            const checked = s.foliageSelection.has(type.id);
-            const input = h('input', { type: 'checkbox', class: 'ww-check' });
-            input.checked = checked;
-            input.addEventListener('change', () => {
-                if (input.checked) {
-                    s.foliageSelection.add(type.id);
-                } else {
-                    s.foliageSelection.delete(type.id);
-                }
-            });
-            list.append(
+        for (const type of types) {
+            const thumb =
+                type.asset?.thumbnail_url ?? this.foliageThumbs.get(type);
+            const size = foliageSize(type);
+            const subtitle = [type.kind, size].filter(Boolean).join(' · ');
+            const tile = h(
+                'button',
+                {
+                    type: 'button',
+                    class: 'ww-material-tile ww-foliage-tile',
+                    title: `${type.name} — ${type.asset ? `model: ${type.asset.name}` : type.model_url ? 'custom model' : 'procedural mesh'} · ${subtitle}`,
+                    onClick: () => {
+                        if (s.foliageSelection.has(type.id)) {
+                            s.foliageSelection.delete(type.id);
+                        } else {
+                            s.foliageSelection.add(type.id);
+                        }
+
+                        sync();
+                        syncCount();
+                    },
+                },
+                h('span', {
+                    class: `ww-foliage-thumb ${thumb ? '' : 'is-pending'}`,
+                    style: {
+                        // Colour gradient shows while the preview renders / loads, or if it is missing.
+                        background: `${thumb ? `center / contain no-repeat url("${thumb}"), ` : ''}radial-gradient(circle at 50% 85%, ${type.color}66, transparent 70%), linear-gradient(160deg, oklch(1 0 0 / 0.06), oklch(0 0 0 / 0.2))`,
+                    },
+                }),
+                h('span', { class: 'ww-foliage-check', 'aria-hidden': 'true' }),
                 h(
-                    'label',
-                    { class: 'ww-list-item' },
-                    input,
-                    h('span', {
-                        class: 'ww-swatch',
-                        title: type.asset
-                            ? `Model: ${type.asset.name}`
-                            : 'Procedural mesh',
-                        style: {
-                            // Baked model thumbnail over the colour gradient (shown while it loads / if missing).
-                            background: `${type.asset?.thumbnail_url ? `center / cover no-repeat url("${type.asset.thumbnail_url}"), ` : ''}linear-gradient(135deg, ${type.color}, ${type.color_secondary})`,
-                        },
-                    }),
-                    h('span', { class: 'ww-list-label' }, type.name),
-                    h('span', { class: 'ww-badge' }, type.kind),
+                    'span',
+                    { class: 'ww-material-text' },
+                    h('span', { class: 'ww-material-name' }, type.name),
+                    h(
+                        'span',
+                        { class: 'ww-material-sub ww-foliage-sub' },
+                        subtitle,
+                    ),
                 ),
             );
+            const sync = () => {
+                const on = s.foliageSelection.has(type.id);
+                tile.classList.toggle('is-active', on);
+                tile.setAttribute('aria-pressed', String(on));
+            };
+            sync();
+            this.refreshers.push(sync);
+            grid.append(tile);
         }
 
-        if (!this.editor.foliageTypes.length) {
-            list.append(
+        if (!types.length) {
+            return section(
+                'Foliage types',
                 h(
                     'p',
                     { class: 'ww-muted' },
@@ -764,7 +800,20 @@ export class EditorPanel {
             );
         }
 
-        return section('Foliage types', list);
+        syncCount();
+        this.refreshers.push(syncCount);
+
+        return section(
+            'Foliage types',
+            grid,
+            h(
+                'p',
+                { class: 'ww-muted' },
+                icon(TreePine, 12),
+                ' Click to toggle · ',
+                count,
+            ),
+        );
     }
 
     private waterOptions(): HTMLElement {
@@ -846,6 +895,27 @@ export class EditorPanel {
 
         return `${tool}  —  ${base}`;
     }
+}
+
+/** "≈ 9 m" / "7–11 m" from the baked model height and the type's scale range. */
+function foliageSize(type: {
+    asset?: { height: number | null } | null;
+    min_scale: number;
+    max_scale: number;
+}): string {
+    const height = type.asset?.height;
+
+    if (!height) {
+        return '';
+    }
+
+    const lo = height * type.min_scale;
+    const hi = height * type.max_scale;
+
+    return Math.abs(hi - lo) < 0.05 * hi ||
+        formatMetres(lo) === formatMetres(hi)
+        ? `≈ ${formatMetres(hi)}`
+        : `${formatMetres(lo).replace(' m', '')}–${formatMetres(hi)}`;
 }
 
 function formatMetres(m: number): string {

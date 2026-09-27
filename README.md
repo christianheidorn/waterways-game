@@ -44,7 +44,9 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
     - Colour depends on depth, which is computed per pixel from the terrain heightmap.
     - Shorelines and rapids get foam.
     - An ocean ring extends to the horizon, and the view tints when the camera goes underwater.
-- **Atmosphere.** Physical sky with clouds and a sun position driven by time of day. Lighting comes from the
+- **Atmosphere & weather.** Physical sky with lit clouds, stars and a moon; valley (height) fog; rain, snow,
+  lightning with thunder, gusting wind and wet or snowy ground (see [Weather & sky](#weather--sky)). The sun
+  position is driven by time of day. Lighting comes from the
   sky (IBL), with fog and a shadow that follows the camera or player. Post-processing covers MSAA, bloom, GTAO
   and ACES tone mapping.
 - **Foliage.** Instanced and bucketed into 128 m cells, with 2 LODs, wind sway, a grass distance fade and
@@ -150,6 +152,115 @@ thumbnails of the procedural mesh rendered in-game.
 Sizes are planned as real heights in metres. You approve every row and can switch its model (Meshy, card,
 procedural, keep current) before anything changes.
 
+## Graphics quality
+
+Graphics work like Unreal Engine's scalability settings. **Settings → Graphics** in the studio sets the
+project defaults; players can override them per device in the game.
+
+**Quality presets.** _Low_, _Medium_, _High_ (the default), _Epic_ and _Cinematic_ each fill every
+quality field. If you change any value by hand, the preset shows as _Custom_. The presets are defined in
+`resources/game/shared/graphicsPresets.ts`, which both the studio page and the in-game menu use. Presets
+leave these values alone:
+
+- artistic values: bloom intensity, saturation, contrast, vignette
+- frame-rate values: dynamic resolution, target FPS, FPS limit
+
+| Preset    | Draw dist. | Shadows (dist.) | AA   | AO          | Terrain tex. / aniso | Foliage density / dist. / shadow | Render scale       |
+| --------- | ---------- | --------------- | ---- | ----------- | -------------------- | -------------------------------- | ------------------ |
+| Low       | 4 km       | low (90 m)      | FXAA | off         | 512 / 2×             | 0.4 / 0.5× / off                 | 0.7 + sharpen      |
+| Medium    | 7 km       | medium (150 m)  | FXAA | off         | 1K / 4×              | 0.7 / 0.75× / 60 m               | 0.85 + sharpen     |
+| High      | 12 km      | high (220 m)    | SMAA | off         | 1K / 8×              | 1 / 1× / 120 m                   | 1                  |
+| Epic      | 20 km      | ultra (400 m)   | SMAA | GTAO medium | 2K / 16×             | 1 / 1.5× / 250 m                 | 1                  |
+| Cinematic | 30 km      | ultra (700 m)   | MSAA | GTAO high   | 2K / 16×             | 1 / 2.5× / 500 m                 | 1.5 (supersampled) |
+
+**Scalability groups.** Like UE's `sg.*` groups, you can set each group to Low, Medium, High or Epic on its
+own:
+
+- View distance
+- Anti-aliasing
+- Post-processing
+- Shadows
+- Textures
+- Effects
+- Foliage
+- Shading
+- Resolution
+
+**Render pipeline** (`resources/game/core/PostFx.ts`). Passes run in this order:
+
+1. Scene
+2. GTAO: `ao_quality` sets the resolution scale, sample count and radius
+3. Bloom
+4. Colour grading, in scene-linear HDR: saturation, log-space contrast, vignette, and neighbourhood-clamped
+   sharpening
+5. Output: ACES tone mapping and sRGB
+6. FXAA or SMAA, if selected
+
+FXAA and SMAA run after tone mapping because they need display-referred input. MSAA instead uses a
+4× multisampled scene target.
+
+Passes that would do nothing are skipped. For example, the grading pass is left out when every grading value
+is neutral. The composer is rebuilt only when that set of passes changes; other changes only update
+uniforms. Every change applies live, without a reload.
+
+**Resolution and frame rate:**
+
+- **Dynamic resolution** keeps the canvas at the full render scale. The post-processing chain renders at a
+  lower scale (down to 0.5×) and the last pass upscales it.
+    - The controller uses GPU timer queries (`EXT_disjoint_timer_query_webgl2`) when the browser supports
+      them.
+    - Otherwise it uses the smoothed frame interval. With vsync on, it steps up after a stable period and waits
+      longer after each step up that fails.
+    - The stats overlay shows the current scale.
+- **`max_fps`** limits the frame rate by skipping animation frames. The simulation delta still covers the
+  full interval.
+- **Anisotropic filtering** applies to every mipmapped texture in the scene and is capped at the GPU's
+  limit. This includes the terrain texture arrays.
+
+**In-game menu:** press **F10** or click the monitor button.
+
+- Choose a preset, set each scalability group, or change render scale, dynamic resolution, target FPS and
+  the FPS limit.
+- A live readout shows FPS, frame time, draw calls, triangles, the current resolution and the active pass
+  chain.
+- Your changes are stored in `localStorage` (`waterways.graphics.overrides.v1`) and applied on top of the
+  project settings.
+- **Reset to project defaults** removes your changes.
+
+## Weather & sky
+
+Every map has a weather setup in its **Environment** page (and in the studio editor's live Environment panel).
+One-click presets (Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow) set a matching bundle of sky, fog,
+precipitation, wind, wetness and exposure values, which you can then fine-tune. The game blends to a new
+look over a few seconds, so changes preview smoothly.
+
+| Setting                          | What it does                                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `weather`                        | Weather type (for presets); `snow` turns precipitation into snowfall                              |
+| `precipitation`                  | Rain / snow amount (0-1): particles, rain ripples on water, rain sound, reduced visibility        |
+| `lightning_frequency`            | Strikes per minute: sky flash, light pulse, branching bolt, thunder delayed by distance (343 m/s) |
+| `thunder_volume`                 | Thunder loudness                                                                                  |
+| `wind_strength` / `_direction`   | Foliage sway, cloud drift, rain slant, water chop; storms add gusts                               |
+| `height_fog_height` / `_density` | Valley fog up to this height above the lowest point of the map (sea level with an ocean); 0 = off |
+| `wetness`                        | Darker, glossier ground with puddles on flat ground; rain also soaks the ground over time         |
+
+How it works (`resources/game/world/`):
+
+- **Sky** (`SkyDome.ts`): Preetham scattering plus an fBm cloud layer with self-shadowing towards the sun
+  (octaves and light steps follow the `cloud_quality` graphics setting). Overcast skies turn into a grey
+  cloud deck and storms darken it. Nights have stars, a moon and moonlight. Lightning lights the clouds
+  from inside.
+- **Fog** (`HeightFog.ts`): three's fog shader chunks are patched once, so every material (terrain, water,
+  foliage, characters) gets exponential distance fog, analytic height fog and sun in-scattering. The fog
+  colour follows the sky's horizon, so distant terrain melts into the sky.
+- **Precipitation** (`Precipitation.ts`): rain streaks and snowflakes are instanced quads that are animated
+  and wrapped around the camera entirely on the GPU. `effects_quality` sets the particle budget, and the
+  active count scales with the amount.
+- **Storms** (`Lightning.ts`, `WeatherAudio.ts`): procedural branching bolts, a flash light and synthesised
+  WebAudio (rain and wind noise loops, thunder claps). Browsers only allow sound after a click or key
+  press. Set `localStorage['waterways.muted'] = '1'` to mute.
+- **Ground** (`TerrainMaterial.ts`): global wetness and snow cover. Snow settles on flatter ground first.
+
 ## Requirements
 
 - PHP 8.3+ with `gd`, `pdo_sqlite` and `curl`, plus Composer.
@@ -194,6 +305,7 @@ Open <http://localhost:8000>. The dashboard shows the seeded **Waterways Valley*
 | Ctrl+S                         | Save                                                        |
 | G                              | Toggle grid                                                 |
 | P / Alt+P                      | Play from the camera / from the player start                |
+| F10                            | Graphics menu (presets, scalability, frame rate)            |
 
 **Play mode:** click to capture the mouse. WASD to move, Shift to run, Space to jump or surface, C to dive,
 wheel to zoom. Esc releases the mouse; press Esc again to return to building.

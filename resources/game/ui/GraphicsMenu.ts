@@ -156,14 +156,19 @@ export class GraphicsMenu {
 
             return h(
                 'div',
-                { class: 'ww-gfx-row', title: `${group.description} (${group.ue})` },
+                {
+                    class: 'ww-gfx-row',
+                    title: `${group.description} (${group.ue})`,
+                },
                 h('span', { class: 'ww-gfx-row-label' }, group.label),
                 handle.el,
             );
         });
 
         const patch = (values: Partial<GraphicsSettings>) =>
-            this.commit(withDetectedPreset({ ...this.host.current(), ...values }));
+            this.commit(
+                withDetectedPreset({ ...this.host.current(), ...values }),
+            );
 
         this.renderScale = slider({
             label: 'Render scale',

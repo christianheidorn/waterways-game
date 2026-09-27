@@ -33,6 +33,7 @@ import { Terrain } from '../world/Terrain';
 import { TerrainMaterial } from '../world/TerrainMaterial';
 import { Water } from '../world/Water';
 import { WaterReflection } from '../world/WaterReflection';
+import { Weather } from '../world/Weather';
 import { Wetness } from '../world/Wetness';
 import { Api } from './Api';
 import { Bridge } from './Bridge';
@@ -69,8 +70,7 @@ export class Game {
     /** Project graphics settings from the studio (before per-device overrides). */
     private graphicsDefaults!: GraphicsSettings;
     private graphicsMenu: GraphicsMenu | null = null;
-    /** Anisotropy currently applied to scene textures. */
-    private anisotropy = 0;
+    private anisotropyTimer = 0;
     private lastFrameAt = 0;
     private frameIntervalMs = 16.7;
     private waterTarget: THREE.WebGLRenderTarget | null = null;
@@ -85,6 +85,7 @@ export class Game {
     private manifest!: GameManifest;
     private world!: World;
     private atmosphere!: Atmosphere;
+    private weather: Weather | null = null;
     private player!: Player;
     private playerCamera!: ThirdPersonCamera;
     private editor!: Editor;
@@ -136,6 +137,12 @@ export class Game {
             this.createRenderer();
             await this.loadWorld();
             this.createGameplay();
+            this.weather = new Weather(this.scene, this.atmosphere, {
+                heights: this.world.heights,
+                material: this.world.material,
+                water: this.world.water,
+                setFoliageWind: (s) => this.world.foliage.setWind(s),
+            });
             this.graphicsDefaults = normalizeGraphics(
                 this.manifest.settings.graphics,
             );
@@ -606,6 +613,7 @@ export class Game {
             waterLevel !== null && this.camera.position.y < waterLevel - 0.05,
             env?.water_shallow_color,
         );
+        this.weather?.update(dt, this.camera);
 
         this.gpuTimer?.poll();
         this.gpuTimer?.begin();
@@ -665,6 +673,13 @@ export class Game {
         }
 
         this.statsTimer = 0.5;
+        this.anisotropyTimer -= 0.5;
+
+        if (this.anisotropyTimer <= 0) {
+            // Picks up textures created since the last pass (foliage types, streamed materials).
+            this.anisotropyTimer = 3;
+            this.applyAnisotropy(this.manifest.settings.graphics.anisotropy);
+        }
         const avg =
             this.frameTimes.reduce((a, b) => a + b, 0) / this.frameTimes.length;
         const info = this.renderer.info.render;
@@ -676,7 +691,7 @@ export class Game {
             drawCalls: info.calls,
             triangles: info.triangles,
             position: { x: pos.x, y: pos.y, z: pos.z },
-            foliageInstances: this.world.foliage.instanceCount,
+            ...foliageStats(this.world.foliage),
             renderScale: this.manifest.settings.graphics.dynamic_resolution
                 ? this.effectiveRenderScale()
                 : undefined,
@@ -943,6 +958,7 @@ export class Game {
         this.atmosphere.apply(env);
         this.world.water.applyEnvironment(env);
         this.world.foliage.setWind(env.wind_strength);
+        this.weather?.apply(env);
     }
 
     private readonly foliagePatches = new Map<number, Partial<FoliageType>>();
@@ -987,7 +1003,10 @@ export class Game {
                     `${base}/${id}`,
                     patch,
                 );
-                this.bridge.send({ type: 'foliageTypeSaved', foliageType: saved });
+                this.bridge.send({
+                    type: 'foliageTypeSaved',
+                    foliageType: saved,
+                });
             } catch (error) {
                 this.hud.flash(
                     `Could not save foliage settings: ${error instanceof Error ? error.message : String(error)}`,
@@ -1015,6 +1034,7 @@ export class Game {
         const g = normalizeGraphics(input);
         this.manifest.settings.graphics = g;
         this.atmosphere.setShadowQuality(g.shadow_quality, g.shadow_distance);
+        this.weather?.setQuality(g);
         this.world.terrain.setShadows(
             g.shadow_quality === 'high' || g.shadow_quality === 'ultra',
         );
@@ -1024,17 +1044,8 @@ export class Game {
             Number(g.terrain_texture_resolution ?? 1024),
         );
         this.world.foliage.distanceScale = g.foliage_distance;
-        // Optional hooks owned by the foliage / weather systems (present once those land).
-        const foliage = this.world.foliage as unknown as {
-            setShadowDistance?: (metres: number) => void;
-            setLodBias?: (bias: number) => void;
-        };
-        foliage.setShadowDistance?.(g.foliage_shadow_distance);
-        foliage.setLodBias?.(g.foliage_lod_bias);
-        const weather = (this as unknown as { weather?: unknown }).weather as
-            | { setGraphics?: (g: GraphicsSettings) => void }
-            | undefined;
-        weather?.setGraphics?.(g);
+        this.world.foliage.setShadowDistance(g.foliage_shadow_distance);
+        this.world.foliage.setLodBias(g.foliage_lod_bias);
         this.camera.far = g.draw_distance;
         this.camera.updateProjectionMatrix();
 
@@ -1053,16 +1064,14 @@ export class Game {
     }
 
     /**
-     * Anisotropic filtering on every mipmapped texture in the scene (terrain arrays, foliage, water …),
-     * clamped to the GPU limit. Textures that already have data are re-uploaded, since WebGL applies the
-     * sampler parameter at upload time.
+     * Anisotropic filtering on every mipmapped texture in the scene (terrain texture arrays via the
+     * material's uniforms, foliage, water …), clamped to the GPU limit. Textures that already have data
+     * are re-uploaded, since three.js applies sampler parameters at upload time. Called again after
+     * foliage types change so new textures pick it up.
      */
     private applyAnisotropy(requested: number): void {
         const max = this.renderer.capabilities.getMaxAnisotropy();
         const value = Math.max(1, Math.min(max, Math.round(requested || 1)));
-        const force = value !== this.anisotropy;
-        this.anisotropy = value;
-        this.world.material.setAnisotropy(value);
         const seen = new Set<THREE.Texture>();
 
         this.scene.traverse((object) => {
@@ -1076,8 +1085,9 @@ export class Game {
             }
 
             for (const m of Array.isArray(material) ? material : [material]) {
-                const uniforms = (m as { uniforms?: Record<string, THREE.IUniform> })
-                    .uniforms;
+                const uniforms = (
+                    m as { uniforms?: Record<string, THREE.IUniform> }
+                ).uniforms;
                 const values = [
                     ...Object.values(m),
                     ...Object.values(uniforms ?? {}).map((u) => u?.value),
@@ -1104,7 +1114,7 @@ export class Game {
 
             texture.anisotropy = value;
 
-            if (force && texture.image && texture.version > 0) {
+            if (texture.image && texture.version > 0) {
                 texture.needsUpdate = true;
             }
         }
@@ -1340,4 +1350,17 @@ export class Game {
                 break;
         }
     }
+}
+
+function foliageStats(foliage: Foliage): Partial<GameStats> & {
+    foliageInstances: number;
+} {
+    const f = foliage.stats();
+
+    return {
+        foliageInstances: f.instances,
+        foliageDrawn: f.drawnInstances,
+        foliageDrawCalls: f.drawCalls,
+        foliageTriangles: f.triangles,
+    };
 }

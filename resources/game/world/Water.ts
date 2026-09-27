@@ -93,6 +93,9 @@ export class Water {
             uReflMatrix: { value: new THREE.Matrix4() },
             uReflLevel: { value: 0 },
             uHasReflection: { value: 0 },
+            // Weather (Weather.ts): rain ripple intensity and the wind direction (x, z).
+            uRain: { value: 0 },
+            uWindDir: { value: new THREE.Vector2(0.8, 0.6) },
         };
 
         this.material = new THREE.MeshStandardMaterial({
@@ -140,6 +143,25 @@ export class Water {
             x1: surface.resolution - 1,
             z1: surface.resolution - 1,
         });
+    }
+
+    /** Rain ripples (0-1), current (gusting) wind strength and direction the wind blows towards. */
+    setWeather(
+        rain: number,
+        windStrength: number,
+        windX: number,
+        windZ: number,
+    ): void {
+        this.uniforms.uRain.value = rain;
+        this.uniforms.uWind.value = windStrength;
+        const len = Math.hypot(windX, windZ);
+
+        if (len > 1e-4) {
+            (this.uniforms.uWindDir.value as THREE.Vector2).set(
+                windX / len,
+                windZ / len,
+            );
+        }
     }
 
     applyEnvironment(env: EnvironmentSettings): void {
@@ -778,6 +800,8 @@ uniform sampler2D uReflection;
 uniform mat4 uReflMatrix;
 uniform float uReflLevel;
 uniform float uHasReflection;
+uniform float uRain;
+uniform vec2 uWindDir;
 
 float waterFoam = 0.0;
 float waterThickness = 0.0;   // path length through water along the view ray (m)
@@ -804,6 +828,31 @@ float sceneViewDistance(vec2 uv) {
 vec3 waveNormal(vec2 uv) {
     return texture2D(uNormalMap, uv).xyz * 2.0 - 1.0;
 }
+
+vec2 rippleHash(vec2 p) {
+    vec3 q = fract(p.xyx * vec3(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.xx + q.yz) * q.zy);
+}
+
+// Expanding rings from rain drops: one drop per cell and layer, slope (d height / d xz).
+vec2 rainRipples(vec2 p, float t) {
+    vec2 slope = vec2(0.0);
+    for (int layer = 0; layer < 3; layer++) {
+        float fl = float(layer);
+        vec2 q = p * (2.3 + fl * 0.7) + fl * 17.31;
+        vec2 cell = floor(q);
+        vec2 f = fract(q);
+        vec2 h = rippleHash(cell + fl * 3.7);
+        float phase = fract(t * (1.1 + fl * 0.2) + h.x * 7.0);
+        vec2 d = f - (0.3 + h * 0.4);
+        float dist = length(d);
+        float x = dist - phase * 0.42;
+        float ring = sin(x * 45.0) * exp(-x * x * 500.0) * (1.0 - phase) * (1.0 - phase);
+        slope += d / max(dist, 1e-3) * ring;
+    }
+    return slope;
+}
 `;
 
 const WATER_ALBEDO = /* glsl */ `
@@ -823,7 +872,7 @@ const WATER_ALBEDO = /* glsl */ `
 
     // Foam: soft bubbly band along every intersection (shores, rocks, reeds) + rapids on fast rivers.
     float t = uTime * uWaveSpeed;
-    vec2 wind = vec2(0.8, 0.6);
+    vec2 wind = uWindDir;
     float bubblesA = texture2D(uNormalMap, vWaterPos.xz / 3.3 + wind * t * 0.015 + vWaterFlow * t * 0.2).a;
     float bubblesB = texture2D(uNormalMap, vWaterPos.xz / 1.7 - wind.yx * t * 0.022).a;
     float bubbles = bubblesA * 0.6 + bubblesB * 0.4;
@@ -846,14 +895,14 @@ const WATER_ALBEDO = /* glsl */ `
 `;
 
 const WATER_ROUGHNESS = /* glsl */ `
-float roughnessFactor = mix(roughness, 0.6, waterFoam);
+float roughnessFactor = mix(roughness + uRain * 0.05, 0.6, waterFoam);
 `;
 
 const WATER_NORMAL = /* glsl */ `
 #include <normal_fragment_maps>
 {
     float t = uTime * uWaveSpeed;
-    vec2 wind = normalize(vec2(0.8, 0.6));
+    vec2 wind = uWindDir;
     vec2 uv = vWaterPos.xz / max(uWaveScale, 0.1);
 
     // River flow mapping: two phases of the same layer, cross-faded to hide the reset.
@@ -876,6 +925,9 @@ const WATER_NORMAL = /* glsl */ `
     slope *= 1.0 - waterFoam * 0.7;
     // Calm the surface in very shallow water.
     slope *= smoothstep(0.0, 0.4, waterVertical) * 0.7 + 0.3;
+    if (uRain > 0.001) {
+        slope += rainRipples(vWaterPos.xz, uTime) * uRain * 0.35 * (1.0 - smoothstep(12.0, 60.0, dist));
+    }
 
     // Combine with the geometric (swell) normal in world space, then back to view space.
     vec3 geoWorld = normalize((vec4(normal, 0.0) * viewMatrix).xyz);

@@ -126,6 +126,7 @@ export class PostFx {
     private aoPass: ScaledGTAOPass | null = null;
     private bloomPass: UnrealBloomPass | null = null;
     private gradePass: ShaderPass | null = null;
+    private msaa = false;
     private width = 1;
     private height = 1;
     private pixelRatio = 1;
@@ -141,7 +142,25 @@ export class PostFx {
 
     /** Human readable list of the active passes (debugging / stats). */
     get passNames(): string[] {
-        return this.composer.passes.map((p) => p.constructor.name);
+        return this.composer.passes
+            .map((p): string =>
+                p instanceof RenderPass
+                    ? 'Scene'
+                    : p instanceof GTAOPass
+                      ? 'GTAO'
+                      : p instanceof UnrealBloomPass
+                        ? 'Bloom'
+                        : p instanceof FXAAPass
+                          ? 'FXAA'
+                          : p instanceof SMAAPass
+                            ? 'SMAA'
+                            : p instanceof OutputPass
+                              ? 'Output'
+                              : p === this.gradePass
+                                ? 'Grade'
+                                : 'Pass',
+            )
+            .concat(this.msaa ? ['(MSAA 4×)'] : []);
     }
 
     configure(g: GraphicsSettings): void {
@@ -242,6 +261,7 @@ export class PostFx {
         }
 
         this.composer = composer;
+        this.msaa = aa === 'msaa';
         this.updateGradeSize();
     }
 

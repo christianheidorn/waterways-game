@@ -10,11 +10,7 @@
  *
  * Shared by the studio settings page (resources/js/components/game-settings) and the in-game graphics menu.
  */
-import type {
-    GraphicsSettings,
-    QualityLevel,
-    QualityPreset,
-} from './types';
+import type { GraphicsSettings, QualityLevel, QualityPreset } from './types';
 
 export type PresetName = Exclude<QualityPreset, 'custom'>;
 

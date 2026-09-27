@@ -1,0 +1,1 @@
+var e=`waterways-shell`,t=`waterways-game`;function n(e,t){return typeof e==`object`&&!!e&&e.source===t&&typeof e.payload==`object`}export{e as n,n as r,t};

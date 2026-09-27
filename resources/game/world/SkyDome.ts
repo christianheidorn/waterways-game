@@ -18,7 +18,10 @@ const CLOUD_DEFINES: Record<
  * with self-shadowing towards the sun, storm darkening / overcast desaturation, stars and a moon at
  * night, a horizon band that blends into the scene fog, and lightning flashes lighting the clouds.
  */
-export class SkyDome extends THREE.Mesh<THREE.BoxGeometry, THREE.ShaderMaterial> {
+export class SkyDome extends THREE.Mesh<
+    THREE.BoxGeometry,
+    THREE.ShaderMaterial
+> {
     readonly uniforms: {
         turbidity: THREE.IUniform<number>;
         rayleigh: THREE.IUniform<number>;
@@ -36,6 +39,7 @@ export class SkyDome extends THREE.Mesh<THREE.BoxGeometry, THREE.ShaderMaterial>
         night: THREE.IUniform<number>;
         horizonFog: THREE.IUniform<number>;
         horizonColor: THREE.IUniform<THREE.Color>;
+        deckColor: THREE.IUniform<THREE.Color>;
         flash: THREE.IUniform<number>;
         flashDirection: THREE.IUniform<THREE.Vector3>;
         showSunDisc: THREE.IUniform<number>;
@@ -61,6 +65,7 @@ export class SkyDome extends THREE.Mesh<THREE.BoxGeometry, THREE.ShaderMaterial>
             night: { value: 0 },
             horizonFog: { value: 0 },
             horizonColor: { value: new THREE.Color() },
+            deckColor: { value: new THREE.Color(1, 1, 1) },
             flash: { value: 0 },
             flashDirection: { value: new THREE.Vector3(0, 1, 0) },
             showSunDisc: { value: 1 },
@@ -109,7 +114,9 @@ export class SkyDome extends THREE.Mesh<THREE.BoxGeometry, THREE.ShaderMaterial>
 const TOTAL_RAYLEIGH = [
     5.804542996261093e-6, 1.3562911419845635e-5, 3.0265902468824876e-5,
 ];
-const MIE_CONST = [1.8399918514433978e14, 2.7798023919660528e14, 4.0790479543861094e14];
+const MIE_CONST = [
+    1.8399918514433978e14, 2.7798023919660528e14, 4.0790479543861094e14,
+];
 const CUTOFF_ANGLE = 1.6110731556870734;
 const BETA_R = [0, 0, 0];
 const BETA_M = [0, 0, 0];
@@ -140,7 +147,11 @@ function prepare(p: SkyParams): void {
 }
 
 /** Atmospheric transmittance (0-1 per channel) looking along a direction with the given y. */
-export function extinction(dirY: number, p: SkyParams, out: THREE.Color): THREE.Color {
+export function extinction(
+    dirY: number,
+    p: SkyParams,
+    out: THREE.Color,
+): THREE.Color {
     prepare(p);
     const zenith = Math.acos(Math.max(0, dirY));
     const inv =
@@ -263,6 +274,7 @@ uniform float overcast;
 uniform float night;
 uniform float horizonFog;
 uniform vec3 horizonColor;
+uniform vec3 deckColor;
 uniform float flash;
 uniform vec3 flashDirection;
 uniform float showSunDisc;
@@ -353,14 +365,14 @@ void main() {
 
 	// ---- night sky: faint airglow gradient, stars and the moon
 	float up = max( direction.y, 0.0 );
-	vec3 nightSky = mix( vec3( 0.0024, 0.0034, 0.0062 ), vec3( 0.0006, 0.0010, 0.0026 ), sqrt( up ) );
+	vec3 nightSky = mix( vec3( 0.014, 0.02, 0.036 ), vec3( 0.004, 0.007, 0.017 ), sqrt( up ) );
 	float moonCos = dot( direction, moonPosition );
 	float moonDisc = smoothstep( 0.99962, 0.99972, moonCos );
 	vec3 moon = vec3( 0.0 );
 	if ( night > 0.0 ) {
 		// Craters: a little noise on the disc.
 		float maria = gnoise( ( direction.xz - moonPosition.xz ) * 900.0 ) * 0.25 + 0.85;
-		moon = vec3( 0.9, 0.92, 1.0 ) * ( moonDisc * maria * 1.6 + pow( max( moonCos, 0.0 ), 900.0 ) * 0.06 + pow( max( moonCos, 0.0 ), 30.0 ) * 0.01 );
+		moon = vec3( 0.9, 0.92, 1.0 ) * ( moonDisc * maria * 5.0 + pow( max( moonCos, 0.0 ), 900.0 ) * 0.25 + pow( max( moonCos, 0.0 ), 40.0 ) * 0.04 );
 	}
 	float stars = 0.0;
 	if ( showStars > 0.5 && night > 0.0 && direction.y > 0.0 ) {
@@ -375,10 +387,10 @@ void main() {
 		}
 		// Milky-way-ish band of haze.
 		float band = exp( -pow( dot( direction, normalize( vec3( 0.3, 0.4, 0.86 ) ) ) * 3.2, 2.0 ) );
-		nightSky += vec3( 0.0012, 0.0013, 0.0019 ) * band * ( gnoise( direction.xz * 9.0 ) * 0.5 + 0.6 );
+		nightSky += vec3( 0.006, 0.0065, 0.009 ) * band * ( gnoise( direction.xz * 9.0 ) * 0.5 + 0.6 );
 		stars *= smoothstep( 0.0, 0.15, direction.y );
 	}
-	sky += ( nightSky + moon + vec3( 0.03, 0.032, 0.04 ) * stars ) * night;
+	sky += ( nightSky + moon + vec3( 1.1, 1.15, 1.3 ) * stars ) * night;
 
 	// Solar disc.
 	float sundisc = clamp( ( cosTheta - sunAngularDiameterCos ) * 50000.0, 0.0, 1.0 ) * showSunDisc;
@@ -391,9 +403,10 @@ void main() {
 	// Sunlight and ambient reaching the cloud layer.
 	vec3 sunLight = vSunE * vSunFex * 0.0088;
 	float moonUp = smoothstep( -0.05, 0.2, moonPosition.y );
-	vec3 moonLight = vec3( 0.05, 0.06, 0.085 ) * night * moonUp;
+	vec3 moonLight = vec3( 0.03, 0.036, 0.05 ) * night * moonUp;
 	float skyLum = dot( ( Lin + L0 ) * 0.04, vec3( 0.2126, 0.7152, 0.0722 ) );
-	vec3 ambient = mix( vec3( skyLum ) * vec3( 0.75, 0.85, 1.0 ), vec3( skyLum ), overcast ) * 1.3 + nightSky * 2.0 * night;
+	// Scattered clouds are lit by the sky around them; a closed deck has a uniform (CPU) brightness.
+	vec3 ambient = mix( vec3( skyLum ) * vec3( 0.75, 0.85, 1.0 ) * 1.3, deckColor, overcast ) + nightSky * 2.0 * night;
 
 	vec3 color = sky + sunDiscColor;
 
@@ -421,17 +434,18 @@ void main() {
 		shadow = thickness * 0.8;
 		#endif
 		float density = cloudDensity * ( 0.6 + overcast * 1.6 );
-		float beer = exp( -shadow * 6.0 * density - overcast * 1.2 );
+		float beer = exp( -shadow * 6.0 * density );
 		float powder = 1.0 - exp( -thickness * 10.0 );
 		float silver = clamp( 0.51 / pow( 1.49 - cosTheta * 1.4, 1.5 ), 0.0, 3.0 );
 		float edge = mask * ( 1.0 - mask ) * 4.0;
 		float sunVis = smoothstep( -0.06, 0.08, vSunDirection.y );
 
-		vec3 direct = sunLight * sunVis * ( beer * mix( 0.55, 1.0, powder ) * 0.9 + silver * edge * 0.35 * beer );
+		// A closed deck lets little direct sun through.
+		vec3 direct = sunLight * sunVis * ( beer * mix( 0.55, 1.0, powder ) * 0.9 + silver * edge * 0.35 * beer ) * ( 1.0 - overcast * 0.85 );
 		vec3 amb = ambient * mix( 1.0, 0.55, clamp( thickness * 2.5, 0.0, 1.0 ) ) * ( 0.8 + 0.2 * dy );
 		vec3 cloudColor = direct + amb + moonLight * ( 0.4 + beer );
 		// Storm clouds: thick, dark bases.
-		cloudColor *= 1.0 - cloudDarkness * mix( 0.45, 0.85, clamp( thickness * 3.0, 0.0, 1.0 ) );
+		cloudColor *= 1.0 - cloudDarkness * mix( 0.25, 0.6, clamp( thickness * 3.0, 0.0, 1.0 ) );
 
 		// Lightning lights the clouds from inside, strongest around the strike.
 		float flashLobe = pow( max( dot( direction, flashDirection ), 0.0 ), 6.0 );
@@ -442,7 +456,7 @@ void main() {
 
 		// Aerial perspective: distant clouds dissolve into the haze.
 		float haze = exp( -dy * 9.0 );
-		cloudColor = mix( cloudColor, sky, haze * 0.55 * ( 1.0 - overcast * 0.5 ) );
+		cloudColor = mix( cloudColor, mix( sky, horizonColor, overcast ), haze * 0.55 );
 
 		color = mix( color, cloudColor, alpha );
 
@@ -458,7 +472,7 @@ void main() {
 
 	// Overcast with clouds disabled: a flat grey deck.
 	#if CLOUDS == 0
-	color = mix( color, ambient * ( 1.0 - cloudDarkness * 0.6 ) + vec3( 0.75, 0.8, 1.0 ) * flash * 0.4, overcast * smoothstep( -0.02, 0.1, direction.y ) );
+	color = mix( color, deckColor + vec3( 0.75, 0.8, 1.0 ) * flash * 0.4, overcast * smoothstep( -0.02, 0.1, direction.y ) );
 	#endif
 
 	// Lightning brightens the whole sky a little.

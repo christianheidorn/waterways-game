@@ -46,6 +46,8 @@ function emptyLook(): Look {
     };
 }
 
+const LOOK_KEYS = Object.keys(emptyLook()) as (keyof Look)[];
+
 const smooth = (a: number, b: number, x: number) => {
     const t = THREE.MathUtils.clamp((x - a) / (b - a), 0, 1);
 
@@ -53,7 +55,9 @@ const smooth = (a: number, b: number, x: number) => {
 };
 
 /** Environment values, tolerating maps saved before the weather fields existed. */
-export function withWeatherDefaults(env: EnvironmentSettings): EnvironmentSettings {
+export function withWeatherDefaults(
+    env: EnvironmentSettings,
+): EnvironmentSettings {
     return {
         ...env,
         weather: env.weather ?? 'clear',
@@ -90,6 +94,7 @@ export class Atmosphere {
     private envTarget: THREE.WebGLRenderTarget | null = null;
     private envScene = new THREE.Scene();
     private envSky: SkyDome;
+    private readonly skies: SkyDome[];
     private envDirty = true;
     private envTimer = 0;
     private shadowDistance = 220;
@@ -101,6 +106,7 @@ export class Atmosphere {
     private lightingDirty = true;
     private terrainBase = 0;
     private baseFogColor = new THREE.Color();
+    private deckColor = new THREE.Color();
     private baseFogDensity = 0.0002;
     private readonly underwaterColor = new THREE.Color('#0d3a4a');
     private night = 0;
@@ -132,6 +138,7 @@ export class Atmosphere {
         this.envSky = new SkyDome('low', false);
         this.envSky.scale.setScalar(1000);
         this.envScene.add(this.envSky);
+        this.skies = [this.sky, this.envSky];
 
         this.sun = new THREE.DirectionalLight(0xffffff, 3);
         this.sun.name = 'Sun';
@@ -169,10 +176,13 @@ export class Atmosphere {
         t.turbidity = env.turbidity;
         // Falling rain / snow cuts visibility.
         t.fogDensity =
-            env.fog_density + precip * (snow ? 0.0014 : 0.0007) + storm * 0.0002;
+            env.fog_density +
+            precip * (snow ? 0.0006 : 0.0004) +
+            storm * 0.0001;
         t.exposure = env.exposure;
         t.heightFogHeight = env.height_fog_height;
-        t.heightFogDensity = env.height_fog_height > 0 ? env.height_fog_density : 0;
+        t.heightFogDensity =
+            env.height_fog_height > 0 ? env.height_fog_density : 0;
         t.overcast = smooth(0.55, 1, t.cloudCoverage);
         t.darkness = THREE.MathUtils.clamp(
             smooth(0.75, 1, t.cloudCoverage) * 0.3 +
@@ -192,6 +202,8 @@ export class Atmosphere {
 
         this.lightingDirty = true;
         this.envDirty = true;
+        // Refresh the sky reflections on the next frame (time of day changes are not blended).
+        this.envTimer = 0;
     }
 
     /** Lowest ground (or sea) level: valley fog is measured from here. */
@@ -248,7 +260,11 @@ export class Atmosphere {
             (this.shadowDistance * 2) / Math.max(1, this.sun.shadow.mapSize.x);
         const lightDir = this.lightDirection();
         const center = this.tmpCenter.copy(focus);
-        this.lightRot.lookAt(this.origin, this.tmpDir.copy(lightDir).negate(), this.up);
+        this.lightRot.lookAt(
+            this.origin,
+            this.tmpDir.copy(lightDir).negate(),
+            this.up,
+        );
         this.lightRotInv.copy(this.lightRot).invert();
         center.applyMatrix4(this.lightRotInv);
         center.x = Math.round(center.x / texel) * texel;
@@ -305,10 +321,13 @@ export class Atmosphere {
 
     /** Ambient light colour scaled for unlit effects (rain, snow). */
     ambientColor(out: THREE.Color): THREE.Color {
-        return out
-            .copy(this.hemi.color)
-            .multiplyScalar(this.hemi.intensity * 2.2)
-            .addScaledVector(this.sun.color, this.sun.intensity * 0.12);
+        const k = this.sun.intensity * 0.12;
+        out.copy(this.hemi.color).multiplyScalar(this.hemi.intensity * 2.2);
+        out.r += this.sun.color.r * k;
+        out.g += this.sun.color.g * k;
+        out.b += this.sun.color.b * k;
+
+        return out;
     }
 
     dispose(): void {
@@ -327,7 +346,7 @@ export class Atmosphere {
         const t = this.target;
         let moving = false;
 
-        for (const key of Object.keys(t) as (keyof Look)[]) {
+        for (const key of LOOK_KEYS) {
             const d = t[key] - c[key];
 
             if (Math.abs(d) > Math.abs(t[key]) * 1e-4 + 1e-7) {
@@ -339,7 +358,10 @@ export class Atmosphere {
         }
 
         const len = Math.hypot(c.windX, c.windZ) || 1;
-        this.wind.set((c.windX / len) * c.windStrength, (c.windZ / len) * c.windStrength);
+        this.wind.set(
+            (c.windX / len) * c.windStrength,
+            (c.windZ / len) * c.windStrength,
+        );
 
         if (moving) {
             this.lightingDirty = true;
@@ -348,7 +370,9 @@ export class Atmosphere {
     }
 
     private lightDirection(): THREE.Vector3 {
-        return this.sunDirection.y > -0.05 ? this.sunDirection : this.moonDirection;
+        return this.sunDirection.y > -0.05
+            ? this.sunDirection
+            : this.moonDirection;
     }
 
     private relight(): void {
@@ -389,75 +413,28 @@ export class Atmosphere {
         p.mieCoefficient = 0.004 + cov * 0.012;
         p.mieDirectionalG = 0.8;
 
-        for (const sky of [this.sky, this.envSky]) {
-            const u = sky.uniforms;
-            u.turbidity.value = p.turbidity;
-            u.rayleigh.value = p.rayleigh;
-            u.mieCoefficient.value = p.mieCoefficient;
-            u.mieDirectionalG.value = p.mieDirectionalG;
-            u.sunPosition.value.copy(this.sunDirection);
-            u.moonPosition.value.copy(this.moonDirection);
-            u.cloudCoverage.value = cov;
-            u.cloudDensity.value = 0.35 + cov * 0.65;
-            u.cloudSoftness.value = THREE.MathUtils.lerp(0.22, 0.7, overcast);
-            u.cloudDarkness.value = dark;
-            u.overcast.value = overcast;
-            u.night.value = night * (1 - overcast * 0.9);
-            u.flash.value = flash;
-            u.flashDirection.value.copy(this.flashDirection);
-        }
-
-        // ---- direct light: sun by day, moon by night
-        const sunColor = extinction(this.sunDirection.y, p, this.tmpColor);
-        const maxC = Math.max(sunColor.r, sunColor.g, sunColor.b, 1e-4);
-        sunColor.multiplyScalar(1 / maxC);
-        const cloudBlock = 1 - cov * 0.5 - overcast * 0.38;
-
-        if (this.sunDirection.y > -0.05) {
-            this.sun.color.copy(sunColor).lerp(this.tmpColor2.set('#fff4e6'), 0.25);
-            this.sun.intensity =
-                THREE.MathUtils.lerp(0.35, 3.2, sunUp) *
-                smooth(-3, 3, elevation) *
-                Math.max(0.05, cloudBlock) *
-                (1 - dark * 0.5);
-        } else {
-            this.sun.color.set('#9fb4e0');
-            this.sun.intensity =
-                0.22 *
-                smooth(-4, -12, elevation) *
-                smooth(-0.05, 0.25, this.moonDirection.y) *
-                (1 - overcast * 0.8);
-        }
-
-        // ---- ambient
-        const skyTint = this.tmpColor2.set('#bfd9ff').lerp(this.tmpColor.set('#c9ced6'), overcast);
-        this.hemi.color.copy(skyTint);
-
-        if (night > 0.99) {
-            this.hemi.color.set('#5c6f99');
-        }
-
-        const dayAmbient =
-            THREE.MathUtils.lerp(0.1, 0.25, sunUp) * (1 + cov * 0.8) * (1 - dark * 0.45);
-        this.hemi.intensity =
-            THREE.MathUtils.lerp(dayAmbient, 0.09, night) + flash * 1.4;
-        this.hemi.groundColor.set('#4a4030').multiplyScalar(1 - night * 0.6);
-
-        // ---- lightning flash light from the strike direction
-        this.flashLight.visible = flash > 0.005;
-        this.flashLight.intensity = flash * 5;
-        this.flashLight.position.copy(this.flashDirection).multiplyScalar(1000);
-        this.flashLight.target.position.set(0, 0, 0);
-        this.flashLight.target.updateMatrixWorld();
-
-        // Overcast skies and nights would look muddy at the same exposure: compensate a little.
-        this.renderer.toneMappingExposure =
-            c.exposure * (1 + overcast * 0.3 + dark * 0.25) * (1 + night * 0.9);
-        this.scene.environmentIntensity = 0.55 * (1 - dark * 0.3) + flash * 0.8;
+        // ---- cloud deck brightness: daylight through a closed cloud layer, darker in storms
+        const dir = this.tmpDir;
+        const zenith = skyRadiance(
+            dir.set(0, 1, 0),
+            this.sunDirection,
+            p,
+            this.tmpColor,
+        );
+        const zenithLum =
+            zenith.r * 0.2126 + zenith.g * 0.7152 + zenith.b * 0.0722;
+        const deckLum = zenithLum * 1.2 * (1 - dark * 0.8) + 0.012 * night;
+        const deck = this.deckColor.setRGB(
+            deckLum * 0.95,
+            deckLum * 0.98,
+            deckLum * 1.04,
+        );
+        deck.add(
+            this.tmpColor2.setRGB(0.55, 0.6, 0.8).multiplyScalar(flash * 0.3),
+        );
 
         // ---- fog colour = the sky's horizon radiance so distant terrain melts into the sky
         const horizon = this.baseFogColor.setRGB(0, 0, 0);
-        const dir = this.tmpDir;
 
         for (let i = 0; i < 4; i++) {
             const a = theta + (i * Math.PI) / 2 + Math.PI / 4;
@@ -469,33 +446,111 @@ export class Atmosphere {
         // Radiance towards the sun beyond the average becomes fog in-scattering.
         dir.set(this.sunDirection.x, 0.03, this.sunDirection.z).normalize();
         const sunward = skyRadiance(dir, this.sunDirection, p, this.tmpColor);
-        const lum = horizon.r * 0.2126 + horizon.g * 0.7152 + horizon.b * 0.0722;
-        // Overcast desaturation + cloud deck at the horizon (matches the sky shader).
-        horizon.lerp(this.tmpColor2.setRGB(lum * 0.93, lum * 0.97, lum * 1.04), overcast * 0.85);
-        horizon.multiplyScalar(1 - overcast * 0.25);
-        const cloudLum = lum * 1.3 * (1 - dark * 0.6);
-        horizon.lerp(this.tmpColor2.setRGB(cloudLum, cloudLum, cloudLum * 1.03), cov * 0.45);
-        horizon.add(this.tmpColor2.setRGB(0.0024, 0.0034, 0.0062).multiplyScalar(night * 1.4));
-        horizon.addScaledVector(this.tmpColor2.setRGB(0.55, 0.6, 0.8), flash * 0.15);
-
-        fogSunColor.x = Math.max(0, sunward.r - horizon.r);
-        fogSunColor.y = Math.max(0, sunward.g - horizon.g);
-        fogSunColor.z = Math.max(0, sunward.b - horizon.b);
+        // Thin haze on clear days reads better darker than the (very bright) horizon; in thick fog it
+        // brightens towards the horizon so the terrain melts into the sky.
+        const fogginess = THREE.MathUtils.clamp(
+            (c.fogDensity - 0.0002) / 0.001,
+            0,
+            1,
+        );
+        const fogScale = THREE.MathUtils.lerp(0.16, 0.32, fogginess);
+        fogSunColor.x = Math.max(0, sunward.r - horizon.r) * fogScale;
+        fogSunColor.y = Math.max(0, sunward.g - horizon.g) * fogScale;
+        fogSunColor.z = Math.max(0, sunward.b - horizon.b) * fogScale;
+        horizon.multiplyScalar(fogScale);
+        // Under a cloud deck the horizon is the deck itself (matches the sky shader).
+        horizon.lerp(
+            this.tmpColor2.copy(deck).multiplyScalar(0.85),
+            Math.min(1, overcast * 1.1),
+        );
+        horizon.add(
+            this.tmpColor2
+                .setRGB(0.012, 0.018, 0.032)
+                .multiplyScalar(night * (1 - overcast)),
+        );
+        horizon.add(
+            this.tmpColor2.setRGB(0.55, 0.6, 0.8).multiplyScalar(flash * 0.15),
+        );
         fogSunParams.x = this.sunDirection.x;
         fogSunParams.y = this.sunDirection.y;
         fogSunParams.z = this.sunDirection.z;
-        fogSunParams.w = smooth(-4, 2, elevation) * (1 - overcast * 0.85) * 0.8;
-
+        fogSunParams.w = smooth(-4, 2, elevation) * (1 - overcast * 0.9) * 0.8;
         this.baseFogDensity = c.fogDensity;
 
-        for (const sky of [this.sky, this.envSky]) {
-            sky.uniforms.horizonColor.value.copy(horizon);
-            sky.uniforms.horizonFog.value = THREE.MathUtils.clamp(
-                0.2 + c.fogDensity / 0.0016 + overcast * 0.35,
-                0,
-                1,
-            );
+        for (const sky of this.skies) {
+            const u = sky.uniforms;
+            u.turbidity.value = p.turbidity;
+            u.rayleigh.value = p.rayleigh;
+            u.mieCoefficient.value = p.mieCoefficient;
+            u.mieDirectionalG.value = p.mieDirectionalG;
+            u.sunPosition.value.copy(this.sunDirection);
+            u.moonPosition.value.copy(this.moonDirection);
+            u.cloudCoverage.value = cov;
+            u.cloudDensity.value = 0.35 + cov * 0.65;
+            u.cloudSoftness.value = THREE.MathUtils.lerp(0.22, 0.55, overcast);
+            u.cloudDarkness.value = dark;
+            u.overcast.value = overcast;
+            u.night.value = night * (1 - overcast * 0.9);
+            u.flash.value = flash;
+            u.flashDirection.value.copy(this.flashDirection);
+            u.deckColor.value.copy(deck);
+            u.horizonColor.value.copy(horizon);
+            u.horizonFog.value = Math.max(fogginess, overcast * 0.6);
         }
+
+        // ---- direct light: sun by day, moon by night
+        const sunColor = extinction(this.sunDirection.y, p, this.tmpColor);
+        const maxC = Math.max(sunColor.r, sunColor.g, sunColor.b, 1e-4);
+        sunColor.multiplyScalar(1 / maxC);
+        // Scattered clouds dim the sun a little; a closed deck leaves only soft, shadowless light.
+        const cloudBlock = 1 - cov * 0.4 - overcast * 0.55;
+
+        if (this.sunDirection.y > -0.05) {
+            this.sun.color
+                .copy(sunColor)
+                .lerp(this.tmpColor2.set('#fff4e6'), 0.25);
+            this.sun.intensity =
+                THREE.MathUtils.lerp(0.35, 3.2, sunUp) *
+                smooth(-3, 3, elevation) *
+                Math.max(0.03, cloudBlock) *
+                (1 - dark * 0.6);
+        } else {
+            this.sun.color.set('#9fb4e0');
+            this.sun.intensity =
+                0.16 *
+                smooth(-4, -12, elevation) *
+                smooth(-0.05, 0.25, this.moonDirection.y) *
+                (1 - overcast * 0.8);
+        }
+
+        // ---- ambient
+        this.hemi.color
+            .set('#bfd9ff')
+            .lerp(this.tmpColor2.set('#c3c9d2'), overcast);
+
+        if (night > 0) {
+            this.hemi.color.lerp(this.tmpColor2.set('#5c6f99'), night);
+        }
+
+        const dayAmbient =
+            THREE.MathUtils.lerp(0.1, 0.25, sunUp) *
+            (1 + cov * 0.5) *
+            (1 - dark * 0.6);
+        this.hemi.intensity =
+            THREE.MathUtils.lerp(dayAmbient, 0.07, night) + flash * 1.4;
+        this.hemi.groundColor.set('#4a4030').multiplyScalar(1 - night * 0.6);
+
+        // ---- lightning flash light from the strike direction
+        this.flashLight.visible = flash > 0.005;
+        this.flashLight.intensity = flash * 5;
+        this.flashLight.position.copy(this.flashDirection).multiplyScalar(1000);
+        this.flashLight.target.position.set(0, 0, 0);
+        this.flashLight.target.updateMatrixWorld();
+
+        // Nights would be pitch black at daylight exposure: open up (a gentle "eye adaptation").
+        this.renderer.toneMappingExposure = c.exposure * (1 + night * 0.8);
+        this.scene.environmentIntensity =
+            0.55 * (1 - dark * 0.35) + flash * 0.8;
 
         this.applyFog();
     }
@@ -514,7 +569,8 @@ export class Atmosphere {
             const height = Math.max(1, c.heightFogHeight);
             heightFogParams.x = this.terrainBase;
             heightFogParams.y = 3.2 / height;
-            heightFogParams.z = c.heightFogHeight > 0.5 ? c.heightFogDensity : 0;
+            heightFogParams.z =
+                c.heightFogHeight > 0.5 ? c.heightFogDensity : 0;
         }
     }
 

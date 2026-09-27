@@ -92,6 +92,9 @@ export class TerrainMaterial extends THREE.MeshStandardMaterial {
             uBrushVisible: { value: 0 },
             uBrushColor: { value: new THREE.Color(0.25, 0.75, 1) },
             uGridVisible: { value: 0 },
+            // Global weather (Weather.ts): rain wetness and snow cover, 0-1.
+            uWeatherWet: { value: 0 },
+            uSnowCover: { value: 0 },
         };
 
         this.onBeforeCompile = (shader) => {
@@ -195,6 +198,12 @@ export class TerrainMaterial extends THREE.MeshStandardMaterial {
                 this.textures.clear(i);
             }
         }
+    }
+
+    /** Weather-driven ground state: `wet` darkens and glosses everything (puddles on flat ground), `snow` whitens it. */
+    setWeather(wet: number, snow: number): void {
+        this.uniforms.uWeatherWet.value = wet;
+        this.uniforms.uSnowCover.value = snow;
     }
 
     /** Wetness mask (R8, same grid as the splat map): 1 = soaked ground next to water. */
@@ -340,6 +349,8 @@ uniform vec4 uBrush;
 uniform float uBrushVisible;
 uniform vec3 uBrushColor;
 uniform float uGridVisible;
+uniform float uWeatherWet;
+uniform float uSnowCover;
 
 float terrainRoughness = 1.0;
 float terrainBump = 0.0;       // procedural bump height (layers without material)
@@ -539,6 +550,30 @@ const FRAGMENT_ALBEDO = /* glsl */ `
     albedo *= mix(1.0, 0.55, wet);
     rough = mix(rough, 0.12, wet * 0.85);
     nrm = normalize(mix(nrm, N, wet * 0.5));
+
+    // Weather: rain-soaked ground (porous darkening, glossy) with puddles in flat hollows.
+    if (uWeatherWet > 0.001) {
+        float gw = uWeatherWet;
+        float flatness = smoothstep(0.93, 0.99, N.y);
+        float hollow = (1.0 - macro2.b) * 0.55 + (1.0 - macro.g) * 0.45;
+        float puddle = smoothstep(0.72 - gw * 0.2, 0.78 - gw * 0.2, hollow) * flatness * smoothstep(0.3, 0.8, gw);
+        albedo *= mix(1.0, 0.62, gw * (1.0 - wet * 0.5));
+        rough = mix(rough, rough * 0.45, gw);
+        albedo *= mix(1.0, 0.75, puddle);
+        rough = mix(rough, 0.04, puddle);
+        nrm = normalize(mix(nrm, N, max(gw * 0.25, puddle)));
+    }
+
+    // Snow settles on flatter ground first; thinner near water.
+    if (uSnowCover > 0.001) {
+        float cover = uSnowCover * (1.0 - wet * 0.8);
+        float lie = smoothstep(0.55, 0.85, N.y + (macro2.r - 0.5) * 0.25 + (tileNoise - 0.5) * 0.1);
+        float snow = smoothstep(0.0, 0.25, lie * cover * 1.4 - (1.0 - cover) * 0.3);
+        albedo = mix(albedo, vec3(0.86, 0.89, 0.93) * (0.94 + macro.r * 0.08), snow);
+        rough = mix(rough, 0.55, snow);
+        nrm = normalize(mix(nrm, N, snow * 0.7));
+        ao = mix(ao, 1.0, snow * 0.6);
+    }
 
     diffuseColor.rgb *= albedo;
     terrainRoughness = clamp(rough, 0.03, 1.0);

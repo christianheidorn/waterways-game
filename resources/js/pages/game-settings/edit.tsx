@@ -1,6 +1,7 @@
 import { Head, useForm } from '@inertiajs/react';
 import { RotateCcw } from 'lucide-react';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { GraphicsSettingsForm } from '@/components/game-settings/graphics-settings-form';
 import Heading from '@/components/heading';
 import { SettingsForm } from '@/components/settings-form';
 import { Button } from '@/components/ui/button';
@@ -15,6 +16,27 @@ type Props = {
 
 export default function GameSettingsEdit({ group, values }: Props) {
     const resetForm = useForm({});
+    const resetButton = (
+        <ConfirmDialog
+            trigger={
+                <Button type="button" variant="outline">
+                    <RotateCcw />
+                    Reset to defaults
+                </Button>
+            }
+            title={`Reset ${group.title.toLowerCase()} settings?`}
+            description="Every value in this group goes back to its default. This applies to all maps."
+            confirmLabel="Reset"
+            destructive
+            processing={resetForm.processing}
+            onConfirm={(close) =>
+                resetForm.submit(gameSettings.reset(group.key), {
+                    preserveScroll: true,
+                    onSuccess: close,
+                })
+            }
+        />
+    );
 
     return (
         <>
@@ -29,35 +51,21 @@ export default function GameSettingsEdit({ group, values }: Props) {
                     description={group.description}
                 />
 
-                <SettingsForm
-                    group={group}
-                    values={values}
-                    action={gameSettings.update(group.key)}
-                    actions={
-                        <ConfirmDialog
-                            trigger={
-                                <Button type="button" variant="outline">
-                                    <RotateCcw />
-                                    Reset to defaults
-                                </Button>
-                            }
-                            title={`Reset ${group.title.toLowerCase()} settings?`}
-                            description="Every value in this group goes back to its default. This applies to all maps."
-                            confirmLabel="Reset"
-                            destructive
-                            processing={resetForm.processing}
-                            onConfirm={(close) =>
-                                resetForm.submit(
-                                    gameSettings.reset(group.key),
-                                    {
-                                        preserveScroll: true,
-                                        onSuccess: close,
-                                    },
-                                )
-                            }
-                        />
-                    }
-                />
+                {group.key === 'graphics' ? (
+                    <GraphicsSettingsForm
+                        group={group}
+                        values={values}
+                        action={gameSettings.update(group.key)}
+                        actions={resetButton}
+                    />
+                ) : (
+                    <SettingsForm
+                        group={group}
+                        values={values}
+                        action={gameSettings.update(group.key)}
+                        actions={resetButton}
+                    />
+                )}
             </div>
         </>
     );

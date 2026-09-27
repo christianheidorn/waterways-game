@@ -32,6 +32,11 @@ export type SettingsSection = {
     icon?: LucideIcon;
     /** Field keys rendered in this section, in order. */
     fields: string[];
+    /** Extra UI above the fields (e.g. presets); `setValues` merges several values at once. */
+    addon?: (api: {
+        values: SettingValues;
+        setValues: (patch: SettingValues) => void;
+    }) => ReactNode;
 };
 
 export type SettingsFormProps = {
@@ -88,6 +93,9 @@ function SettingsFormInner({
     const setValue = (key: string, value: SettingValue) =>
         form.setData((prev) => ({ ...prev, [key]: value }));
 
+    const setValues = (patch: SettingValues) =>
+        form.setData((prev) => ({ ...prev, ...patch }));
+
     const submit = (e: FormEvent) => {
         e.preventDefault();
 
@@ -138,6 +146,7 @@ function SettingsFormInner({
                         </header>
                     )}
                     <div className="grid gap-6">
+                        {section.addon?.({ values: form.data, setValues })}
                         {section.fields.map((key) => {
                             const field = fieldsByKey.get(key);
 
@@ -225,7 +234,7 @@ function ResetButton({
     );
 }
 
-function SettingInput({
+export function SettingInput({
     field,
     value,
     onChange,

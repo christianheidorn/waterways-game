@@ -26,6 +26,7 @@ import AppLogoIcon from '@/components/app-logo-icon';
 import { AiReviewSheet } from '@/components/studio/ai-review-sheet';
 import { LiveSettings } from '@/components/studio/live-settings';
 import { useGameBridge } from '@/components/studio/use-game-bridge';
+import { WeatherPresets } from '@/components/weather-presets';
 import { Button } from '@/components/ui/button';
 import {
     Select,
@@ -49,6 +50,7 @@ import {
     TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import { formatWindDirection } from '@/lib/weather-presets';
 import maps from '@/routes/maps';
 import environmentRoutes from '@/routes/maps/environment';
 import gameSettings from '@/routes/game-settings';
@@ -398,7 +400,19 @@ export default function MapEditor({
                                         })
                                     }
                                     action={environmentRoutes.update(map.slug)}
-                                    formatters={{ time_of_day: formatHour }}
+                                    formatters={{
+                                        time_of_day: formatHour,
+                                        wind_direction: formatWindDirection,
+                                    }}
+                                    addon={({ values, setValues }) => (
+                                        <WeatherPresets
+                                            className="grid-cols-4 sm:grid-cols-4"
+                                            value={String(
+                                                values.weather ?? 'clear',
+                                            )}
+                                            onApply={setValues}
+                                        />
+                                    )}
                                 />
                             </div>
                         </>

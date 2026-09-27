@@ -1,5 +1,6 @@
 import { router } from '@inertiajs/react';
 import { RotateCcw, Save } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { useState } from 'react';
 import { ColorField } from '@/components/color-field';
 import { SliderField } from '@/components/slider-field';
@@ -26,6 +27,11 @@ type Props = {
     formatters?: Record<string, (value: number) => string>;
     /** Only render these keys (in order). */
     only?: string[];
+    /** Extra UI above the fields (e.g. presets); `setValues` merges and previews several values at once. */
+    addon?: (api: {
+        values: SettingValues;
+        setValues: (patch: SettingValues) => void;
+    }) => ReactNode;
 };
 
 /**
@@ -39,6 +45,7 @@ export function LiveSettings({
     action,
     formatters = {},
     only,
+    addon,
 }: Props) {
     const [values, setValues] = useState<SettingValues>(initial);
     const [saved, setSaved] = useState<SettingValues>(initial);
@@ -52,6 +59,12 @@ export function LiveSettings({
 
     const update = (key: string, value: SettingValues[string]) => {
         const next = { ...values, [key]: value };
+        setValues(next);
+        onPreview(next);
+    };
+
+    const updateMany = (patch: SettingValues) => {
+        const next = { ...values, ...patch };
         setValues(next);
         onPreview(next);
     };
@@ -75,6 +88,7 @@ export function LiveSettings({
 
     return (
         <div className="flex flex-col gap-5">
+            {addon?.({ values, setValues: updateMany })}
             {fields.map((field) => (
                 <FieldControl
                     key={field.key}

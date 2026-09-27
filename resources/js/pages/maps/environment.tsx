@@ -1,9 +1,11 @@
 import { Head } from '@inertiajs/react';
-import { CloudFog, SunMedium, Waves } from 'lucide-react';
+import { CloudFog, CloudRain, SunMedium, Waves } from 'lucide-react';
 import { MapTabs } from '@/components/map-tabs';
 import type { SettingsSection } from '@/components/settings-form';
 import { SettingsForm } from '@/components/settings-form';
+import { WeatherPresets } from '@/components/weather-presets';
 import { formatTimeOfDay } from '@/lib/format';
+import { formatWindDirection } from '@/lib/weather-presets';
 import maps from '@/routes/maps';
 import type { MapSummary, SettingGroup, SettingValues } from '@/types';
 
@@ -27,10 +29,36 @@ const SECTIONS: SettingsSection[] = [
         ],
     },
     {
+        title: 'Weather',
+        description:
+            'Pick a preset for a matching sky, fog, rain and wind, then fine-tune below.',
+        icon: CloudRain,
+        addon: ({ values, setValues }) => (
+            <WeatherPresets
+                value={String(values.weather ?? 'clear')}
+                onApply={setValues}
+            />
+        ),
+        fields: [
+            'weather',
+            'precipitation',
+            'lightning_frequency',
+            'thunder_volume',
+            'wetness',
+        ],
+    },
+    {
         title: 'Atmosphere',
-        description: 'Distance fog and how strongly foliage and water move.',
+        description:
+            'Distance fog, valley fog and the wind that moves clouds, rain, foliage and water.',
         icon: CloudFog,
-        fields: ['fog_density', 'wind_strength'],
+        fields: [
+            'fog_density',
+            'height_fog_height',
+            'height_fog_density',
+            'wind_strength',
+            'wind_direction',
+        ],
     },
     {
         title: 'Water',
@@ -46,10 +74,17 @@ const SECTIONS: SettingsSection[] = [
     },
 ];
 
+const percent = (v: number) => `${Math.round(v * 100)}%`;
+
 const FORMATTERS = {
     time_of_day: formatTimeOfDay,
     sun_azimuth: (v: number) => `${Math.round(v)}°`,
-    cloud_coverage: (v: number) => `${Math.round(v * 100)}%`,
+    cloud_coverage: percent,
+    precipitation: percent,
+    wetness: percent,
+    thunder_volume: percent,
+    wind_direction: formatWindDirection,
+    height_fog_height: (v: number) => (v > 0 ? `${Math.round(v)} m` : 'Off'),
 };
 
 export default function MapEnvironment({ map, group, values }: Props) {
@@ -116,6 +151,11 @@ function EnvironmentPreview({ values }: { values: SettingValues }) {
         dusk > 0.05
             ? mixHex('#1e293b', '#fb923c', dusk + day * 0.2)
             : horizonDay;
+    const overcast = Math.min(
+        1,
+        Math.max(0, (Number(values.cloud_coverage ?? 0) - 0.4) / 0.6),
+    );
+    const precipitation = Number(values.precipitation ?? 0);
     const shallow = String(values.water_shallow_color ?? '#2fa3a0');
     const deep = String(values.water_deep_color ?? '#0b2f45');
 
@@ -131,11 +171,31 @@ function EnvironmentPreview({ values }: { values: SettingValues }) {
                 }}
             >
                 <div
+                    className="absolute inset-0 bg-slate-500"
+                    style={{ opacity: overcast * (0.35 + day * 0.4) }}
+                />
+                {precipitation > 0.02 && (
+                    <div
+                        className="absolute inset-0"
+                        style={{
+                            opacity: 0.25 + precipitation * 0.5,
+                            backgroundImage:
+                                values.weather === 'snow'
+                                    ? 'radial-gradient(circle, rgb(255 255 255 / 0.9) 1px, transparent 1.5px)'
+                                    : 'repeating-linear-gradient(105deg, transparent 0 6px, rgb(226 232 240 / 0.45) 6px 7px)',
+                            backgroundSize:
+                                values.weather === 'snow'
+                                    ? '9px 9px'
+                                    : undefined,
+                        }}
+                    />
+                )}
+                <div
                     className="absolute size-6 rounded-full bg-amber-100 shadow-[0_0_24px_8px_rgba(253,230,138,0.6)]"
                     style={{
                         left: `${10 + (Math.min(Math.max(hours, 6), 18) - 6) * (80 / 12)}%`,
                         bottom: `${10 + daylight * 60}%`,
-                        opacity: daylight > 0.02 ? 1 : 0,
+                        opacity: daylight > 0.02 ? 1 - overcast * 0.85 : 0,
                     }}
                 />
             </div>

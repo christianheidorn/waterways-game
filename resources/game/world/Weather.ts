@@ -19,7 +19,7 @@ export type WeatherWorld = {
     material: TerrainMaterial;
     water: Water;
     /** Foliage sway strength (Foliage.setWind). */
-    setFoliageWind?: (strength: number) => void;
+    setFoliageWind?: (strength: number, dirX: number, dirZ: number) => void;
 };
 
 /** Seconds to cover ~63 % of a change in precipitation / lightning settings. */
@@ -144,7 +144,11 @@ export class Weather {
         }
 
         this.windVec.copy(this.windDir).multiplyScalar(this.windNow);
-        this.world.setFoliageWind?.(this.windNow);
+        this.world.setFoliageWind?.(
+            this.windNow,
+            this.windDir.x,
+            this.windDir.y,
+        );
 
         // ---- ground & water
         const wet = THREE.MathUtils.clamp(

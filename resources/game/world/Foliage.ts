@@ -266,6 +266,8 @@ export class Foliage {
     private uniforms = {
         uTime: { value: 0 },
         uWind: { value: 0.4 },
+        /** Horizontal direction the wind blows towards (unit x/z). */
+        uWindDir: { value: new THREE.Vector2(0.84, 0.54) },
         uCamPos: { value: new THREE.Vector3() },
         uFadeScale: { value: 1 },
         uDensity: { value: 1 },
@@ -446,8 +448,12 @@ export class Foliage {
         return count;
     }
 
-    setWind(strength: number): void {
+    setWind(strength: number, dirX?: number, dirZ?: number): void {
         this.uniforms.uWind.value = strength;
+
+        if (dirX !== undefined && dirZ !== undefined) {
+            this.uniforms.uWindDir.value.set(dirX, dirZ);
+        }
     }
 
     /** Paint instances of the given types into a circle, respecting each type's rules and density. */
@@ -1984,6 +1990,7 @@ export class Foliage {
         material.onBeforeCompile = (shader) => {
             shader.uniforms.uTime = this.uniforms.uTime;
             shader.uniforms.uWind = this.uniforms.uWind;
+            shader.uniforms.uWindDir = this.uniforms.uWindDir;
             shader.uniforms.uCamPos = this.uniforms.uCamPos;
             shader.uniforms.uFadeScale = this.uniforms.uFadeScale;
             shader.uniforms.uDensity = this.uniforms.uDensity;
@@ -1996,6 +2003,7 @@ export class Foliage {
 attribute float wind;
 uniform float uTime;
 uniform float uWind;
+uniform vec2 uWindDir;
 uniform vec3 uCamPos;
 uniform float uFadeEnd;
 uniform float uFadeScale;
@@ -2022,8 +2030,17 @@ float phase = dot(instPos.xz, vec2(0.071, 0.113));
 float gust = sin(uTime * 0.7 + instPos.x * 0.01) * 0.5 + 0.5;
 float sway = (sin(uTime * 1.9 + phase) * 0.6 + sin(uTime * 3.7 + phase * 1.7) * 0.25) * (0.4 + gust * 0.6);
 float bend = wind * wind * uWind * ${stiffness.toFixed(2)};
-transformed.x += sway * bend * 0.35;
-transformed.z += sway * bend * 0.22;
+// Sway along the wind plus a steady lean downwind. Instances are randomly yawed, so the
+// world-space wind direction is brought into instance space first.
+#ifdef USE_INSTANCING
+vec3 windLocal = transpose(mat3(instanceMatrix)) * vec3(uWindDir.x, 0.0, uWindDir.y);
+vec2 windDir = normalize(windLocal.xz + vec2(1e-5));
+#else
+vec2 windDir = uWindDir;
+#endif
+float lean = bend * 0.22 * (0.5 + gust * 0.5);
+transformed.xz += windDir * (sway * bend * 0.35 + lean)
+    + vec2(-windDir.y, windDir.x) * sway * bend * 0.1;
 float camDist = distance(instPos.xz, uCamPos.xz);
 float fadeEnd = uFadeEnd * uFadeScale;
 float fadeK = 1.0 - smoothstep(fadeEnd * ${fade ? '0.7' : '0.92'}, fadeEnd, camDist);

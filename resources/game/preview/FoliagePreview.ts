@@ -14,7 +14,7 @@ export type FoliagePreviewStats = {
     instances: number;
     trianglesLod0: number;
     trianglesLod1: number;
-    /** Number of LOD geometries (1 for uploaded GLB models). */
+    /** Number of LOD geometries (procedural LODs, or the model's baked LOD0..LODn; 1 for plain GLBs). */
     lodCount: number;
     drawCalls: number;
     /** Scatter mode: ground (m²) where the type's slope / height / water rules allow placement. */
@@ -26,7 +26,7 @@ export type FoliagePreviewStats = {
     cullDistance: number;
     /** Whether the cull ring is drawn (cull distance smaller than the test patch). */
     cullRingVisible: boolean;
-    /** true once an uploaded GLB model has replaced the procedural mesh. */
+    /** true once a GLB model (baked asset or legacy upload) has replaced the procedural mesh. */
     usingModel: boolean;
 };
 
@@ -329,7 +329,7 @@ export class FoliagePreview {
                     : 0,
             cullDistance: cull,
             cullRingVisible: this.mode === 'scatter' && cull < CULL_RING_MAX,
-            usingModel: !!type?.model_url && lods.length === 1,
+            usingModel: !!geometry?.model,
         };
     }
 

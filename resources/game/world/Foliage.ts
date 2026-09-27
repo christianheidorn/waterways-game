@@ -24,8 +24,16 @@ type TypeRenderer = {
     type: FoliageType;
     lods: THREE.BufferGeometry[];
     lodDistances: number[];
-    material: THREE.Material | THREE.Material[];
-    depthMaterial: THREE.MeshDepthMaterial;
+    /** Material(s) per LOD — procedural LODs share one material, baked models have one set per LOD. */
+    lodMaterials: (THREE.Material | THREE.Material[])[];
+    /**
+     * Wind-aware depth material for procedural meshes. null for models: three then builds a depth
+     * variant per material that honours map + alphaTest, so leaf cards cast leaf-shaped shadows.
+     */
+    depthMaterial: THREE.MeshDepthMaterial | null;
+    /** true once a GLB model replaced the procedural geometry. */
+    model: boolean;
+    disposed: boolean;
     cells: Map<string, Cell>;
 };
 
@@ -625,14 +633,21 @@ export class Foliage {
         return placed;
     }
 
-    /** Current render geometry of a type (procedural LODs, or the loaded GLB model). */
-    geometryOf(
-        typeId: number,
-    ): { lods: THREE.BufferGeometry[]; lodDistances: number[] } | null {
+    /** Current render geometry of a type (procedural LODs, or the loaded GLB model's LODs). */
+    geometryOf(typeId: number): {
+        lods: THREE.BufferGeometry[];
+        lodDistances: number[];
+        /** true once a GLB model has replaced the procedural mesh. */
+        model: boolean;
+    } | null {
         const renderer = this.renderers.get(typeId);
 
         return renderer
-            ? { lods: renderer.lods, lodDistances: renderer.lodDistances }
+            ? {
+                  lods: renderer.lods,
+                  lodDistances: renderer.lodDistances,
+                  model: renderer.model,
+              }
             : null;
     }
 
@@ -796,6 +811,7 @@ export class Foliage {
                     this.buildCellMesh(renderer, cell, lod);
                 } else if (lod !== cell.lod) {
                     cell.mesh.geometry = renderer.lods[lod];
+                    cell.mesh.material = lodMaterial(renderer, lod);
                     cell.lod = lod;
                 }
 
@@ -1003,12 +1019,16 @@ export class Foliage {
 
         const mesh = new THREE.InstancedMesh(
             renderer.lods[lod],
-            renderer.material,
+            lodMaterial(renderer, lod),
             count,
         );
         mesh.castShadow = renderer.type.cast_shadows;
         mesh.receiveShadow = true;
-        mesh.customDepthMaterial = renderer.depthMaterial;
+
+        if (renderer.depthMaterial) {
+            mesh.customDepthMaterial = renderer.depthMaterial;
+        }
+
         mesh.name = `Foliage_${renderer.type.name}_${cell.key}`;
         const m = new THREE.Matrix4();
         const q = new THREE.Quaternion();
@@ -1079,8 +1099,10 @@ export class Foliage {
             type,
             lods: set.lods,
             lodDistances: set.lodDistances,
-            material,
+            lodMaterials: set.lods.map(() => material),
             depthMaterial,
+            model: false,
+            disposed: false,
             cells,
         };
 
@@ -1161,98 +1183,136 @@ transformed *= fadeK;`
             `foliage-${stiffness}-${fade}-${material.side}`;
     }
 
+    /**
+     * Loads a GLB model. Baked assets (resources/game/tools/FoliageBaker.ts) contain top-level
+     * nodes "LOD0".."LODn" which become the type's LODs; any other GLB is a single LOD.
+     */
     private async loadModel(
         renderer: TypeRenderer,
         url: string,
     ): Promise<void> {
         try {
             const gltf = await this.gltf.loadAsync(url);
-            const geometries: THREE.BufferGeometry[] = [];
-            const materials: THREE.Material[] = [];
+
+            if (renderer.disposed) {
+                disposeObject(gltf.scene);
+
+                return;
+            }
+
             gltf.scene.updateMatrixWorld(true);
+            const lodNodes = gltf.scene.children
+                .filter((child) => /^LOD\d+$/.test(child.name))
+                .sort(
+                    (a, b) => Number(a.name.slice(3)) - Number(b.name.slice(3)),
+                );
+            const roots = lodNodes.length ? lodNodes : [gltf.scene];
+            const lods: THREE.BufferGeometry[] = [];
+            const lodMaterials: (THREE.Material | THREE.Material[])[] = [];
+
+            for (const root of roots) {
+                const built = buildModelLod(root);
+
+                if (built) {
+                    lods.push(built.geometry);
+                    lodMaterials.push(
+                        built.materials.length === 1
+                            ? built.materials[0]
+                            : built.materials,
+                    );
+                }
+            }
+
+            // The loader's per-node geometry was copied into the merged LODs.
             gltf.scene.traverse((obj) => {
                 const mesh = obj as THREE.Mesh;
 
-                if (!mesh.isMesh) {
-                    return;
+                if (mesh.isMesh) {
+                    mesh.geometry.dispose();
                 }
+            });
 
-                const g = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
+            if (!lods.length) {
+                return;
+            }
 
-                for (const name of Object.keys(g.attributes)) {
-                    if (!['position', 'normal', 'uv'].includes(name)) {
-                        g.deleteAttribute(name);
-                    }
-                }
+            // Wind weight: 0 at the base → 1 at the top of LOD0, shared by all LODs so they sway alike.
+            lods[0].computeBoundingBox();
+            const box = lods[0].boundingBox!;
+            const height = Math.max(0.001, box.max.y - box.min.y);
 
-                if (!g.getAttribute('normal')) {
-                    g.computeVertexNormals();
-                }
+            for (const geometry of lods) {
+                const pos = geometry.getAttribute('position');
+                const windAttr = new Float32Array(pos.count);
 
-                if (!g.getAttribute('uv')) {
-                    g.setAttribute(
-                        'uv',
-                        new THREE.BufferAttribute(
-                            new Float32Array(
-                                g.getAttribute('position').count * 2,
-                            ),
-                            2,
-                        ),
+                for (let i = 0; i < pos.count; i++) {
+                    windAttr[i] = Math.min(
+                        1.2,
+                        Math.max(0, (pos.getY(i) - box.min.y) / height),
                     );
                 }
 
-                geometries.push(g.index ? g.toNonIndexed() : g);
-                const mat = (
-                    Array.isArray(mesh.material)
-                        ? mesh.material[0]
-                        : mesh.material
-                ).clone();
-                materials.push(mat);
-            });
-
-            if (!geometries.length) {
-                return;
+                geometry.setAttribute(
+                    'wind',
+                    new THREE.BufferAttribute(windAttr, 1),
+                );
             }
 
-            const merged = mergeGeometries(geometries, true);
-
-            if (!merged) {
-                return;
-            }
-
-            merged.computeBoundingBox();
-            const box = merged.boundingBox!;
-            const height = Math.max(0.001, box.max.y - box.min.y);
-            const pos = merged.getAttribute('position');
-            const windAttr = new Float32Array(pos.count);
-
-            for (let i = 0; i < pos.count; i++) {
-                windAttr[i] = Math.max(0, (pos.getY(i) - box.min.y) / height);
-            }
-
-            merged.setAttribute('wind', new THREE.BufferAttribute(windAttr, 1));
+            const type = renderer.type;
             const fade =
-                renderer.type.kind === 'grass' ||
-                renderer.type.kind === 'flower';
+                type.kind === 'grass' ||
+                type.kind === 'flower' ||
+                type.kind === 'reed';
+            const tint = new THREE.Color(type.tint || '#ffffff');
+            const unique = new Set(lodMaterials.flat());
 
-            for (const mat of materials) {
-                this.patchMaterial(mat, renderer.type, fade);
+            for (const mat of unique) {
+                const colored = mat as THREE.MeshStandardMaterial;
+
+                if (colored.color?.isColor) {
+                    colored.color.multiply(tint);
+                }
+
+                this.patchMaterial(mat, type, fade);
             }
 
-            renderer.lods = [merged];
-            renderer.lodDistances = [0];
-            renderer.material =
-                materials.length === 1 ? materials[0] : materials;
+            const previous = {
+                lods: renderer.lods,
+                materials: renderer.lodMaterials,
+                depth: renderer.depthMaterial,
+            };
+            renderer.lods = lods;
+            renderer.lodMaterials = lodMaterials;
+            renderer.lodDistances = pickLodDistances(
+                type,
+                gltf.scene.userData,
+                lods.length,
+            );
+            renderer.depthMaterial = null;
+            renderer.model = true;
 
             for (const cell of renderer.cells.values()) {
                 cell.dirty = true;
             }
+
+            // Procedural stand-ins are no longer referenced once dirty cells rebuild.
+            for (const g of previous.lods) {
+                g.dispose();
+            }
+
+            for (const m of new Set(previous.materials.flat())) {
+                m.dispose();
+            }
+
+            previous.depth?.dispose();
         } catch (error) {
             console.warn(`Failed to load foliage model ${url}`, error);
         }
     }
 
     private disposeRenderer(renderer: TypeRenderer): void {
+        renderer.disposed = true;
+
         for (const cell of renderer.cells.values()) {
             this.removeCellMesh(cell);
         }
@@ -1261,13 +1321,15 @@ transformed *= fadeK;`
             g.dispose();
         }
 
-        for (const m of Array.isArray(renderer.material)
-            ? renderer.material
-            : [renderer.material]) {
+        for (const m of new Set(renderer.lodMaterials.flat())) {
+            if (renderer.model) {
+                disposeMaterialTextures(m);
+            }
+
             m.dispose();
         }
 
-        renderer.depthMaterial.dispose();
+        renderer.depthMaterial?.dispose();
     }
 }
 
@@ -1336,9 +1398,275 @@ function sameVisuals(a: FoliageType, b: FoliageType): boolean {
         a.color === b.color &&
         a.color_secondary === b.color_secondary &&
         a.model_url === b.model_url &&
+        (a.tint || '#ffffff').toLowerCase() ===
+            (b.tint || '#ffffff').toLowerCase() &&
+        (a.asset?.id ?? null) === (b.asset?.id ?? null) &&
+        (a.asset?.lod_distances ?? []).join() ===
+            (b.asset?.lod_distances ?? []).join() &&
         a.cull_distance === b.cull_distance &&
         a.cast_shadows === b.cast_shadows
     );
+}
+
+function lodMaterial(
+    renderer: TypeRenderer,
+    lod: number,
+): THREE.Material | THREE.Material[] {
+    return (
+        renderer.lodMaterials[lod] ??
+        renderer.lodMaterials[renderer.lodMaterials.length - 1]
+    );
+}
+
+/**
+ * Merges every mesh under a LOD node into one indexed geometry (one group per material) with
+ * float position / normal / uv (+ colour when a material uses vertex colours).
+ */
+function buildModelLod(root: THREE.Object3D): {
+    geometry: THREE.BufferGeometry;
+    materials: THREE.Material[];
+} | null {
+    const pieces: {
+        geometry: THREE.BufferGeometry;
+        material: THREE.Material;
+    }[] = [];
+    root.updateWorldMatrix(true, true);
+
+    root.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+
+        if (!mesh.isMesh || !mesh.geometry.getAttribute('position')) {
+            return;
+        }
+
+        const source = mesh.geometry;
+        const materials = Array.isArray(mesh.material)
+            ? mesh.material
+            : [mesh.material];
+        const groups =
+            Array.isArray(mesh.material) && source.groups.length
+                ? source.groups
+                : [
+                      {
+                          start: 0,
+                          count: Infinity,
+                          materialIndex: 0,
+                      },
+                  ];
+
+        for (const group of groups) {
+            const material = materials[group.materialIndex ?? 0];
+
+            if (!material) {
+                continue;
+            }
+
+            const g = new THREE.BufferGeometry();
+
+            for (const name of ['position', 'normal', 'uv', 'color']) {
+                const attr = source.getAttribute(name);
+
+                if (attr) {
+                    g.setAttribute(
+                        name,
+                        toFloatAttribute(
+                            attr,
+                            name === 'color' ? 3 : attr.itemSize,
+                        ),
+                    );
+                }
+            }
+
+            const count = source.index
+                ? source.index.count
+                : source.getAttribute('position').count;
+            const start = Math.max(0, group.start);
+            const end = Math.min(count, group.start + group.count);
+            const index: number[] = [];
+
+            for (let i = start; i < end; i++) {
+                index.push(source.index ? source.index.getX(i) : i);
+            }
+
+            g.setIndex(index);
+            g.applyMatrix4(mesh.matrixWorld);
+
+            if (!g.getAttribute('normal')) {
+                g.computeVertexNormals();
+            }
+
+            if (!g.getAttribute('uv')) {
+                g.setAttribute(
+                    'uv',
+                    new THREE.BufferAttribute(
+                        new Float32Array(g.getAttribute('position').count * 2),
+                        2,
+                    ),
+                );
+            }
+
+            pieces.push({ geometry: g, material });
+        }
+    });
+
+    if (!pieces.length) {
+        return null;
+    }
+
+    const withColor = pieces.some(
+        (p) => (p.material as THREE.MeshStandardMaterial).vertexColors,
+    );
+
+    for (const { geometry } of pieces) {
+        if (!withColor) {
+            geometry.deleteAttribute('color');
+        } else if (!geometry.getAttribute('color')) {
+            const white = new Float32Array(
+                geometry.getAttribute('position').count * 3,
+            ).fill(1);
+            geometry.setAttribute('color', new THREE.BufferAttribute(white, 3));
+        }
+    }
+
+    // Consecutive pieces sharing a material become one draw group.
+    const materials: THREE.Material[] = [];
+    const ordered = [...pieces].sort(
+        (a, b) =>
+            firstIndexOf(pieces, a.material) - firstIndexOf(pieces, b.material),
+    );
+
+    for (const piece of ordered) {
+        if (!materials.includes(piece.material)) {
+            materials.push(piece.material);
+        }
+    }
+
+    const merged = mergeGeometries(
+        ordered.map((p) => p.geometry),
+        true,
+    );
+
+    for (const piece of pieces) {
+        piece.geometry.dispose();
+    }
+
+    if (!merged) {
+        return null;
+    }
+
+    // mergeGeometries makes one group per input; remap them to material slots and coalesce.
+    const groups = merged.groups.map((group, i) => ({
+        start: group.start,
+        count: group.count,
+        materialIndex: materials.indexOf(ordered[i].material),
+    }));
+    merged.clearGroups();
+
+    for (const group of groups) {
+        const last = merged.groups[merged.groups.length - 1];
+
+        if (
+            last &&
+            last.materialIndex === group.materialIndex &&
+            last.start + last.count === group.start
+        ) {
+            last.count += group.count;
+        } else {
+            merged.addGroup(group.start, group.count, group.materialIndex);
+        }
+    }
+
+    merged.computeBoundingBox();
+    merged.computeBoundingSphere();
+
+    return { geometry: merged, materials };
+}
+
+function firstIndexOf(
+    pieces: { material: THREE.Material }[],
+    material: THREE.Material,
+): number {
+    return pieces.findIndex((p) => p.material === material);
+}
+
+/** Plain, non-normalized Float32 copy of any (interleaved / quantized) attribute. */
+function toFloatAttribute(
+    attr: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
+    itemSize: number,
+): THREE.BufferAttribute {
+    const out = new Float32Array(attr.count * itemSize);
+
+    for (let i = 0; i < attr.count; i++) {
+        for (let k = 0; k < itemSize; k++) {
+            out[i * itemSize + k] =
+                k < attr.itemSize ? attr.getComponent(i, k) : 1;
+        }
+    }
+
+    return new THREE.BufferAttribute(out, itemSize);
+}
+
+function pickLodDistances(
+    type: FoliageType,
+    userData: Record<string, unknown>,
+    count: number,
+): number[] {
+    const valid = (d: unknown): d is number[] =>
+        Array.isArray(d) &&
+        d.length === count &&
+        d.every((v) => typeof v === 'number' && Number.isFinite(v));
+    const fromAsset = type.asset?.lod_distances;
+
+    if (valid(fromAsset)) {
+        return [0, ...fromAsset.slice(1)];
+    }
+
+    const extras = (
+        userData?.waterways as { lod_distances?: unknown } | undefined
+    )?.lod_distances;
+
+    if (valid(extras)) {
+        return [0, ...extras.slice(1)];
+    }
+
+    if (count === 1) {
+        return [0];
+    }
+
+    if (count === 2) {
+        return [0, 0.35];
+    }
+
+    return Array.from({ length: count }, (_, i) =>
+        i === 0 ? 0 : 0.5 * (i / (count - 1)) ** 1.3,
+    );
+}
+
+function disposeMaterialTextures(material: THREE.Material): void {
+    for (const value of Object.values(material)) {
+        if ((value as THREE.Texture | null)?.isTexture) {
+            (value as THREE.Texture).dispose();
+        }
+    }
+}
+
+function disposeObject(root: THREE.Object3D): void {
+    root.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+
+        if (!mesh.isMesh) {
+            return;
+        }
+
+        mesh.geometry.dispose();
+
+        for (const m of Array.isArray(mesh.material)
+            ? mesh.material
+            : [mesh.material]) {
+            disposeMaterialTextures(m);
+            m.dispose();
+        }
+    });
 }
 
 const _normal = new THREE.Vector3();

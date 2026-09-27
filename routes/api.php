@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\AiController;
 use App\Http\Controllers\Api\FoliageAiController;
 use App\Http\Controllers\Api\FoliageAssetApiController;
+use App\Http\Controllers\Api\FoliageTypeApiController;
 use App\Http\Controllers\Api\MapAiController;
 use App\Http\Controllers\Api\MapDataController;
 use App\Http\Controllers\Api\MaterialApiController;
@@ -32,3 +33,4 @@ Route::get('foliage/assets/{asset}', [FoliageAssetApiController::class, 'show'])
 Route::post('foliage/assets/{asset}/bake', [FoliageAssetApiController::class, 'bake'])->name('api.foliage.assets.bake');
 Route::post('foliage/assets/{asset}/bake-failed', [FoliageAssetApiController::class, 'bakeFailed'])->name('api.foliage.assets.bake-failed');
 Route::post('foliage/ai/plan', [FoliageAiController::class, 'plan'])->name('api.foliage.ai.plan');
+Route::patch('foliage-types/{foliageType}', [FoliageTypeApiController::class, 'update'])->name('api.foliage-types.update');

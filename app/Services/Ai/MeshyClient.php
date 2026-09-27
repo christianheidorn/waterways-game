@@ -21,6 +21,8 @@ class MeshyClient
     public const ENDPOINTS = [
         'text-to-3d' => '/openapi/v2/text-to-3d',
         'image-to-3d' => '/openapi/v1/image-to-3d',
+        'rigging' => '/openapi/v1/rigging',
+        'animations' => '/openapi/v1/animations',
     ];
 
     public function __construct(private readonly AiSettings $settings) {}

@@ -2,11 +2,13 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { CharacterAnimState } from './CharacterModel';
 
-type ClipKey = 'idle' | 'walk' | 'run' | 'jump' | 'swim';
+export type ClipKey = 'idle' | 'walk' | 'run' | 'jump' | 'swim';
 
 /**
  * A rigged glTF character driven by its own animation clips. Clips are matched by name
  * (idle / walk / run / jump|fall / swim), falling back to the closest available clip.
+ * `extraClips` are separate GLBs with the same skeleton (e.g. Meshy's per-animation exports);
+ * their first clip is used for that key.
  */
 export class GltfCharacter {
     readonly root = new THREE.Group();
@@ -14,8 +16,27 @@ export class GltfCharacter {
     private actions = new Map<ClipKey, THREE.AnimationAction>();
     private current: ClipKey | null = null;
 
-    static async load(url: string, height: number): Promise<GltfCharacter> {
-        const gltf = await new GLTFLoader().loadAsync(url);
+    static async load(
+        url: string,
+        height: number,
+        extraClips: Partial<Record<ClipKey, string>> = {},
+    ): Promise<GltfCharacter> {
+        const loader = new GLTFLoader();
+        const [gltf, ...extras] = await Promise.all([
+            loader.loadAsync(url),
+            ...Object.entries(extraClips).map(async ([key, clipUrl]) => {
+                try {
+                    const clip = (await loader.loadAsync(clipUrl!))
+                        .animations[0];
+
+                    return clip ? { key: key as ClipKey, clip } : null;
+                } catch (error) {
+                    console.warn(`Failed to load ${key} animation`, error);
+
+                    return null;
+                }
+            }),
+        ]);
         const character = new GltfCharacter();
         const model = gltf.scene;
 
@@ -30,23 +51,38 @@ export class GltfCharacter {
             if ((obj as THREE.Mesh).isMesh) {
                 obj.castShadow = true;
                 obj.receiveShadow = true;
+                // Skinned meshes animate outside their bind-pose bounds.
+                obj.frustumCulled = false;
             }
         });
         character.root.add(model);
 
-        if (gltf.animations.length) {
+        const extra = new Map<ClipKey, THREE.AnimationClip>();
+
+        for (const item of extras) {
+            if (item) {
+                extra.set(item.key, item.clip);
+            }
+        }
+
+        if (gltf.animations.length || extra.size) {
             character.mixer = new THREE.AnimationMixer(model);
             const find = (...names: string[]) =>
                 gltf.animations.find((clip) =>
                     names.some((n) => clip.name.toLowerCase().includes(n)),
                 );
             const mapping: Record<ClipKey, THREE.AnimationClip | undefined> = {
-                idle: find('idle', 'stand') ?? gltf.animations[0],
-                walk: find('walk'),
-                run: find('run', 'sprint', 'jog'),
-                jump: find('jump', 'fall', 'air'),
-                swim: find('swim', 'tread'),
+                idle: extra.get('idle') ?? find('idle', 'stand'),
+                walk: extra.get('walk') ?? find('walk'),
+                run: extra.get('run') ?? find('run', 'sprint', 'jog'),
+                jump: extra.get('jump') ?? find('jump', 'fall', 'air'),
+                swim: extra.get('swim') ?? find('swim', 'tread'),
             };
+            mapping.idle ??= gltf.animations[0];
+            // Rigged models without an idle clip: hold the first frame of the walk as a pose.
+            mapping.idle ??= mapping.walk
+                ? THREE.AnimationUtils.subclip(mapping.walk, 'idle', 0, 1, 30)
+                : undefined;
             mapping.walk ??= mapping.run ?? mapping.idle;
             mapping.run ??= mapping.walk;
             mapping.jump ??= mapping.idle;

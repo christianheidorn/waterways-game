@@ -105,9 +105,22 @@ class FoliageTypeController extends Controller
      */
     private function validated(Request $request): array
     {
+        $data = $request->validate(self::rules());
+        $data['tint'] ??= '#ffffff';
+
+        return $data;
+    }
+
+    /**
+     * Validation rules of a foliage type (also used by the in-game editor's partial updates).
+     *
+     * @return array<string, list<mixed>>
+     */
+    public static function rules(): array
+    {
         $color = ['required', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'];
 
-        return $request->validate([
+        return [
             'name' => ['required', 'string', 'max:60'],
             'kind' => ['required', Rule::enum(FoliageKind::class)],
             'color' => $color,
@@ -126,6 +139,6 @@ class FoliageTypeController extends Controller
             'allow_underwater' => ['required', 'boolean'],
             'foliage_asset_id' => ['nullable', 'integer', 'exists:foliage_assets,id'],
             'tint' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
-        ]) + ['tint' => '#ffffff'];
+        ];
     }
 }

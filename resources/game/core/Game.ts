@@ -1,9 +1,4 @@
 import * as THREE from 'three';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { Editor } from '../editor/Editor';
 import type { DirtyChannel } from '../editor/Editor';
 import { EditorPanel } from '../editor/ui/EditorPanel';
@@ -17,10 +12,18 @@ import type {
 import { NO_WATER } from '../shared/types';
 import type {
     EnvironmentSettings,
+    FoliageType,
     GameManifest,
     GameSettings,
     GraphicsSettings,
 } from '../shared/types';
+import { normalizeGraphics, syncLegacy } from '../shared/graphicsPresets';
+import {
+    diffGraphics,
+    GraphicsMenu,
+    loadGraphicsOverrides,
+    saveGraphicsOverrides,
+} from '../ui/GraphicsMenu';
 import { Hud, LoadingScreen } from '../ui/Hud';
 import { Atmosphere } from '../world/Atmosphere';
 import { Foliage } from '../world/Foliage';
@@ -34,7 +37,9 @@ import { Wetness } from '../world/Wetness';
 import { Api } from './Api';
 import { Bridge } from './Bridge';
 import type { BootConfig } from './config';
+import { DynamicResolution, GpuTimer } from './DynamicResolution';
 import { Input } from './Input';
+import { PostFx } from './PostFx';
 
 type World = {
     heights: Heightfield;
@@ -58,13 +63,20 @@ export class Game {
     private readonly bridge = new Bridge();
     private readonly container: HTMLElement;
     private renderer!: THREE.WebGLRenderer;
-    private composer!: EffectComposer;
+    private postFx!: PostFx;
+    private gpuTimer: GpuTimer | null = null;
+    private dynamicResolution = new DynamicResolution();
+    /** Project graphics settings from the studio (before per-device overrides). */
+    private graphicsDefaults!: GraphicsSettings;
+    private graphicsMenu: GraphicsMenu | null = null;
+    /** Anisotropy currently applied to scene textures. */
+    private anisotropy = 0;
+    private lastFrameAt = 0;
+    private frameIntervalMs = 16.7;
     private waterTarget: THREE.WebGLRenderTarget | null = null;
     private reflection = new WaterReflection();
     private reflectionLevelTimer = 0;
     private reflectionLevel: number | null = null;
-    private bloomPass: UnrealBloomPass | null = null;
-    private aoPass: GTAOPass | null = null;
     private scene = new THREE.Scene();
     private camera = new THREE.PerspectiveCamera(60, 1, 0.1, 20000);
     private input!: Input;
@@ -124,7 +136,10 @@ export class Game {
             this.createRenderer();
             await this.loadWorld();
             this.createGameplay();
-            this.applyGraphics(this.manifest.settings.graphics);
+            this.graphicsDefaults = normalizeGraphics(
+                this.manifest.settings.graphics,
+            );
+            this.applyGraphics(this.layeredGraphics());
             this.applyEnvironment(this.manifest.environment);
             this.frameInitialView();
             this.setMode(this.mode, true);
@@ -203,6 +218,8 @@ export class Game {
         this.input = new Input(renderer.domElement);
         this.scene.background = null;
         this.atmosphere = new Atmosphere(renderer, this.scene);
+        this.postFx = new PostFx(renderer, this.scene, this.camera);
+        this.gpuTimer = new GpuTimer(renderer.getContext());
 
         this.resizeObserver = new ResizeObserver(() => this.resize());
         this.resizeObserver.observe(this.container);
@@ -333,7 +350,10 @@ export class Game {
 
     private createGameplay(): void {
         const settings = this.manifest.settings;
-        this.player = new Player(settings.player);
+        this.player = new Player(
+            settings.player,
+            this.manifest.character ?? null,
+        );
         this.scene.add(this.player.object);
         this.playerCamera = new ThirdPersonCamera(this.camera, settings.player);
 
@@ -390,8 +410,23 @@ export class Game {
                 this.hud.flash(`Scattered ${count.toLocaleString()} instances`);
             },
             clearFoliage: (ids) => this.editor.clearFoliage(ids),
+            updateFoliageType: (id, patch) => this.updateFoliageType(id, patch),
         });
         this.hud.panelSlot.append(this.panel.el);
+        this.graphicsMenu = new GraphicsMenu(
+            this.hud.el,
+            {
+                current: () => this.manifest.settings.graphics,
+                defaults: () => this.graphicsDefaults,
+                apply: (g) => this.applyGraphicsOverride(g),
+                onOpen: () => {
+                    if (document.pointerLockElement) {
+                        document.exitPointerLock();
+                    }
+                },
+            },
+            this.config.embedded,
+        );
         this.hud.setStatus(this.panel.hintElement);
         this.hud.setHistory(false, false);
         this.hud.setSaveState(this.dirty.size ? 'dirty' : 'idle');
@@ -522,6 +557,23 @@ export class Game {
             return;
         }
 
+        // Frame limiter (max_fps): skip animation frames until the interval is reached. The timer is not
+        // updated on skipped frames, so the simulation delta still covers the whole interval.
+        const now = performance.now();
+        const maxFps = this.manifest.settings.graphics.max_fps ?? 0;
+        const elapsed = now - this.lastFrameAt;
+
+        if (maxFps > 0) {
+            const interval = 1000 / maxFps;
+
+            // 1 ms tolerance so a 60 fps cap on a 60 Hz display does not drop every other frame.
+            if (elapsed < interval - 1) {
+                return;
+            }
+        }
+
+        this.frameIntervalMs = Math.min(elapsed, 1000);
+        this.lastFrameAt = now;
         this.timer.update();
         const dt = Math.min(this.timer.getDelta(), 0.1);
         this.renderer.info.reset();
@@ -555,7 +607,11 @@ export class Game {
             env?.water_shallow_color,
         );
 
+        this.gpuTimer?.poll();
+        this.gpuTimer?.begin();
         this.renderFrame(dt);
+        this.gpuTimer?.end();
+        this.updateDynamicResolution(dt);
         this.input.endFrame();
         this.trackStats(dt, performance.now() - start);
         this.tickAutosave(dt);
@@ -621,7 +677,15 @@ export class Game {
             triangles: info.triangles,
             position: { x: pos.x, y: pos.y, z: pos.z },
             foliageInstances: this.world.foliage.instanceCount,
+            renderScale: this.manifest.settings.graphics.dynamic_resolution
+                ? this.effectiveRenderScale()
+                : undefined,
+            gpuMs: this.gpuTimer?.lastMs ?? undefined,
         };
+        this.graphicsMenu?.setStats(stats, {
+            renderScale: this.effectiveRenderScale(),
+            passes: this.postFx.passNames,
+        });
         this.hud.setStats(
             this.manifest.settings.editor.show_stats ? stats : null,
         );
@@ -661,7 +725,8 @@ export class Game {
             renderer.render(this.scene, this.camera);
             renderer.setRenderTarget(null);
             water.group.visible = true;
-            const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+            // Water maps gl_FragCoord of the composer render (dynamic resolution aware) to scene UVs.
+            const size = this.postFx.renderSize;
             water.setSceneTextures(
                 {
                     color: this.waterTarget.texture,
@@ -678,7 +743,7 @@ export class Game {
             water.setSceneTextures(null);
         }
 
-        this.composer.render(dt);
+        this.postFx.render(dt);
     }
 
     /** Planar reflection of the water level closest to what the viewer is looking at. */
@@ -767,7 +832,8 @@ export class Game {
             this.manifest?.settings.graphics.water_quality ?? 'medium';
         const scale =
             quality === 'high' ? 1 : quality === 'medium' ? 0.6 : 0.35;
-        const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+        // Follows the composer resolution (which dynamic resolution may lower below the canvas size).
+        const size = this.postFx.renderSize;
         this.reflection.setSize(
             size.x,
             size.y,
@@ -788,6 +854,22 @@ export class Game {
         }
     }
 
+    /** Canvas pixel ratio: device pixel ratio × render_scale (the upper bound for dynamic resolution). */
+    private basePixelRatio(): number {
+        const scale = this.manifest?.settings.graphics.render_scale ?? 1;
+
+        return Math.min(window.devicePixelRatio * scale, 3);
+    }
+
+    /** Render scale (× device pixel ratio) the scene is currently rendered at. */
+    private effectiveRenderScale(): number {
+        const g = this.manifest.settings.graphics;
+
+        return g.dynamic_resolution
+            ? Math.min(this.dynamicResolution.scale, g.render_scale)
+            : g.render_scale;
+    }
+
     private resize(): void {
         if (!this.renderer) {
             return;
@@ -795,16 +877,52 @@ export class Game {
 
         const w = this.container.clientWidth || window.innerWidth;
         const h = this.container.clientHeight || window.innerHeight;
-        const scale = this.manifest?.settings.graphics.render_scale ?? 1;
-        this.renderer.setPixelRatio(
-            Math.min(window.devicePixelRatio * scale, 3),
+        const base = this.basePixelRatio();
+        const size = this.renderer.getSize(new THREE.Vector2());
+
+        // Resizing the canvas clears it and reallocates the back buffer: only when something changed.
+        if (
+            size.x !== w ||
+            size.y !== h ||
+            this.renderer.getPixelRatio() !== base
+        ) {
+            this.renderer.setPixelRatio(base);
+            this.renderer.setSize(w, h, false);
+        }
+
+        // The composer renders at the effective (possibly dynamic) scale; its last pass upscales to the canvas.
+        const effective = Math.min(
+            base,
+            window.devicePixelRatio * this.effectiveRenderScale(),
         );
-        this.renderer.setSize(w, h, false);
-        this.composer?.setPixelRatio(this.renderer.getPixelRatio());
-        this.composer?.setSize(w, h);
+        this.postFx.setSize(w, h, effective);
         this.resizeWaterTarget();
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
+    }
+
+    private updateDynamicResolution(dt: number): void {
+        const g = this.manifest.settings.graphics;
+
+        if (!g.dynamic_resolution) {
+            return;
+        }
+
+        const target = Math.min(
+            g.target_fps || 60,
+            g.max_fps > 0 ? g.max_fps : Infinity,
+        );
+
+        if (
+            this.dynamicResolution.update(
+                dt,
+                this.frameIntervalMs,
+                this.gpuTimer?.lastMs ?? null,
+                target,
+            )
+        ) {
+            this.resize();
+        }
     }
 
     private isPointerOverUi(): boolean {
@@ -827,7 +945,74 @@ export class Game {
         this.world.foliage.setWind(env.wind_strength);
     }
 
-    private applyGraphics(g: GraphicsSettings): void {
+    private readonly foliagePatches = new Map<number, Partial<FoliageType>>();
+    private foliageSaveTimer = 0;
+
+    /**
+     * In-editor foliage type tweaks (density, scale, rules, …): applied live and saved to the
+     * studio library after a short pause, so the editor never has to be left.
+     */
+    private updateFoliageType(id: number, patch: Partial<FoliageType>): void {
+        const types = this.manifest.foliage_types.map((t) =>
+            t.id === id ? { ...t, ...patch } : t,
+        );
+        this.manifest.foliage_types = types;
+        this.world.foliage.setTypes(types);
+        this.editor.setFoliageTypes(types);
+        this.foliagePatches.set(id, {
+            ...this.foliagePatches.get(id),
+            ...patch,
+        });
+
+        window.clearTimeout(this.foliageSaveTimer);
+        this.foliageSaveTimer = window.setTimeout(
+            () => void this.flushFoliagePatches(),
+            700,
+        );
+    }
+
+    private async flushFoliagePatches(): Promise<void> {
+        const base = this.manifest.endpoints.update_foliage_type;
+
+        if (!base) {
+            return;
+        }
+
+        const patches = [...this.foliagePatches];
+        this.foliagePatches.clear();
+
+        for (const [id, patch] of patches) {
+            try {
+                const saved = await this.api.patchJson<FoliageType>(
+                    `${base}/${id}`,
+                    patch,
+                );
+                this.bridge.send({ type: 'foliageTypeSaved', foliageType: saved });
+            } catch (error) {
+                this.hud.flash(
+                    `Could not save foliage settings: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            }
+        }
+    }
+
+    /** Project defaults with this device's overrides (in-game graphics menu) on top. */
+    private layeredGraphics(): GraphicsSettings {
+        return normalizeGraphics({
+            ...this.graphicsDefaults,
+            ...loadGraphicsOverrides(),
+        });
+    }
+
+    /** From the in-game graphics menu: store what differs from the project defaults, then apply. */
+    private applyGraphicsOverride(g: GraphicsSettings): void {
+        const next = syncLegacy(g);
+        saveGraphicsOverrides(diffGraphics(next, this.graphicsDefaults));
+        this.applyGraphics(next);
+    }
+
+    private applyGraphics(input: GraphicsSettings): void {
+        const g = normalizeGraphics(input);
         this.manifest.settings.graphics = g;
         this.atmosphere.setShadowQuality(g.shadow_quality, g.shadow_distance);
         this.world.terrain.setShadows(
@@ -839,58 +1024,99 @@ export class Game {
             Number(g.terrain_texture_resolution ?? 1024),
         );
         this.world.foliage.distanceScale = g.foliage_distance;
+        // Optional hooks owned by the foliage / weather systems (present once those land).
+        const foliage = this.world.foliage as unknown as {
+            setShadowDistance?: (metres: number) => void;
+            setLodBias?: (bias: number) => void;
+        };
+        foliage.setShadowDistance?.(g.foliage_shadow_distance);
+        foliage.setLodBias?.(g.foliage_lod_bias);
+        const weather = (this as unknown as { weather?: unknown }).weather as
+            | { setGraphics?: (g: GraphicsSettings) => void }
+            | undefined;
+        weather?.setGraphics?.(g);
         this.camera.far = g.draw_distance;
         this.camera.updateProjectionMatrix();
-        this.buildComposer(g);
+
+        if (
+            !g.dynamic_resolution ||
+            this.dynamicResolution.max !==
+                Math.max(this.dynamicResolution.min, g.render_scale)
+        ) {
+            this.dynamicResolution.reset(g.render_scale);
+        }
+
+        this.postFx.configure(g);
+        this.applyAnisotropy(g.anisotropy);
         this.resize();
+        this.graphicsMenu?.sync();
     }
 
-    private buildComposer(g: GraphicsSettings): void {
-        const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
-        const target = new THREE.WebGLRenderTarget(
-            Math.max(1, size.x),
-            Math.max(1, size.y),
-            {
-                type: THREE.HalfFloatType,
-                samples: g.antialias ? 4 : 0,
-            },
-        );
-        this.composer?.dispose();
-        this.composer = new EffectComposer(this.renderer, target);
-        this.composer.addPass(new RenderPass(this.scene, this.camera));
-        this.aoPass = null;
-        this.bloomPass = null;
+    /**
+     * Anisotropic filtering on every mipmapped texture in the scene (terrain arrays, foliage, water …),
+     * clamped to the GPU limit. Textures that already have data are re-uploaded, since WebGL applies the
+     * sampler parameter at upload time.
+     */
+    private applyAnisotropy(requested: number): void {
+        const max = this.renderer.capabilities.getMaxAnisotropy();
+        const value = Math.max(1, Math.min(max, Math.round(requested || 1)));
+        const force = value !== this.anisotropy;
+        this.anisotropy = value;
+        this.world.material.setAnisotropy(value);
+        const seen = new Set<THREE.Texture>();
 
-        if (g.ambient_occlusion) {
-            this.aoPass = new GTAOPass(this.scene, this.camera, size.x, size.y);
-            this.aoPass.updateGtaoMaterial({
-                radius: 2.5,
-                distanceExponent: 1.5,
-                thickness: 2,
-                scale: 1,
-            });
-            this.aoPass.blendIntensity = 0.8;
-            this.composer.addPass(this.aoPass);
+        this.scene.traverse((object) => {
+            const material = (object as THREE.Mesh).material as
+                | THREE.Material
+                | THREE.Material[]
+                | undefined;
+
+            if (!material) {
+                return;
+            }
+
+            for (const m of Array.isArray(material) ? material : [material]) {
+                const uniforms = (m as { uniforms?: Record<string, THREE.IUniform> })
+                    .uniforms;
+                const values = [
+                    ...Object.values(m),
+                    ...Object.values(uniforms ?? {}).map((u) => u?.value),
+                ];
+
+                for (const v of values) {
+                    if (v instanceof THREE.Texture) {
+                        seen.add(v);
+                    }
+                }
+            }
+        });
+
+        for (const texture of seen) {
+            if (
+                (texture as THREE.Texture & { isRenderTargetTexture?: boolean })
+                    .isRenderTargetTexture ||
+                texture.minFilter === THREE.NearestFilter ||
+                texture.minFilter === THREE.LinearFilter ||
+                texture.anisotropy === value
+            ) {
+                continue;
+            }
+
+            texture.anisotropy = value;
+
+            if (force && texture.image && texture.version > 0) {
+                texture.needsUpdate = true;
+            }
         }
-
-        if (g.bloom) {
-            this.bloomPass = new UnrealBloomPass(
-                new THREE.Vector2(size.x, size.y),
-                0.12,
-                0.45,
-                3.5,
-            );
-            this.composer.addPass(this.bloomPass);
-        }
-
-        this.composer.addPass(new OutputPass());
     }
 
     private applySettings(settings: GameSettings): void {
         this.manifest.settings = settings;
         this.player.applySettings(settings.player);
         this.playerCamera.applySettings(settings.player);
-        this.applyGraphics(settings.graphics);
+        // The studio sends project defaults; this device's overrides stay on top.
+        this.graphicsDefaults = normalizeGraphics(settings.graphics);
+        this.applyGraphics(this.layeredGraphics());
         this.editor.fly.speed = settings.editor.fly_speed;
     }
 

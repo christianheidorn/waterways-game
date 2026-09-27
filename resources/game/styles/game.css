@@ -906,3 +906,14 @@ body.ww-body {
     color: var(--ww-muted);
     font-size: 11px;
 }
+
+/* In-editor foliage type settings */
+.ww-foliage-edit-head .ww-select {
+    width: 100%;
+    text-align: left;
+}
+
+.ww-select {
+    appearance: auto;
+    cursor: pointer;
+}

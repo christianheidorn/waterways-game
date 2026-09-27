@@ -3,10 +3,24 @@
 namespace App\Support;
 
 /**
- * Per-map environment (sky, lighting, fog, water look).
+ * Per-map environment (sky, lighting, fog, weather, water look).
+ *
+ * Keep in sync with EnvironmentSettings in resources/game/shared/types.ts. Maps saved before a field
+ * existed get its default through merge().
  */
 final class EnvironmentDefaults
 {
+    /** @var array<string, string> */
+    public const WEATHER = [
+        'clear' => 'Clear',
+        'cloudy' => 'Cloudy',
+        'overcast' => 'Overcast',
+        'fog' => 'Foggy',
+        'rain' => 'Rain',
+        'storm' => 'Thunderstorm',
+        'snow' => 'Snow',
+    ];
+
     public static function group(): SettingGroup
     {
         return new SettingGroup('environment', 'Environment', 'Sky, lighting, fog and water appearance for this map.', [
@@ -17,6 +31,14 @@ final class EnvironmentDefaults
             SettingField::number('fog_density', 'Fog density', 0.00018, 0, 0.004, 0.00001),
             SettingField::number('exposure', 'Exposure', 0.5, 0.1, 2, 0.01),
             SettingField::number('wind_strength', 'Wind strength', 0.4, 0, 2, 0.01),
+            SettingField::number('wind_direction', 'Wind direction', 45, 0, 360, 1, '°', 'Direction the wind blows towards (0 = north, 90 = east). Moves clouds and slants rain.'),
+            SettingField::select('weather', 'Weather', 'clear', self::WEATHER, 'Weather type; the studio presets also set a matching sky, fog and rain. Snow turns precipitation into snowfall.'),
+            SettingField::number('precipitation', 'Precipitation', 0, 0, 1, 0.01, null, 'Amount of rain (or snow) falling around the camera.'),
+            SettingField::number('lightning_frequency', 'Lightning', 0, 0, 20, 0.1, '/min', 'Lightning strikes per minute.'),
+            SettingField::number('thunder_volume', 'Thunder volume', 0.7, 0, 1, 0.01),
+            SettingField::number('height_fog_height', 'Valley fog height', 0, 0, 2000, 1, 'm', 'Fog that pools in valleys, up to this height above the lowest point of the map (or sea level with an ocean). 0 = off.'),
+            SettingField::number('height_fog_density', 'Valley fog density', 0.012, 0, 0.1, 0.0005, null, 'Thickness of the valley fog at its base.'),
+            SettingField::number('wetness', 'Ground wetness', 0, 0, 1, 0.01, null, 'How wet the ground looks. Rain also soaks the ground over time.'),
             SettingField::color('water_shallow_color', 'Shallow water colour', '#3aa6a0', 'Tint of clear, shallow water. Also controls which colours the water absorbs.'),
             SettingField::color('water_deep_color', 'Deep water colour', '#0a2a3c', 'Colour of the water body where it is too deep to see the bottom.'),
             SettingField::number('water_clarity', 'Water clarity', 5, 0.3, 40, 0.1, 'm', 'How far you can see into the water before the deep colour takes over.'),

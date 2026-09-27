@@ -19,6 +19,7 @@ import {
 } from 'lucide';
 import type { IconNode } from 'lucide';
 import type { EditorToolGroup } from '../../shared/protocol';
+import type { FoliageType } from '../../shared/types';
 import {
     button,
     h,
@@ -165,6 +166,9 @@ export class EditorPanel {
     private refreshers: Array<() => void> = [];
     /** Rendered previews for foliage types without a baked thumbnail. */
     private readonly foliageThumbs = new FoliageThumbnails();
+    /** Foliage type whose settings are shown under the list (last clicked tile). */
+    private editingTypeId: number | null = null;
+    private rebuildFoliageSettings: (() => void) | null = null;
 
     constructor(
         private readonly editor: Editor,
@@ -173,6 +177,11 @@ export class EditorPanel {
             softenMap: () => void;
             scatter: (ids: number[]) => void;
             clearFoliage: (ids: number[]) => void;
+            /** Change a foliage type's settings live (saved to the studio library). */
+            updateFoliageType: (
+                id: number,
+                patch: Partial<FoliageType>,
+            ) => void;
         },
     ) {
         this.groupSeg = segmented(
@@ -207,7 +216,7 @@ export class EditorPanel {
     refresh(): void {
         const s = this.editor.state;
         this.groupSeg.set(s.group);
-        const key = `${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}${t.min_scale}${t.max_scale}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}`;
+        const key = `${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}`;
 
         if (key !== this.renderedKey) {
             this.renderedKey = key;
@@ -278,6 +287,7 @@ export class EditorPanel {
                     }),
                 );
                 this.body.append(this.foliageList());
+                this.body.append(this.foliageSettings());
                 this.body.append(this.brushSection(s.foliageTool !== 'single'));
                 this.body.append(
                     section(
@@ -743,6 +753,25 @@ export class EditorPanel {
                 type.asset?.thumbnail_url ?? this.foliageThumbs.get(type);
             const size = foliageSize(type);
             const subtitle = [type.kind, size].filter(Boolean).join(' · ');
+            const subtitleEl = h(
+                'span',
+                { class: 'ww-material-sub ww-foliage-sub' },
+                subtitle,
+            );
+            this.refreshers.push(() => {
+                const current = this.editor.foliageTypes.find(
+                    (t) => t.id === type.id,
+                );
+
+                if (current) {
+                    subtitleEl.textContent = [
+                        current.kind,
+                        foliageSize(current),
+                    ]
+                        .filter(Boolean)
+                        .join(' · ');
+                }
+            });
             const tile = h(
                 'button',
                 {
@@ -756,8 +785,10 @@ export class EditorPanel {
                             s.foliageSelection.add(type.id);
                         }
 
+                        this.editingTypeId = type.id;
                         sync();
                         syncCount();
+                        this.rebuildFoliageSettings?.();
                     },
                 },
                 h('span', {
@@ -772,11 +803,7 @@ export class EditorPanel {
                     'span',
                     { class: 'ww-material-text' },
                     h('span', { class: 'ww-material-name' }, type.name),
-                    h(
-                        'span',
-                        { class: 'ww-material-sub ww-foliage-sub' },
-                        subtitle,
-                    ),
+                    subtitleEl,
                 ),
             );
             const sync = () => {
@@ -814,6 +841,241 @@ export class EditorPanel {
                 count,
             ),
         );
+    }
+
+    /**
+     * Settings of one foliage type, editable without leaving the editor. Every change applies
+     * live and is saved to the studio library after a short pause.
+     */
+    private foliageSettings(): HTMLElement {
+        const wrap = h('div', {});
+        const build = () => {
+            const s = this.editor.state;
+            const types = this.editor.foliageTypes;
+
+            if (!types.length) {
+                wrap.replaceChildren();
+
+                return;
+            }
+
+            if (!types.some((t) => t.id === this.editingTypeId)) {
+                this.editingTypeId =
+                    types.find((t) => s.foliageSelection.has(t.id))?.id ??
+                    types[0].id;
+            }
+
+            const id = this.editingTypeId!;
+            const current = (): FoliageType =>
+                this.editor.foliageTypes.find((t) => t.id === id)!;
+            const type = current();
+            const update = (patch: Partial<FoliageType>) =>
+                this.actions.updateFoliageType(id, patch);
+            const baseHeight = type.asset?.height ?? null;
+            const metres = (scale: number) =>
+                baseHeight ? ` (≈ ${formatMetres(scale * baseHeight)})` : '';
+
+            const picker = h('select', {
+                class: 'ww-input ww-select',
+                'aria-label': 'Foliage type to edit',
+            });
+
+            for (const t of types) {
+                const option = h('option', { value: String(t.id) }, t.name);
+                option.selected = t.id === id;
+                picker.append(option);
+            }
+
+            picker.addEventListener('change', () => {
+                this.editingTypeId = Number(picker.value);
+                build();
+            });
+
+            const density = slider({
+                label: 'Density',
+                min: 0.01,
+                max: 500,
+                step: 0.01,
+                log: true,
+                value: type.density,
+                format: (v) =>
+                    `${v < 1 ? v.toFixed(2) : v < 10 ? v.toFixed(1) : Math.round(v)} /100 m²`,
+                onInput: (v) => update({ density: v }),
+            });
+            let minScale: ReturnType<typeof slider>;
+            let maxScale: ReturnType<typeof slider>;
+            minScale = slider({
+                label: 'Min size',
+                min: 0.05,
+                max: 20,
+                step: 0.01,
+                log: true,
+                value: type.min_scale,
+                format: (v) => `${v.toFixed(2)}×${metres(v)}`,
+                onInput: (v) => {
+                    const patch: Partial<FoliageType> = { min_scale: v };
+
+                    if (v > current().max_scale) {
+                        patch.max_scale = v;
+                        maxScale.set(v);
+                    }
+
+                    update(patch);
+                },
+            });
+            maxScale = slider({
+                label: 'Max size',
+                min: 0.05,
+                max: 20,
+                step: 0.01,
+                log: true,
+                value: type.max_scale,
+                format: (v) => `${v.toFixed(2)}×${metres(v)}`,
+                onInput: (v) => {
+                    const patch: Partial<FoliageType> = { max_scale: v };
+
+                    if (v < current().min_scale) {
+                        patch.min_scale = v;
+                        minScale.set(v);
+                    }
+
+                    update(patch);
+                },
+            });
+            let minSlope: ReturnType<typeof slider>;
+            let maxSlope: ReturnType<typeof slider>;
+            minSlope = slider({
+                label: 'Min slope',
+                min: 0,
+                max: 90,
+                step: 1,
+                unit: '°',
+                value: type.min_slope,
+                onInput: (v) => {
+                    const patch: Partial<FoliageType> = { min_slope: v };
+
+                    if (v > current().max_slope) {
+                        patch.max_slope = v;
+                        maxSlope.set(v);
+                    }
+
+                    update(patch);
+                },
+            });
+            maxSlope = slider({
+                label: 'Max slope',
+                min: 0,
+                max: 90,
+                step: 1,
+                unit: '°',
+                value: type.max_slope,
+                onInput: (v) => {
+                    const patch: Partial<FoliageType> = { max_slope: v };
+
+                    if (v < current().min_slope) {
+                        patch.min_slope = v;
+                        minSlope.set(v);
+                    }
+
+                    update(patch);
+                },
+            });
+            const cull = slider({
+                label: 'Visible up to',
+                min: 20,
+                max: 5000,
+                step: 10,
+                log: true,
+                unit: ' m',
+                value: type.cull_distance,
+                onInput: (v) => update({ cull_distance: v }),
+            });
+            const altitude = (
+                label: string,
+                key: 'min_height' | 'max_height',
+            ): HTMLElement => {
+                const input = h('input', {
+                    type: 'number',
+                    step: '1',
+                    class: 'ww-input',
+                    placeholder: 'any',
+                    value:
+                        type[key] === null
+                            ? ''
+                            : String(Math.round(type[key]!)),
+                });
+                input.addEventListener('change', () => {
+                    const value =
+                        input.value.trim() === '' ? null : Number(input.value);
+                    update({
+                        [key]:
+                            value !== null && Number.isFinite(value)
+                                ? value
+                                : null,
+                    });
+                });
+
+                return h(
+                    'label',
+                    { class: 'ww-field' },
+                    h('span', {}, label),
+                    input,
+                );
+            };
+            const shadows = toggle('Cast shadows', type.cast_shadows, (v) =>
+                update({ cast_shadows: v }),
+            );
+            const align = toggle(
+                'Align to terrain slope',
+                type.align_to_normal,
+                (v) => update({ align_to_normal: v }),
+            );
+            const yaw = toggle('Random rotation', type.random_yaw, (v) =>
+                update({ random_yaw: v }),
+            );
+            const underwater = toggle(
+                'Allow under water',
+                type.allow_underwater,
+                (v) => update({ allow_underwater: v }),
+            );
+
+            wrap.replaceChildren(
+                section(
+                    'Type settings',
+                    h('div', { class: 'ww-row ww-foliage-edit-head' }, picker),
+                    density.el,
+                    minScale.el,
+                    maxScale.el,
+                    minSlope.el,
+                    maxSlope.el,
+                    altitude('Min altitude (m)', 'min_height'),
+                    altitude('Max altitude (m)', 'max_height'),
+                    cull.el,
+                    shadows.el,
+                    align.el,
+                    yaw.el,
+                    underwater.el,
+                    h(
+                        'p',
+                        { class: 'ww-muted' },
+                        'Saved to the studio library automatically. Visibility and shadows update at once; density, size and placement rules apply to new painting — use Scatter to regenerate a type.',
+                    ),
+                    button(
+                        `Re-scatter ${type.name}`,
+                        () => this.actions.scatter([id]),
+                        {
+                            icon: Sparkles,
+                            title: 'Replace all placed instances of this type using the new settings (undoable)',
+                        },
+                    ),
+                ),
+            );
+        };
+
+        this.rebuildFoliageSettings = build;
+        build();
+
+        return wrap;
     }
 
     private waterOptions(): HTMLElement {

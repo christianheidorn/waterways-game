@@ -14,6 +14,7 @@ final class GameManifest
     public function __construct(
         private readonly TerrainStorage $storage,
         private readonly GameSettingsRepository $settings,
+        private readonly ActiveCharacter $character,
     ) {}
 
     /**
@@ -31,6 +32,7 @@ final class GameManifest
             'settings' => $this->settings->all(),
             'layers' => $map->layers->map->toGameArray()->values()->all(),
             'foliage_types' => FoliageType::query()->with('asset')->orderBy('name')->get()->map->toGameArray()->values()->all(),
+            'character' => $this->character->get()?->toGameArray(),
             'assets' => [
                 'heightmap' => $asset('heightmap'),
                 'splatmap' => $asset('splatmap'),
@@ -46,6 +48,7 @@ final class GameManifest
                 'save_foliage' => route('api.maps.assets.update', [$map, 'foliage']),
                 'save_meta' => route('api.maps.meta.update', $map),
                 'save_thumbnail' => route('api.maps.thumbnail.store', $map),
+                'update_foliage_type' => url('/api/foliage-types'),
             ],
         ];
     }

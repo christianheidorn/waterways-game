@@ -27,6 +27,10 @@ export type GameStats = {
     triangles: number;
     position: { x: number; y: number; z: number };
     foliageInstances: number;
+    /** Effective render scale (× device pixel ratio) while dynamic resolution is active. */
+    renderScale?: number;
+    /** GPU time of the last measured frame (ms), when EXT_disjoint_timer_query is available. */
+    gpuMs?: number;
 };
 
 /** Messages the shell sends into the game. */
@@ -61,6 +65,8 @@ export type GameToShellMessage =
     | { type: 'toolGroupChanged'; group: EditorToolGroup }
     | { type: 'stats'; stats: GameStats }
     | { type: 'error'; message: string }
+    /** A foliage type edited in the in-game editor was saved to the studio library. */
+    | { type: 'foliageTypeSaved'; foliageType: FoliageType }
     | {
           type: 'screenshot';
           requestId: string;

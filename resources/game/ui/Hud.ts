@@ -146,7 +146,7 @@ export class Hud {
         }
 
         const p = stats.position;
-        this.stats.textContent = `${stats.fps.toFixed(0)} fps · ${stats.frameMs.toFixed(1)} ms · ${stats.drawCalls} draws · ${(stats.triangles / 1e6).toFixed(2)}M tris · ${stats.foliageInstances.toLocaleString()} foliage · ${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}`;
+        this.stats.textContent = `${stats.fps.toFixed(0)} fps · ${stats.frameMs.toFixed(1)} ms · ${stats.drawCalls} draws · ${(stats.triangles / 1e6).toFixed(2)}M tris · ${stats.foliageInstances.toLocaleString()} foliage · ${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}${stats.renderScale !== undefined ? ` · res ${Math.round(stats.renderScale * 100)}%` : ''}`;
     }
 
     flash(message: string): void {

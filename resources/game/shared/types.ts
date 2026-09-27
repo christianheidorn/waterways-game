@@ -46,7 +46,30 @@ export type EnvironmentSettings = {
     rapids_foam: boolean;
     ocean_enabled: boolean;
     sea_level: number;
+    // ---- Weather (see resources/game/world/Weather.ts) ----
+    weather: WeatherKind;
+    /** 0-1 rain / snow amount (0 = none). */
+    precipitation: number;
+    /** Lightning strikes per minute (storms). */
+    lightning_frequency: number;
+    thunder_volume: number;
+    /** Degrees, direction the wind blows towards (0 = north, 90 = east). */
+    wind_direction: number;
+    /** Extra fog that pools below this altitude above sea level (m); 0 disables height fog. */
+    height_fog_height: number;
+    height_fog_density: number;
+    /** 0-1 how wet surfaces look (darker, glossier ground). */
+    wetness: number;
 };
+
+export type WeatherKind =
+    | 'clear'
+    | 'cloudy'
+    | 'overcast'
+    | 'fog'
+    | 'rain'
+    | 'storm'
+    | 'snow';
 
 export type PlayerSettings = {
     walk_speed: number;
@@ -63,11 +86,38 @@ export type PlayerSettings = {
     invert_y: boolean;
     character_color: string;
     character_model_url: string | null;
+    /** Studio character library entry used as the player (App\\Models\\Character), null = procedural / URL. */
+    character_id?: number | null;
+};
+
+/** A playable character from the studio's character library (App\\Models\\Character::toGameArray). */
+export type CharacterRef = {
+    id: number;
+    name: string;
+    model_url: string;
+    /** Extra animation GLBs (same skeleton) per clip; clips inside model_url are also used. */
+    animations: Partial<Record<'idle' | 'walk' | 'run' | 'jump' | 'swim', string>>;
+    height: number;
 };
 
 export type ShadowQuality = 'off' | 'low' | 'medium' | 'high' | 'ultra';
 
+export type QualityPreset =
+    | 'low'
+    | 'medium'
+    | 'high'
+    | 'epic'
+    | 'cinematic'
+    | 'custom';
+
+export type QualityLevel = 'low' | 'medium' | 'high' | 'epic';
+
+/**
+ * Unreal-style scalability. `quality_preset` is informational (the studio / in-game menu fill every
+ * field from resources/game/shared/graphicsPresets.ts); the game always reads the individual fields.
+ */
 export type GraphicsSettings = {
+    quality_preset: QualityPreset;
     shadow_quality: ShadowQuality;
     shadow_distance: number;
     render_scale: number;
@@ -77,9 +127,32 @@ export type GraphicsSettings = {
     foliage_distance: number;
     water_quality: 'low' | 'medium' | 'high';
     terrain_texture_resolution: '512' | '1024' | '2048';
+    /** Legacy MSAA switch; `anti_aliasing` wins when present. */
     antialias: boolean;
+    anti_aliasing: 'off' | 'fxaa' | 'smaa' | 'msaa';
+    /** Texture anisotropic filtering (1-16). */
+    anisotropy: number;
     bloom: boolean;
+    bloom_intensity: number;
     ambient_occlusion: boolean;
+    ao_quality: 'low' | 'medium' | 'high';
+    /** Post-process colour grading. */
+    sharpen: number;
+    vignette: number;
+    saturation: number;
+    contrast: number;
+    /** Lower render scale automatically to hold `target_fps`. */
+    dynamic_resolution: boolean;
+    target_fps: number;
+    /** Frame rate cap, 0 = unlimited (vsync). */
+    max_fps: number;
+    /** Foliage beyond this distance (m) casts no shadows. */
+    foliage_shadow_distance: number;
+    /** > 1 keeps detailed foliage LODs further away. */
+    foliage_lod_bias: number;
+    /** Weather particles, lightning, splashes. */
+    effects_quality: QualityLevel;
+    cloud_quality: 'off' | 'low' | 'medium' | 'high';
 };
 
 export type EditorSettings = {
@@ -241,6 +314,8 @@ export type GameManifest = {
     settings: GameSettings;
     layers: TerrainLayer[];
     foliage_types: FoliageType[];
+    /** The player character from the studio library (settings.player.character_id), if any. */
+    character?: CharacterRef | null;
     assets: MapAssets;
     endpoints: {
         save_heightmap: string;
@@ -249,6 +324,8 @@ export type GameManifest = {
         save_foliage: string;
         save_meta: string;
         save_thumbnail: string;
+        /** PATCH a foliage type's settings from the in-game editor: `${update_foliage_type}/{id}`. */
+        update_foliage_type?: string;
     };
 };
 

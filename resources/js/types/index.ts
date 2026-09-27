@@ -3,3 +3,4 @@ export type * from './materials';
 export type * from './navigation';
 export type * from './ui';
 export type * from './foliage';
+export type * from './characters';

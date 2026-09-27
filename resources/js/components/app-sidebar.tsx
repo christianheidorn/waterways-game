@@ -5,6 +5,7 @@ import {
     LayoutGrid,
     Map as MapIcon,
     Palette,
+    PersonStanding,
     SlidersHorizontal,
     Trees,
 } from 'lucide-react';
@@ -20,6 +21,7 @@ import {
 } from '@/components/ui/sidebar';
 import { dashboard, studio } from '@/routes';
 import { edit as editAppearance } from '@/routes/appearance';
+import characters from '@/routes/characters';
 import foliage from '@/routes/foliage';
 import gameSettings from '@/routes/game-settings';
 import maps from '@/routes/maps';
@@ -54,6 +56,12 @@ const navGroups: NavGroup[] = [
                 href: materials.index(),
                 icon: Layers,
                 activePrefix: '/materials',
+            },
+            {
+                title: 'Characters',
+                href: characters.index(),
+                icon: PersonStanding,
+                activePrefix: '/characters',
             },
         ],
     },

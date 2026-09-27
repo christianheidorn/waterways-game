@@ -345,6 +345,66 @@ function addBlob(
     geo.dispose();
 }
 
+/**
+ * Very low-poly closed ellipsoid for far LODs: `sides` × (`rings` + 1) quads/triangles
+ * (e.g. 6 sides × 2 rings = 24 triangles). aux runs 0 (bottom) → 1 (top).
+ */
+function addLowEllipsoid(
+    b: PartBuilder,
+    center: THREE.Vector3,
+    rx: number,
+    ry: number,
+    rz: number,
+    sides: number,
+    rings: number,
+    rot = 0,
+): void {
+    const bottom = b.vertex(center.x, center.y - ry, center.z, 0);
+    const rows: number[][] = [];
+
+    for (let r = 1; r <= rings; r++) {
+        const lat = -Math.PI / 2 + (r / (rings + 1)) * Math.PI;
+        const y = Math.sin(lat);
+        const k = Math.cos(lat);
+        const row: number[] = [];
+
+        for (let s = 0; s < sides; s++) {
+            const a = rot + (s / sides) * TAU;
+            row.push(
+                b.vertex(
+                    center.x + Math.cos(a) * rx * k,
+                    center.y + y * ry,
+                    center.z + Math.sin(a) * rz * k,
+                    r / (rings + 1),
+                ),
+            );
+        }
+
+        rows.push(row);
+    }
+
+    const top = b.vertex(center.x, center.y + ry, center.z, 1);
+    const first = rows[0];
+    const last = rows[rows.length - 1];
+
+    for (let s = 0; s < sides; s++) {
+        const sn = (s + 1) % sides;
+        b.tri(bottom, first[s], first[sn]);
+        b.tri(top, last[sn], last[s]);
+    }
+
+    for (let r = 0; r < rows.length - 1; r++) {
+        const lo = rows[r];
+        const hi = rows[r + 1];
+
+        for (let s = 0; s < sides; s++) {
+            const sn = (s + 1) % sides;
+            b.tri(lo[s], hi[sn], lo[sn]);
+            b.tri(lo[s], hi[s], hi[sn]);
+        }
+    }
+}
+
 /** Curved tapered blade (grass, reeds, leaves). Front face is the upper (concave) side. */
 function addBlade(
     b: PartBuilder,

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { PlayerSettings } from '../shared/types';
+import type { CharacterRef, PlayerSettings } from '../shared/types';
 import type { Input } from '../core/Input';
 import type { Heightfield } from '../world/Heightfield';
 import { CharacterModel } from './CharacterModel';
@@ -32,11 +32,17 @@ export class Player {
     private avatar: Avatar;
     private settings: PlayerSettings;
     private modelUrl: string | null = null;
+    /** Library character (manifest.character); wins over settings.character_model_url. */
+    private character: CharacterRef | null = null;
     private jumpBuffered = 0;
     private coyote = 0;
 
-    constructor(settings: PlayerSettings) {
+    constructor(
+        settings: PlayerSettings,
+        character: CharacterRef | null = null,
+    ) {
         this.settings = settings;
+        this.character = character;
         this.object.name = 'Player';
         const model = new CharacterModel(settings.character_color);
         this.avatar = model;
@@ -44,13 +50,21 @@ export class Player {
         this.applySettings(settings);
     }
 
+    /** Switch to a library character (null = back to settings.character_model_url / default). */
+    setCharacter(character: CharacterRef | null): void {
+        this.character = character;
+        this.applySettings(this.settings);
+    }
+
     applySettings(settings: PlayerSettings): void {
         this.settings = settings;
         this.avatar.setColor(settings.character_color);
 
-        if (settings.character_model_url !== this.modelUrl) {
-            this.modelUrl = settings.character_model_url;
-            void this.loadModel(settings.character_model_url);
+        const url = this.character?.model_url ?? settings.character_model_url;
+
+        if (url !== this.modelUrl) {
+            this.modelUrl = url;
+            void this.loadModel(url);
         }
 
         const scale = settings.character_height / 1.8;
@@ -261,9 +275,12 @@ export class Player {
 
         if (url) {
             try {
+                const library =
+                    this.character?.model_url === url ? this.character : null;
                 next = await GltfCharacter.load(
                     url,
-                    this.settings.character_height,
+                    library?.height ?? this.settings.character_height,
+                    library?.animations ?? {},
                 );
             } catch (error) {
                 console.warn(

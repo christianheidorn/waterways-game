@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AiSettingsController;
+use App\Http\Controllers\CharacterController;
 use App\Http\Controllers\FoliageAiController;
 use App\Http\Controllers\FoliageAssetController;
 use App\Http\Controllers\FoliageTypeController;
@@ -52,6 +53,15 @@ Route::put('materials/{material}', [MaterialController::class, 'update'])->name(
 Route::delete('materials/{material}', [MaterialController::class, 'destroy'])->name('materials.destroy');
 
 Route::get('game/{map}', [StudioController::class, 'game'])->name('game.show');
+
+Route::get('characters', [CharacterController::class, 'index'])->name('characters.index');
+Route::post('characters/generate', [CharacterController::class, 'generate'])->name('characters.generate');
+Route::post('characters/upload', [CharacterController::class, 'upload'])->name('characters.upload');
+Route::delete('characters/active', [CharacterController::class, 'deactivate'])->name('characters.deactivate');
+Route::put('characters/{character}', [CharacterController::class, 'update'])->name('characters.update');
+Route::post('characters/{character}/activate', [CharacterController::class, 'activate'])->name('characters.activate');
+Route::post('characters/{character}/retry', [CharacterController::class, 'retry'])->name('characters.retry');
+Route::delete('characters/{character}', [CharacterController::class, 'destroy'])->name('characters.destroy');
 
 Route::get('foliage', [FoliageTypeController::class, 'index'])->name('foliage.index');
 Route::post('foliage/assets/upload', [FoliageAssetController::class, 'upload'])->name('foliage.assets.upload');

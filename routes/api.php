@@ -25,9 +25,9 @@ Route::get('materials/browse/{source}', [MaterialApiController::class, 'browse']
 Route::get('materials/{material}', [MaterialApiController::class, 'show'])->name('api.materials.show');
 
 Route::get('ai/models', [AiController::class, 'models'])->name('api.ai.models');
+Route::get('ai/credits', [AiController::class, 'credits'])->name('api.ai.credits');
 Route::post('ai/enhance-prompt', [AiController::class, 'enhancePrompt'])->name('api.ai.enhance-prompt');
 
-Route::get('foliage/browse/polyhaven', [FoliageAssetApiController::class, 'browse'])->name('api.foliage.browse');
 Route::get('foliage/assets/{asset}', [FoliageAssetApiController::class, 'show'])->name('api.foliage.assets.show');
 Route::post('foliage/assets/{asset}/bake', [FoliageAssetApiController::class, 'bake'])->name('api.foliage.assets.bake');
 Route::post('foliage/assets/{asset}/bake-failed', [FoliageAssetApiController::class, 'bakeFailed'])->name('api.foliage.assets.bake-failed');

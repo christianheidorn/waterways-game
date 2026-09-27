@@ -7,10 +7,10 @@ use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\Crypt;
 
 /**
- * OpenRouter credentials and model choices, stored as the "ai" row of game_settings.
+ * OpenRouter and Meshy credentials and model choices, stored as the "ai" row of game_settings.
  *
- * Deliberately NOT part of GameSettingsSchema: these values never reach the game, and the API key
- * is stored encrypted and never sent to the browser (only a hint such as "sk-or-…a1b2").
+ * Deliberately NOT part of GameSettingsSchema: these values never reach the game, and the API keys
+ * are stored encrypted and never sent to the browser (only a hint such as "sk-or-…a1b2").
  */
 final class AiSettings
 {
@@ -35,9 +35,9 @@ final class AiSettings
         return is_array($values) ? $values : [];
     }
 
-    private function storedKey(): ?string
+    private function storedKey(string $field = 'openrouter_api_key'): ?string
     {
-        $encrypted = $this->stored()['openrouter_api_key'] ?? null;
+        $encrypted = $this->stored()[$field] ?? null;
 
         if (! is_string($encrypted) || $encrypted === '') {
             return null;
@@ -95,6 +95,48 @@ final class AiSettings
         return $prefix.'…'.(strlen($key) > 8 ? substr($key, -4) : '');
     }
 
+    // ---- Meshy (text / image to 3D) ----
+
+    private function envMeshyKey(): ?string
+    {
+        $key = config('services.meshy.key');
+
+        return is_string($key) && trim($key) !== '' ? trim($key) : null;
+    }
+
+    public function meshyKey(): ?string
+    {
+        return $this->storedKey('meshy_api_key') ?? $this->envMeshyKey();
+    }
+
+    public function meshyConfigured(): bool
+    {
+        return $this->meshyKey() !== null;
+    }
+
+    /**
+     * @return 'studio'|'env'|null
+     */
+    public function meshyKeySource(): ?string
+    {
+        return match (true) {
+            $this->storedKey('meshy_api_key') !== null => 'studio',
+            $this->envMeshyKey() !== null => 'env',
+            default => null,
+        };
+    }
+
+    public function meshyKeyHint(): ?string
+    {
+        $key = $this->meshyKey();
+
+        if ($key === null) {
+            return null;
+        }
+
+        return (str_starts_with($key, 'msy_') ? 'msy_' : '').'…'.(strlen($key) > 8 ? substr($key, -4) : '');
+    }
+
     public function imageModel(): string
     {
         $model = $this->stored()['image_model'] ?? null;
@@ -120,7 +162,7 @@ final class AiSettings
     }
 
     /**
-     * @param  array{openrouter_api_key?: string|null, clear_key?: bool, image_model?: string|null, text_model?: string|null, image_resolution?: string|null}  $input
+     * @param  array{openrouter_api_key?: string|null, clear_key?: bool, meshy_api_key?: string|null, clear_meshy_key?: bool, image_model?: string|null, text_model?: string|null, image_resolution?: string|null}  $input
      */
     public function update(array $input): void
     {
@@ -135,6 +177,15 @@ final class AiSettings
             $values['openrouter_api_key'] = Crypt::encryptString($key);
         }
 
+        if (! empty($input['clear_meshy_key'])) {
+            unset($values['meshy_api_key']);
+        }
+
+        $meshyKey = trim((string) ($input['meshy_api_key'] ?? ''));
+        if ($meshyKey !== '') {
+            $values['meshy_api_key'] = Crypt::encryptString($meshyKey);
+        }
+
         foreach (['image_model', 'text_model', 'image_resolution'] as $field) {
             if (array_key_exists($field, $input) && $input[$field] !== null && $input[$field] !== '') {
                 $values[$field] = $input[$field];
@@ -147,7 +198,7 @@ final class AiSettings
     /**
      * Safe to send to the browser (never contains the key).
      *
-     * @return array{configured: bool, key_hint: string|null, key_source: string|null, image_model: string, text_model: string, image_resolution: string}
+     * @return array{configured: bool, key_hint: string|null, key_source: string|null, image_model: string, text_model: string, image_resolution: string, meshy: array{configured: bool, key_hint: string|null, key_source: string|null}}
      */
     public function toFrontend(): array
     {
@@ -158,6 +209,11 @@ final class AiSettings
             'image_model' => $this->imageModel(),
             'text_model' => $this->textModel(),
             'image_resolution' => $this->imageResolution(),
+            'meshy' => [
+                'configured' => $this->meshyConfigured(),
+                'key_hint' => $this->meshyKeyHint(),
+                'key_source' => $this->meshyKeySource(),
+            ],
         ];
     }
 }

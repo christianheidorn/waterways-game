@@ -34,6 +34,7 @@ class FoliageTypeController extends Controller
                 'configured' => $ai['configured'],
                 'image_model' => $ai['image_model'],
                 'text_model' => $ai['text_model'],
+                'meshy_configured' => $ai['meshy']['configured'],
             ],
         ]);
     }

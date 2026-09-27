@@ -4,7 +4,7 @@ namespace Tests\Feature\Foliage;
 
 use App\Enums\FoliageKind;
 use App\Jobs\GenerateFoliageAsset;
-use App\Jobs\ImportFoliageAsset;
+use App\Jobs\GenerateMeshyAsset;
 use App\Models\FoliageAsset;
 use App\Models\FoliageType;
 use App\Models\Map;
@@ -36,102 +36,9 @@ class FoliageAssetTest extends TestCase
         Http::preventStrayRequests();
     }
 
-    private function fakePolyHaven(int $binBytes = 1200): void
-    {
-        Http::fake([
-            'api.polyhaven.com/assets*' => Http::response([
-                'fern_02' => ['name' => 'Fern 02', 'categories' => ['plants', 'nature', 'collection: pine_forest'], 'tags' => ['fern', 'jungle', 'pine'], 'polycount' => 6232, 'download_count' => 50, 'authors' => ['Rico Cilliers' => 'All']],
-                'island_tree_02' => ['name' => 'Island Tree 02', 'categories' => ['nature', 'plants', 'trees'], 'tags' => ['tree'], 'polycount' => 1762064, 'download_count' => 90],
-                'pine_tree_01' => ['name' => 'Pine Tree 01', 'categories' => ['nature', 'trees'], 'tags' => ['pine', 'needles'], 'polycount' => 17427094, 'download_count' => 999],
-                'boulder_01' => ['name' => 'Boulder 01', 'categories' => ['rocks', 'nature'], 'tags' => ['rock'], 'polycount' => 123976, 'download_count' => 10],
-                'food_apple_01' => ['name' => 'Food Apple 01', 'categories' => ['food', 'nature', 'plants'], 'tags' => ['fruit'], 'polycount' => 7012],
-                'moon_rock_01' => ['name' => 'Moon Rock 01', 'categories' => ['rocks', 'collection: moon'], 'tags' => [], 'polycount' => 1000],
-                'office_chair' => ['name' => 'Office Chair', 'categories' => ['furniture'], 'tags' => [], 'polycount' => 1000],
-            ]),
-            'api.polyhaven.com/info/fern_02' => Http::response(['name' => 'Fern 02', 'categories' => ['plants', 'nature'], 'tags' => ['fern'], 'polycount' => 6232, 'authors' => ['Rico Cilliers' => 'All']]),
-            'api.polyhaven.com/files/fern_02' => Http::response(['Alpha' => ['1k' => ['jpg' => ['url' => 'https://dl.polyhaven.org/fern_02_alpha_1k.jpg'], 'png' => ['url' => 'https://dl.polyhaven.org/fern_02_alpha_1k.png']]], 'gltf' => ['1k' => ['gltf' => [
-                'url' => 'https://dl.polyhaven.org/file/ph-assets/Models/gltf/1k/fern_02/fern_02_1k.gltf',
-                'include' => [
-                    'fern_02.bin' => ['size' => $binBytes, 'url' => 'https://dl.polyhaven.org/fern_02.bin'],
-                    'textures/fern_02_diff_1k.jpg' => ['size' => 10, 'url' => 'https://dl.polyhaven.org/fern_02_diff_1k.jpg'],
-                    '../../evil.txt' => ['size' => 1, 'url' => 'https://dl.polyhaven.org/evil.txt'],
-                ],
-            ]]]]),
-            'dl.polyhaven.org/file/*' => Http::response('{"asset":{"version":"2.0"}}'),
-            'dl.polyhaven.org/fern_02.bin' => Http::response(str_repeat('b', 64)),
-            'dl.polyhaven.org/fern_02_diff_1k.jpg' => Http::response('jpeg'),
-            'dl.polyhaven.org/evil.txt' => Http::response('evil'),
-            'dl.polyhaven.org/fern_02_alpha_1k.jpg' => Http::response('alpha'),
-        ]);
-    }
-
     private function glb(): string
     {
         return 'glTF'.pack('V', 2).pack('V', 12);
-    }
-
-    public function test_browse_lists_only_foliage_models_with_kinds_and_heavy_flags(): void
-    {
-        $this->fakePolyHaven();
-        FoliageAsset::query()->create(['name' => 'Fern', 'kind' => 'bush', 'source' => 'polyhaven', 'source_ref' => 'fern_02', 'status' => 'ready']);
-
-        $items = collect($this->getJson('/api/foliage/browse/polyhaven')->assertOk()->json('items'))->keyBy('ref');
-
-        $this->assertEqualsCanonicalizing(['fern_02', 'island_tree_02', 'pine_tree_01', 'boulder_01'], $items->keys()->all());
-        $this->assertSame('bush', $items['fern_02']['kind'], 'Name beats the "pine" tag of the collection');
-        $this->assertSame('broadleaf', $items['island_tree_02']['kind']);
-        $this->assertSame('conifer', $items['pine_tree_01']['kind']);
-        $this->assertSame('rock', $items['boulder_01']['kind']);
-        $this->assertTrue($items['pine_tree_01']['too_heavy']);
-        $this->assertFalse($items['island_tree_02']['too_heavy']);
-        $this->assertNotNull($items['fern_02']['imported_asset_id']);
-        $this->assertSame('pine_tree_01', $items->keys()->last(), 'Too heavy models sort last');
-
-        $this->getJson('/api/foliage/browse/polyhaven?kind=rock')->assertOk()->assertJsonPath('total', 1);
-        $this->getJson('/api/foliage/browse/polyhaven?q=island')->assertOk()->assertJsonPath('items.0.ref', 'island_tree_02');
-    }
-
-    public function test_import_downloads_the_gltf_with_its_files_and_waits_for_the_bake(): void
-    {
-        $this->fakePolyHaven();
-
-        $this->post('/foliage/assets/import', ['refs' => ['fern_02']])->assertRedirect();
-
-        $asset = FoliageAsset::query()->sole();
-        $this->assertSame('polyhaven', $asset->source);
-        $this->assertSame(FoliageKind::Bush, $asset->kind);
-        $this->assertSame('awaiting_bake', $asset->status, (string) $asset->status_message);
-        $this->assertSame("foliage/{$asset->id}/source/fern_02_1k.gltf", $asset->source_path);
-        $this->assertSame('CC0', $asset->license);
-        $this->assertSame('Rico Cilliers', $asset->author);
-        $this->assertSame(6232, $asset->meta['source_polycount']);
-
-        $disk = Storage::disk('public');
-        $disk->assertExists("foliage/{$asset->id}/source/fern_02.bin");
-        $disk->assertExists("foliage/{$asset->id}/source/textures/fern_02_diff_1k.jpg");
-        $this->assertSame('alpha', $disk->get("foliage/{$asset->id}/source/textures/fern_02_alpha_1k.jpg"));
-        $this->assertSame(str_repeat('b', 64), $disk->get("foliage/{$asset->id}/source/fern_02.bin"));
-        Http::assertNotSent(fn (Request $r) => str_contains($r->url(), 'evil.txt'));
-
-        // Importing again reuses the asset.
-        $this->post('/foliage/assets/import', ['refs' => ['fern_02']])->assertRedirect();
-        $this->assertSame(1, FoliageAsset::query()->count());
-
-        $this->getJson("/api/foliage/assets/{$asset->id}")->assertOk()
-            ->assertJsonPath('source_file_url', "/storage/foliage/{$asset->id}/source/fern_02_1k.gltf")
-            ->assertJsonPath('model_url', null);
-    }
-
-    public function test_import_refuses_models_that_are_too_heavy(): void
-    {
-        $this->fakePolyHaven(binBytes: 400 * 1024 * 1024);
-
-        $this->post('/foliage/assets/import', ['refs' => ['fern_02']])->assertRedirect();
-
-        $asset = FoliageAsset::query()->sole();
-        $this->assertSame('failed', $asset->status);
-        $this->assertStringContainsString('too heavy', $asset->status_message);
-        Http::assertNotSent(fn (Request $r) => str_contains($r->url(), 'fern_02.bin'));
     }
 
     public function test_upload_glb_and_zip_kits(): void
@@ -267,14 +174,16 @@ class FoliageAssetTest extends TestCase
     public function test_generation_is_queued_and_the_job_stores_a_card(): void
     {
         Queue::fake();
-        $this->post('/foliage/assets/generate', ['prompt' => 'heather', 'kind' => 'flower', 'style' => 80, 'target_height' => 0.4, 'variants' => 2])
+        $this->post('/foliage/assets/generate', ['engine' => 'card', 'prompt' => 'heather', 'kind' => 'flower', 'style' => 80, 'target_height' => 0.4, 'variants' => 2])
             ->assertSessionHasErrors('ai');
 
         $this->configureAi();
-        $this->post('/foliage/assets/generate', ['prompt' => 'boulder', 'kind' => 'rock', 'style' => 10, 'target_height' => 1, 'variants' => 1])
+        $this->post('/foliage/assets/generate', ['engine' => 'card', 'prompt' => 'boulder', 'kind' => 'rock', 'style' => 10, 'target_height' => 1, 'variants' => 1])
             ->assertSessionHasErrors('kind');
+        $this->post('/foliage/assets/generate', ['engine' => 'meshy_text', 'prompt' => 'boulder', 'kind' => 'rock', 'style' => 10, 'variants' => 1])
+            ->assertSessionHasErrors('ai');
 
-        $this->post('/foliage/assets/generate', ['prompt' => 'Purple heather in bloom', 'kind' => 'flower', 'style' => 80, 'target_height' => 0.4, 'variants' => 2])
+        $this->post('/foliage/assets/generate', ['engine' => 'card', 'prompt' => 'Purple heather in bloom', 'kind' => 'flower', 'style' => 80, 'target_height' => 0.4, 'variants' => 2])
             ->assertRedirect()->assertSessionHasNoErrors();
 
         $this->assertSame(2, FoliageAsset::query()->count());
@@ -283,6 +192,14 @@ class FoliageAssetTest extends TestCase
         $this->assertSame('stylized', $asset->style);
         $this->assertSame('card', $asset->source_type);
         $this->assertSame(0.4, $asset->target_height);
+
+        app(AiSettings::class)->update(['meshy_api_key' => 'msy_test_key_1234']);
+        $this->post('/foliage/assets/generate', ['engine' => 'meshy_image', 'prompt' => 'Granite boulder with lichen', 'kind' => 'rock', 'style' => 10, 'variants' => 1, 'meshy_model' => 'latest'])
+            ->assertRedirect()->assertSessionHasNoErrors();
+        Queue::assertPushed(GenerateMeshyAsset::class, fn ($job) => $job->options['route'] === 'image' && $job->options['model'] === 'latest');
+        $rock = FoliageAsset::query()->where('kind', 'rock')->sole();
+        $this->assertSame('meshy', $rock->bake_options['generator']);
+        $this->assertNull($rock->target_height, 'Meshy estimates the real size itself');
     }
 
     public function test_generation_job_uses_a_transparent_background_when_the_model_supports_it(): void
@@ -320,7 +237,14 @@ class FoliageAssetTest extends TestCase
         );
         $grass->refresh();
         $this->assertTrue($grass->bake_options['key_background']);
-        $this->assertStringContainsString('pure white', $grass->ai_prompt);
+        $this->assertSame('#ff00ff', $grass->bake_options['key_color']);
+        $this->assertStringContainsString('magenta', $grass->ai_prompt);
+
+        $heather = FoliageAsset::query()->create(['name' => 'Heather', 'kind' => 'flower', 'source' => 'ai', 'status' => 'queued', 'target_height' => 0.4]);
+        (new GenerateFoliageAsset($heather, ['prompt' => 'purple heather']))->handle(
+            app(OpenRouterClient::class), app(AiSettings::class), app(FoliagePrompts::class),
+        );
+        $this->assertSame('#00ffff', $heather->refresh()->bake_options['key_color'], 'Purple plants get a cyan key');
     }
 
     public function test_foliage_page_lists_types_assets_and_maps(): void
@@ -354,16 +278,5 @@ class FoliageAssetTest extends TestCase
         $type = FoliageType::query()->sole();
         $this->assertSame($asset->id, $type->foliage_asset_id);
         $this->assertSame('#eeffee', $type->tint);
-    }
-
-    public function test_import_job_is_queued(): void
-    {
-        Queue::fake();
-        $this->fakePolyHaven();
-
-        $this->post('/foliage/assets/import', ['refs' => ['fern_02', 'boulder_01']])->assertRedirect();
-
-        Queue::assertPushed(ImportFoliageAsset::class, 2);
-        $this->assertSame(FoliageKind::Rock, FoliageAsset::query()->where('source_ref', 'boulder_01')->sole()->kind);
     }
 }

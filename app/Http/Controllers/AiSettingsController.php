@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\Ai\AiNotConfiguredException;
+use App\Services\Ai\MeshyClient;
 use App\Services\Ai\OpenRouterClient;
 use App\Services\Ai\OpenRouterException;
 use App\Support\AiSettings;
@@ -13,7 +14,7 @@ use Inertia\Inertia;
 use Inertia\Response;
 
 /**
- * Studio → Settings → AI: the OpenRouter key (write-only) and model choices.
+ * Studio → Settings → AI: the OpenRouter and Meshy keys (write-only) and model choices.
  */
 class AiSettingsController extends Controller
 {
@@ -29,13 +30,16 @@ class AiSettingsController extends Controller
         $data = $request->validate([
             'openrouter_api_key' => ['nullable', 'string', 'max:500'],
             'clear_key' => ['sometimes', 'boolean'],
+            'meshy_api_key' => ['nullable', 'string', 'max:500'],
+            'clear_meshy_key' => ['sometimes', 'boolean'],
             'image_model' => ['sometimes', 'nullable', 'string', 'max:200', 'regex:'.AiSettings::MODEL_PATTERN],
             'text_model' => ['sometimes', 'nullable', 'string', 'max:200', 'regex:'.AiSettings::MODEL_PATTERN],
             'image_resolution' => ['sometimes', 'nullable', Rule::in(AiSettings::RESOLUTIONS)],
         ]);
 
         $keyChanged = ! empty($data['clear_key']) || trim((string) ($data['openrouter_api_key'] ?? '')) !== '';
-        $settings->update([...$data, 'clear_key' => $request->boolean('clear_key')]);
+        $settings->update([...$data, 'clear_key' => $request->boolean('clear_key'), 'clear_meshy_key' => $request->boolean('clear_meshy_key')]);
+        MeshyClient::forgetBalance();
 
         if ($keyChanged) {
             OpenRouterClient::forgetModels();

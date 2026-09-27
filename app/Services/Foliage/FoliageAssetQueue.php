@@ -4,52 +4,39 @@ namespace App\Services\Foliage;
 
 use App\Enums\FoliageKind;
 use App\Jobs\GenerateFoliageAsset;
-use App\Jobs\ImportFoliageAsset;
+use App\Jobs\GenerateMeshyAsset;
 use App\Models\FoliageAsset;
-use Illuminate\Support\Str;
 use Throwable;
 
 /**
- * Creating library assets and queueing their import / generation.
+ * Creating library assets and queueing their generation (Meshy 3D models, OpenRouter cards).
  */
 class FoliageAssetQueue
 {
     public function __construct(
         private readonly FoliageLibrary $library,
-        private readonly PolyHavenModels $polyHaven,
     ) {}
 
     /**
-     * Create (or reuse) a Poly Haven asset and queue its download.
+     * A textured 3D model from Meshy (text or concept-image route).
      */
-    public function importPolyHaven(string $ref, ?string $kind = null, ?float $targetHeight = null): FoliageAsset
+    public function meshy(string $name, FoliageKind $kind, int $style, ?float $targetHeight, string $prompt, string $route = 'text', ?string $model = null): FoliageAsset
     {
-        $existing = FoliageAsset::query()->where('source', 'polyhaven')->where('source_ref', $ref)->first();
-        if ($existing && $existing->status !== 'failed') {
-            return $existing;
-        }
-
-        $summary = null;
-        try {
-            $catalogue = $this->polyHaven->catalogue();
-            $summary = isset($catalogue[$ref]) ? $this->polyHaven->summary($ref, $catalogue[$ref]) : null;
-        } catch (Throwable $e) {
-            report($e);
-        }
-
-        $asset = $existing ?? $this->library->create([
-            'name' => $summary['name'] ?? Str::headline($ref),
-            'kind' => FoliageLibrary::validKind($kind, FoliageKind::tryFrom((string) ($summary['kind'] ?? '')) ?? FoliageLibrary::guessKind([$ref])),
-            'style' => 'realistic',
-            'source' => 'polyhaven',
-            'source_ref' => $ref,
-            'source_url' => "https://polyhaven.com/a/{$ref}",
-            'license' => 'CC0',
+        $asset = $this->library->create([
+            'name' => $name,
+            'kind' => $kind,
+            'style' => $style >= 50 ? 'stylized' : 'realistic',
+            'source' => 'ai',
+            'source_type' => 'model',
+            'license' => 'Meshy (AI generated)',
             'target_height' => $targetHeight,
+            'status' => 'queued',
+            'status_message' => 'Queued for Meshy…',
+            'ai_prompt' => $prompt,
+            'bake_options' => ['generator' => 'meshy', 'route' => $route, 'prompt' => $prompt, 'style' => $style, 'meshy_model' => $model],
         ]);
-        $asset->forceFill(['status' => 'queued', 'status_message' => 'Queued for download…'])->save();
 
-        $this->dispatch(new ImportFoliageAsset($asset, $ref));
+        $this->dispatch(new GenerateMeshyAsset($asset, ['route' => $route, 'prompt' => $prompt, 'style' => $style, 'model' => $model]));
 
         return $asset->refresh();
     }

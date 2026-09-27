@@ -47,6 +47,24 @@ export type AiConfig = {
 export type AiSettings = AiConfig & {
     key_hint: string | null;
     key_source: 'studio' | 'env' | null;
+    meshy: {
+        configured: boolean;
+        key_hint: string | null;
+        key_source: 'studio' | 'env' | null;
+    };
+};
+
+/** GET /api/ai/credits. */
+export type AiCredits = {
+    openrouter: {
+        configured: boolean;
+        remaining?: number | null;
+        total?: number | null;
+        usage?: number | null;
+        key_limit_remaining?: number | null;
+        error?: string;
+    };
+    meshy: { configured: boolean; balance?: number; error?: string };
 };
 
 /** GET /api/materials/browse/{source}. */

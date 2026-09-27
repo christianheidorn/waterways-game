@@ -3,7 +3,6 @@ import type { FoliageKind } from '@game/shared/types';
 import {
     ArrowRight,
     Box,
-    Download,
     Info,
     Lightbulb,
     MapPin,
@@ -14,6 +13,7 @@ import {
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useId, useState } from 'react';
+import { AiCreditsBadge } from '@/components/ai-credits';
 import { StyleSlider } from '@/components/foliage/fields';
 import { ACTION_STYLES } from '@/components/materials/layer-plan';
 import { MaterialThumb } from '@/components/materials/material-thumb';
@@ -65,8 +65,8 @@ type Brief = {
 type RowState = {
     row: FoliagePlanRow;
     include: boolean;
-    /** 'suggested' = the plan's model, 'procedural' / 'current' = user override. */
-    assetChoice: 'suggested' | 'procedural' | 'current';
+    /** 'suggested' = the plan's model; the others are user overrides. */
+    assetChoice: 'suggested' | 'procedural' | 'current' | 'model' | 'card';
     name: string;
 };
 
@@ -75,7 +75,7 @@ const REGION_EXAMPLES =
 
 /**
  * AI foliage palette: describe a place (or pick a real-world map) and a look; the AI proposes
- * which foliage types to keep, change, remove and add — with models (library, Poly Haven, AI cards
+ * which foliage types to keep, change, remove and add — with models (library, Meshy 3D, AI cards
  * or procedural) and realistic sizes. Nothing changes until the ticked rows are applied.
  */
 export function FoliageAiPlanDialog({
@@ -83,11 +83,13 @@ export function FoliageAiPlanDialog({
     onOpenChange,
     maps,
     aiConfigured,
+    meshyConfigured,
 }: {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     maps: FoliageMapOption[];
     aiConfigured: boolean;
+    meshyConfigured: boolean;
 }) {
     const [brief, setBrief] = useState<Brief>({
         map_id: maps.find((m) => m.real_world)
@@ -159,12 +161,7 @@ export function FoliageAiPlanDialog({
                     type_id: r.row.type_id,
                     name: r.name,
                     kind: r.row.kind,
-                    asset:
-                        r.assetChoice === 'procedural'
-                            ? { type: 'procedural' }
-                            : r.assetChoice === 'current'
-                              ? { type: 'current' }
-                              : r.row.asset,
+                    asset: chosenAsset(r),
                     settings: r.row.settings,
                 })),
             },
@@ -182,12 +179,15 @@ export function FoliageAiPlanDialog({
     const selectedCount = rows.filter(
         (r) => r.include && r.row.action !== 'keep',
     ).length;
-    const selectedGenerations = rows.filter(
+    const active = rows.filter(
         (r) =>
-            r.include &&
-            r.assetChoice === 'suggested' &&
-            r.row.asset?.type === 'generate' &&
-            (r.row.action === 'add' || r.row.action === 'change'),
+            r.include && (r.row.action === 'add' || r.row.action === 'change'),
+    );
+    const selectedModels = active.filter(
+        (r) => chosenAsset(r)?.type === 'model',
+    ).length;
+    const selectedCards = active.filter(
+        (r) => chosenAsset(r)?.type === 'card',
     ).length;
 
     return (
@@ -214,7 +214,15 @@ export function FoliageAiPlanDialog({
                             maps={maps}
                         />
                     ) : (
-                        <PlanReview plan={plan} rows={rows} setRows={setRows} />
+                        <PlanReview
+                            plan={plan}
+                            rows={rows}
+                            setRows={setRows}
+                            generators={{
+                                model: meshyConfigured,
+                                card: aiConfigured,
+                            }}
+                        />
                     )}
 
                     {error && (
@@ -249,15 +257,19 @@ export function FoliageAiPlanDialog({
                                 Back to brief
                             </Button>
                             <div className="flex flex-wrap items-center gap-2">
-                                {selectedGenerations > 0 && (
+                                {(selectedModels > 0 || selectedCards > 0) && (
                                     <span className="text-xs text-muted-foreground">
-                                        {selectedGenerations} AI{' '}
-                                        {selectedGenerations === 1
-                                            ? 'generation'
-                                            : 'generations'}{' '}
-                                        · {plan.estimate.generation_note}
+                                        {[
+                                            selectedModels > 0 &&
+                                                `${selectedModels} Meshy ${selectedModels === 1 ? 'model' : 'models'} (≈${selectedModels * 30} credits)`,
+                                            selectedCards > 0 &&
+                                                `${selectedCards} AI ${selectedCards === 1 ? 'card' : 'cards'}`,
+                                        ]
+                                            .filter(Boolean)
+                                            .join(' · ')}
                                     </span>
                                 )}
+                                <AiCreditsBadge />
                                 <Button
                                     variant="outline"
                                     onClick={suggest}
@@ -372,7 +384,7 @@ function BriefForm({
                 onChange={(v) => setBrief((b) => ({ ...b, style: v }))}
                 description={
                     brief.style <= 35
-                        ? 'Prefers photoscanned Poly Haven models and realistic library assets.'
+                        ? 'Prefers realistic library assets and realistic Meshy 3D models.'
                         : brief.style <= 65
                           ? 'Mixes realistic trees and rocks with painterly AI cards or procedural ground cover.'
                           : 'Prefers procedural low-poly meshes, stylized library assets and stylized AI cards.'
@@ -399,9 +411,9 @@ function BriefForm({
                 <div className="space-y-1">
                     <Label htmlFor={`${id}-gen`}>Allow AI generation</Label>
                     <p className="text-xs text-muted-foreground">
-                        Lets the plan generate plant cards when nothing in the
-                        library or on Poly Haven fits (costs OpenRouter
-                        credits).
+                        Lets the plan generate Meshy 3D models (trees, shrubs,
+                        rocks) and AI plant cards (grass, flowers) when nothing
+                        in the library fits. Costs Meshy / OpenRouter credits.
                     </p>
                 </div>
                 <Switch
@@ -416,14 +428,18 @@ function BriefForm({
     );
 }
 
+type Generators = { model: boolean; card: boolean };
+
 function PlanReview({
     plan,
     rows,
     setRows,
+    generators,
 }: {
     plan: FoliagePlan;
     rows: RowState[];
     setRows: (fn: (rows: RowState[]) => RowState[]) => void;
+    generators: Generators;
 }) {
     const update = (i: number, patch: Partial<RowState>) =>
         setRows((prev) =>
@@ -476,6 +492,7 @@ function PlanReview({
                     <PlanRowItem
                         key={i}
                         state={r}
+                        generators={generators}
                         onChange={(patch) => update(i, patch)}
                     />
                 ))}
@@ -486,9 +503,11 @@ function PlanReview({
 
 function PlanRowItem({
     state,
+    generators,
     onChange,
 }: {
     state: RowState;
+    generators: Generators;
     onChange: (patch: Partial<RowState>) => void;
 }) {
     const { row } = state;
@@ -497,12 +516,9 @@ function PlanRowItem({
     const keep = row.action === 'keep';
     const inUse = (row.usage?.instances ?? 0) > 0;
     const id = useId();
+    const chosen = chosenAsset(state);
     const asset: FoliagePlanAsset | null =
-        state.assetChoice === 'procedural'
-            ? { type: 'procedural' }
-            : state.assetChoice === 'current'
-              ? (row.current?.asset ?? null)
-              : row.asset;
+        chosen?.type === 'current' ? (row.current?.asset ?? null) : chosen;
 
     return (
         <li
@@ -585,6 +601,7 @@ function PlanRowItem({
                             suggested={row.asset}
                             choice={state.assetChoice}
                             canKeepCurrent={row.action === 'change'}
+                            generators={generators}
                             kind={row.kind}
                             onChoice={(c) => onChange({ assetChoice: c })}
                         />
@@ -603,6 +620,7 @@ function AssetBox({
     suggested,
     choice,
     canKeepCurrent,
+    generators,
     kind,
     onChoice,
 }: {
@@ -610,6 +628,7 @@ function AssetBox({
     suggested: FoliagePlanAsset | null;
     choice: RowState['assetChoice'];
     canKeepCurrent: boolean;
+    generators: Generators;
     kind: FoliageKind;
     onChoice: (choice: RowState['assetChoice']) => void;
 }) {
@@ -625,24 +644,14 @@ function AssetBox({
             detail = `Library · ${asset.style}${asset.height ? ` · ${formatMetres(asset.height)}` : ''}${asset.status !== 'ready' ? ` · ${asset.status.replace('_', ' ')}` : ''}`;
             icon = <Box className="size-3.5" />;
             break;
-        case 'import':
-            thumb = asset.thumbnail_url;
-            title = (
-                <a
-                    href={asset.source_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="hover:underline"
-                >
-                    {asset.name}
-                </a>
-            );
-            detail = 'Import from Poly Haven (CC0), optimised in your browser';
-            icon = <Download className="size-3.5" />;
+        case 'model':
+            title = 'Meshy 3D model';
+            detail = `${asset.prompt} · ≈30 Meshy credits`;
+            icon = <Box className="size-3.5" />;
             break;
-        case 'generate':
-            title = 'AI generated card';
-            detail = asset.prompt;
+        case 'card':
+            title = 'AI plant card';
+            detail = `${asset.prompt} · one OpenRouter image`;
             icon = <Sparkles className="size-3.5" />;
             break;
         case 'current':
@@ -661,9 +670,9 @@ function AssetBox({
         {
             value: 'suggested',
             label:
-                suggested?.type === 'import'
-                    ? 'Suggested: import'
-                    : suggested?.type === 'generate'
+                suggested?.type === 'model'
+                    ? 'Suggested: Meshy 3D'
+                    : suggested?.type === 'card'
                       ? 'Suggested: AI card'
                       : suggested?.type === 'library'
                         ? 'Suggested: library'
@@ -671,6 +680,12 @@ function AssetBox({
                           ? 'Suggested: keep model'
                           : 'Suggested: procedural',
         },
+        ...(generators.model && suggested?.type !== 'model'
+            ? [{ value: 'model' as const, label: 'Meshy 3D model' }]
+            : []),
+        ...(generators.card && suggested?.type !== 'card' && kind !== 'rock'
+            ? [{ value: 'card' as const, label: 'AI plant card' }]
+            : []),
         ...(suggested?.type !== 'procedural'
             ? [{ value: 'procedural' as const, label: 'Procedural mesh' }]
             : []),
@@ -812,4 +827,24 @@ function SettingsDiff({
             </div>
         </dl>
     );
+}
+
+/** The model a reviewed row will use (the suggestion or the user's override). */
+function chosenAsset(state: RowState): FoliagePlanAsset | null {
+    const { row, assetChoice } = state;
+    const prompt =
+        row.asset && 'prompt' in row.asset ? row.asset.prompt : row.name;
+
+    switch (assetChoice) {
+        case 'procedural':
+            return { type: 'procedural' };
+        case 'current':
+            return { type: 'current' };
+        case 'model':
+            return { type: 'model', prompt };
+        case 'card':
+            return { type: 'card', prompt };
+        default:
+            return row.asset;
+    }
 }

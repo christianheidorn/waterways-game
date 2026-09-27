@@ -31,8 +31,24 @@ export function kindIcon(kind: FoliageKind): LucideIcon {
 export const FOLIAGE_SOURCE_LABELS: Record<FoliageAssetSource, string> = {
     polyhaven: 'Poly Haven',
     upload: 'Upload',
-    ai: 'AI card',
+    ai: 'AI',
 };
+
+/** "Meshy 3D", "AI card", "Upload", … for one asset. */
+export function assetSourceLabel(asset: {
+    source: FoliageAssetSource;
+    source_type?: 'model' | 'card';
+    bake_options?: { generator?: string };
+}): string {
+    if (asset.source === 'ai') {
+        return asset.bake_options?.generator === 'meshy' ||
+            asset.source_type === 'model'
+            ? 'Meshy 3D'
+            : 'AI card';
+    }
+
+    return FOLIAGE_SOURCE_LABELS[asset.source];
+}
 
 export const PENDING_STATUSES: FoliageAssetStatus[] = [
     'queued',
@@ -53,7 +69,6 @@ export const KIND_HEIGHT: Record<FoliageKind, number> = {
 };
 
 export const foliageApi = {
-    browse: () => '/api/foliage/browse/polyhaven',
     show: (id: number) => `/api/foliage/assets/${id}`,
     bake: (id: number) => `/api/foliage/assets/${id}/bake`,
     bakeFailed: (id: number) => `/api/foliage/assets/${id}/bake-failed`,

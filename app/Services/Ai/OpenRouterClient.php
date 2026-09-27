@@ -112,6 +112,37 @@ class OpenRouterClient
         return $this->request('get', 'key')['data'] ?? [];
     }
 
+    /**
+     * Remaining account credits in USD (GET /credits), plus this key's own spending limit (GET /key).
+     *
+     * @return array{remaining: float|null, total: float|null, usage: float|null, key_limit_remaining: float|null}
+     */
+    public function credits(): array
+    {
+        $num = fn ($v) => is_numeric($v) ? round((float) $v, 4) : null;
+
+        $total = $usage = null;
+        try {
+            $data = $this->request('get', 'credits')['data'] ?? [];
+            $total = $num($data['total_credits'] ?? null);
+            $usage = $num($data['total_usage'] ?? null);
+        } catch (OpenRouterException $e) {
+            // Some keys may not read account credits; the key's own limit below still helps.
+            if ($e->getCode() !== 403 && $e->getCode() !== 401) {
+                throw $e;
+            }
+        }
+
+        $key = $this->request('get', 'key')['data'] ?? [];
+
+        return [
+            'remaining' => $total !== null && $usage !== null ? round($total - $usage, 4) : null,
+            'total' => $total,
+            'usage' => $usage,
+            'key_limit_remaining' => $num($key['limit_remaining'] ?? null),
+        ];
+    }
+
     // ---------------------------------------------------------------------------------------
     // Image generation
     // ---------------------------------------------------------------------------------------

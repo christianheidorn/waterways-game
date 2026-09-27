@@ -82,7 +82,7 @@ class ModelUploads
                 if ($stat === false) {
                     continue;
                 }
-                $name = PolyHavenModels::safeRelativePath((string) $stat['name']);
+                $name = FoliageLibrary::safeRelativePath((string) $stat['name']);
                 if ($name === null || str_ends_with((string) $stat['name'], '/') || str_starts_with($name, '__MACOSX/') || str_contains($name, '/.')) {
                     continue;
                 }

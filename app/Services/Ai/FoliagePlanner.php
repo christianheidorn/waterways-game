@@ -10,7 +10,6 @@ use App\Models\Map;
 use App\Services\Foliage\FoliageAssetQueue;
 use App\Services\Foliage\FoliageLibrary;
 use App\Services\Foliage\FoliageTypeDefaults;
-use App\Services\Foliage\PolyHavenModels;
 use App\Services\LandCover\LandCoverService;
 use App\Services\LandCover\WorldCoverClasses;
 use App\Services\Terrain\TerrainStorage;
@@ -22,20 +21,20 @@ use Throwable;
 
 /**
  * AI foliage planning: a region- and style-specific foliage palette (keep / change / remove / add),
- * each type with a model (library → free CC0 Poly Haven import → AI generated card → procedural) and
+ * each type with a model (library → Meshy AI 3D model → AI plant card → procedural) and
  * realistic settings, plus applying the (user-reviewed) subset of that plan.
  *
  * Sizes are planned in metres (size_min_m / size_max_m = real instance heights) and converted to the
  * per-type scale of whichever model is used, so a 25 m spruce is 25 m tall whatever the source.
  *
  * Everything the model or the browser sends is untrusted: unknown keys are dropped, numbers are
- * clamped to the foliage form ranges and only existing types / assets / offered imports are kept.
+ * clamped to the foliage form ranges and only existing types / assets are kept.
  */
 class FoliagePlanner
 {
     public const ACTIONS = ['keep', 'change', 'remove', 'add'];
 
-    public const ASSET_TYPES = ['current', 'library', 'import', 'generate', 'procedural'];
+    public const ASSET_TYPES = ['current', 'library', 'model', 'card', 'procedural'];
 
     public const MAX_TYPES = 24;
 
@@ -53,7 +52,7 @@ class FoliagePlanner
 
     public const COLOR_KEYS = ['color', 'color_secondary', 'tint'];
 
-    public const GENERATION_NOTE = 'charged to your OpenRouter credits';
+    public const GENERATION_NOTE = 'Meshy models use about 30 Meshy credits each, cards one OpenRouter image each';
 
     private const COLOR = '/^#[0-9a-fA-F]{6}$/';
 
@@ -65,7 +64,7 @@ class FoliagePlanner
         private readonly MapAiAssistant $assistant,
         private readonly TerrainAnalysis $analysis,
         private readonly LandCoverService $landCover,
-        private readonly PolyHavenModels $polyHaven,
+        private readonly MeshyClient $meshy,
         private readonly FoliageAssetQueue $queue,
         private readonly FoliageTypeDefaults $defaults,
         private readonly TerrainStorage $terrain,
@@ -90,29 +89,27 @@ class FoliagePlanner
         $region = $this->string($input['region'] ?? null, 200);
         $direction = $this->string($input['direction'] ?? null, 600);
         $allowGeneration = (bool) ($input['allow_generation'] ?? true);
-
-        [$candidates, $unavailable] = $this->candidates();
+        $generation = $this->generation($allowGeneration);
 
         $user = "BRIEF\n".json_encode(array_filter([
             'region' => $region,
             'style' => $style,
             'style_meaning' => self::styleText($style),
-            'ai_generation_allowed' => $allowGeneration,
+            'meshy_3d_generation_available' => $generation['model'],
+            'ai_card_generation_available' => $generation['card'],
             'map' => $map ? $this->mapFacts($map) : null,
         ], fn ($v) => $v !== null), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
             ."\n\nCURRENT FOLIAGE TYPES (global palette shared by all maps)\n".$this->currentText()
             ."\n\nASSET LIBRARY\n".$this->libraryText()
-            ."\n\nPOLY HAVEN IMPORT CANDIDATES (CC0, photoreal scans; ref | name | kind | triangles | tags)\n"
-            .($candidates !== [] ? implode("\n", array_map(fn ($c) => "{$c['ref']} | {$c['name']} | {$c['kind']} | ".number_format($c['polycount']).' | '.implode(', ', array_slice($c['tags'], 0, 6)), $candidates)) : '(unavailable)')
             ."\n\nPROCEDURAL KINDS (built-in low-poly meshes, natural height at scale 1): "
             .implode(', ', array_map(fn ($k, $h) => "{$k} {$h} m", array_keys(FoliageLibrary::PROCEDURAL_HEIGHT), FoliageLibrary::PROCEDURAL_HEIGHT))
             .($direction !== null ? "\n\nDIRECTION FROM THE USER (follow it where sensible):\n".$direction : '');
 
         $raw = $this->client->chatJson($this->settings->textModel(), self::systemPrompt(), $user, 7000);
 
-        $plan = $this->sanitizePlan($raw, $allowGeneration, true);
+        $plan = $this->sanitizePlan($raw, $generation, true);
         $plan['brief'] = ['region' => $region, 'style' => $style, 'map_id' => $map?->id, 'map_name' => $map?->name];
-        $plan['unavailable_sources'] = $unavailable;
+        $plan['unavailable_sources'] = $allowGeneration && ! $generation['model'] ? ['Meshy (no API key)'] : [];
 
         return $plan;
     }
@@ -133,20 +130,22 @@ water, dead wood), rocks (1-2). Decide for EVERY current type: "keep" (only if i
 duplicate). Add missing types with "add". Never exceed 24 types in total.
 
 Style (0 = photoreal, 100 = stylized):
-- 0-35: prefer photoreal models - Poly Haven imports or realistic library assets; natural, slightly muted colours.
-- 36-65: mix - realistic imports for rocks and trees, AI generated cards or procedural meshes for grass / flowers.
-- 66-100: stylized - prefer procedural low-poly meshes, stylized library assets and AI cards with a stylized prompt;
-  avoid photoreal scans; saturated, harmonious colours.
+- 0-35: realistic library assets or realistic Meshy models; natural, slightly muted colours.
+- 36-65: mix - Meshy models for trees and rocks, AI cards or procedural meshes for grass / flowers.
+- 66-100: stylized - stylized library assets, stylized Meshy models, procedural low-poly meshes and stylized AI cards;
+  saturated, harmonious colours.
 
 Models ("asset"), in this order of preference:
-1. {"type":"library","asset_id":ID} - an existing library asset of a fitting species and style
-2. {"type":"import","source":"polyhaven","ref":REF} - ONLY refs from the candidate list; check the tags: many
-   Poly Haven plants are South African karoo / desert species - only use them where they are plausible
-3. {"type":"generate","prompt":"<=30 words: species, shape, colours, season"} - an AI generated plant image baked into
-   crossed cards. Great for grass, flowers, reeds and shrubs; acceptable for distant trees; NOT possible for rocks.
-   Only if generation is allowed and nothing in the library or import list fits; it costs money - say why in "reason".
-4. {"type":"procedural"} - built-in procedural mesh of the kind, tinted by color / color_secondary. Cheap and robust;
-   the right choice for stylized looks and when nothing else fits.
+1. {"type":"library","asset_id":ID} - an existing library asset of a fitting species and style (free, instant)
+2. {"type":"model","prompt":"<=40 words: species, silhouette, bark / leaf colours, season"} - a textured 3D model
+   generated by Meshy (only if meshy_3d_generation_available). Best for trees, palms, shrubs, rocks, dead wood. Costs
+   about 30 Meshy credits and a few minutes each - generate only the characteristic species, reuse library assets.
+3. {"type":"card","prompt":"<=30 words"} - an AI plant image baked into crossed alpha cards (only if
+   ai_card_generation_available). The right choice for grass, flowers, reeds, ferns and small ground cover; NOT for
+   rocks or hero trees.
+4. {"type":"procedural"} - built-in procedural mesh of the kind, tinted by color / color_secondary. Free and robust;
+   good for stylized looks and when nothing else fits.
+Say in "reason" why a paid generation is worth it.
 For "change" rows omit "asset" (or use {"type":"current"}) to keep the current model.
 
 Settings (all required for change / add):
@@ -222,26 +221,16 @@ TXT;
     }
 
     /**
-     * Import candidates (without models too heavy for the browser bake) and unavailable sources.
+     * Which generators the plan may use.
      *
-     * @return array{0: list<array<string, mixed>>, 1: list<string>}
+     * @return array{model: bool, card: bool}
      */
-    public function candidates(): array
+    public function generation(bool $allowed = true): array
     {
-        try {
-            $items = collect($this->polyHaven->catalogue())
-                ->map(fn ($asset, $ref) => $this->polyHaven->summary((string) $ref, $asset))
-                ->reject(fn ($item) => $item['too_heavy'])
-                ->sortBy('ref')
-                ->values()
-                ->all();
-
-            return [$items, []];
-        } catch (Throwable $e) {
-            report($e);
-
-            return [[], ['Poly Haven']];
-        }
+        return [
+            'model' => $allowed && $this->meshy->configured(),
+            'card' => $allowed && $this->settings->configured(),
+        ];
     }
 
     private function currentText(): string
@@ -319,10 +308,12 @@ TXT;
 
     /**
      * @param  array<string, mixed>  $raw
+     * @param  array{model: bool, card: bool}|null  $generation
      * @return array<string, mixed>
      */
-    public function sanitizePlan(array $raw, bool $allowGeneration = true, bool $strict = true): array
+    public function sanitizePlan(array $raw, ?array $generation = null, bool $strict = true): array
     {
+        $generation ??= $this->generation();
         $existing = FoliageType::query()->with('asset')->orderBy('name')->get()->keyBy('id');
         $usage = $this->usage();
         $rows = [];
@@ -342,7 +333,7 @@ TXT;
                 continue;
             }
 
-            $row = $this->row($type, $entry, $strict, $allowGeneration);
+            $row = $this->row($type, $entry, $strict, $generation);
             if ($row === null) {
                 continue;
             }
@@ -355,7 +346,7 @@ TXT;
         // Types the plan did not mention stay as they are.
         foreach ($existing as $type) {
             if (! isset($seen[$type->id])) {
-                $rows[] = $this->row($type, ['action' => 'keep', 'reason' => 'Not part of the plan — left as it is.'], $strict, $allowGeneration);
+                $rows[] = $this->row($type, ['action' => 'keep', 'reason' => 'Not part of the plan — left as it is.'], $strict, $generation);
             }
         }
 
@@ -388,21 +379,23 @@ TXT;
                 ->map(fn ($n) => $this->string($n, 300))->filter()->take(8)->values()->all(),
             'types' => $rows,
             'estimate' => [
-                'imports' => $active->filter(fn ($r) => ($r['asset']['type'] ?? null) === 'import')->unique(fn ($r) => $r['asset']['ref'])->count(),
-                'generations' => $active->filter(fn ($r) => ($r['asset']['type'] ?? null) === 'generate')->count(),
+                'models' => $active->filter(fn ($r) => ($r['asset']['type'] ?? null) === 'model')->count(),
+                'cards' => $active->filter(fn ($r) => ($r['asset']['type'] ?? null) === 'card')->count(),
                 'generation_note' => self::GENERATION_NOTE,
             ],
         ];
     }
 
     /**
-     * One plan row. $strict (model output): import refs must be offered candidates and a "change"
-     * that changes nothing becomes "keep".
+     * One plan row. $strict (model output): a "change" that changes nothing becomes "keep".
      *
      * @param  array<string, mixed>  $entry
      * @return array<string, mixed>|null
      */
-    public function row(?FoliageType $type, array $entry, bool $strict, bool $allowGeneration = true): ?array
+    /**
+     * @param  array{model: bool, card: bool}  $generation
+     */
+    public function row(?FoliageType $type, array $entry, bool $strict, array $generation = ['model' => true, 'card' => true]): ?array
     {
         $action = is_string($entry['action'] ?? null) && in_array($entry['action'], self::ACTIONS, true)
             ? $entry['action']
@@ -433,7 +426,7 @@ TXT;
             return $base;
         }
 
-        $asset = $this->asset(is_array($entry['asset'] ?? null) ? $entry['asset'] : null, $kind, $strict, $allowGeneration, $type !== null);
+        $asset = $this->asset(is_array($entry['asset'] ?? null) ? $entry['asset'] : null, $kind, $generation, $type !== null);
         if ($asset === null) {
             $asset = $type ? ['type' => 'current'] : ['type' => 'procedural'];
         }
@@ -456,7 +449,10 @@ TXT;
      * @param  array<string, mixed>|null  $input
      * @return array<string, mixed>|null
      */
-    public function asset(?array $input, FoliageKind $kind, bool $strict, bool $allowGeneration = true, bool $hasCurrent = false): ?array
+    /**
+     * @param  array{model: bool, card: bool}  $generation
+     */
+    public function asset(?array $input, FoliageKind $kind, array $generation, bool $hasCurrent = false): ?array
     {
         $type = is_string($input['type'] ?? null) ? $input['type'] : null;
 
@@ -471,43 +467,14 @@ TXT;
 
                 return $asset ? $this->libraryRef($asset) : null;
 
-            case 'import':
-                $ref = is_string($input['ref'] ?? null) && preg_match(self::REF, $input['ref']) === 1 ? $input['ref'] : null;
-                if ($ref === null) {
-                    return null;
-                }
-                $existing = FoliageAsset::query()->where('source', 'polyhaven')->where('source_ref', $ref)->where('status', '!=', 'failed')->first();
-                if ($existing) {
-                    return $this->libraryRef($existing);
-                }
-                $summary = null;
-                try {
-                    $catalogue = $this->polyHaven->catalogue();
-                    $summary = isset($catalogue[$ref]) ? $this->polyHaven->summary($ref, $catalogue[$ref]) : null;
-                } catch (Throwable) {
-                    $summary = null;
-                }
-                if ($strict && ($summary === null || $summary['too_heavy'])) {
-                    return null;
-                }
-
-                return [
-                    'type' => 'import',
-                    'source' => 'polyhaven',
-                    'ref' => $ref,
-                    'name' => $summary['name'] ?? Str::headline($ref),
-                    'thumbnail_url' => $summary['thumbnail_url'] ?? null,
-                    'polycount' => $summary['polycount'] ?? null,
-                    'source_url' => "https://polyhaven.com/a/{$ref}",
-                ];
-
-            case 'generate':
+            case 'model':
+            case 'card':
                 $prompt = $this->string($input['prompt'] ?? null, 600);
-                if ($prompt === null || $kind === FoliageKind::Rock || ! $allowGeneration) {
+                if ($prompt === null || ! $generation[$type] || ($type === 'card' && $kind === FoliageKind::Rock)) {
                     return null;
                 }
 
-                return ['type' => 'generate', 'prompt' => $prompt];
+                return ['type' => $type, 'prompt' => $prompt];
 
             case 'procedural':
                 return ['type' => 'procedural'];
@@ -564,16 +531,15 @@ TXT;
      * Apply the reviewed rows (only the ones the user ticked are sent).
      *
      * @param  list<array<string, mixed>>  $entries
-     * @return array{created: int, updated: int, removed: int, imports: int, generations: int, skipped: list<string>}
+     * @return array{created: int, updated: int, removed: int, models: int, cards: int, skipped: list<string>}
      */
     public function apply(array $entries, int $style = 20): array
     {
-        $result = ['created' => 0, 'updated' => 0, 'removed' => 0, 'imports' => 0, 'generations' => 0, 'skipped' => []];
-        $aiConfigured = $this->settings->configured();
+        $result = ['created' => 0, 'updated' => 0, 'removed' => 0, 'models' => 0, 'cards' => 0, 'skipped' => []];
+        $generation = $this->generation();
         $existing = FoliageType::query()->with('asset')->get()->keyBy('id');
-        $importedRefs = [];
 
-        DB::transaction(function () use ($entries, $style, $existing, $aiConfigured, &$result, &$importedRefs) {
+        DB::transaction(function () use ($entries, $style, $existing, $generation, &$result) {
             foreach ($entries as $entry) {
                 if (! is_array($entry)) {
                     continue;
@@ -586,7 +552,7 @@ TXT;
                     continue;
                 }
 
-                $row = $this->row($type, $entry, false, $aiConfigured);
+                $row = $this->row($type, $entry, false, $generation);
                 if ($row === null || $row['action'] === 'keep') {
                     continue;
                 }
@@ -600,8 +566,8 @@ TXT;
                 }
 
                 $wanted = is_array($entry['asset'] ?? null) ? ($entry['asset']['type'] ?? null) : null;
-                if ($wanted === 'generate' && ! $aiConfigured) {
-                    $result['skipped'][] = "{$row['name']}: AI is not configured — using the procedural mesh instead.";
+                if (in_array($wanted, ['model', 'card'], true) && ! $generation[$wanted]) {
+                    $result['skipped'][] = "{$row['name']}: ".($wanted === 'model' ? 'Meshy' : 'OpenRouter').' is not configured — kept the current model or used the procedural mesh.';
                 }
 
                 $settings = $row['settings'];
@@ -617,18 +583,19 @@ TXT;
                         $asset = FoliageAsset::query()->find($row['asset']['asset_id']);
                         $assetId = $asset?->id;
                         break;
-                    case 'import':
-                        $ref = $row['asset']['ref'];
-                        $asset = $importedRefs[$ref] ??= $this->queue->importPolyHaven($ref, $kind->value, round($meanSize, 2));
+                    case 'model':
+                        $asset = $this->queue->meshy(
+                            Str::limit($row['name'], 60, ''), $kind, $style, round(max(0.05, $meanSize), 2), $row['asset']['prompt'],
+                        );
                         $assetId = $asset->id;
-                        $result['imports']++;
+                        $result['models']++;
                         break;
-                    case 'generate':
+                    case 'card':
                         $asset = $this->queue->generate(
                             Str::limit($row['name'], 60, ''), $kind, $style, round(max(0.05, $meanSize), 2), $row['asset']['prompt'],
                         );
                         $assetId = $asset->id;
-                        $result['generations']++;
+                        $result['cards']++;
                         break;
                     case 'procedural':
                         $asset = null;
@@ -663,7 +630,7 @@ TXT;
     }
 
     /**
-     * @param  array{created: int, updated: int, removed: int, imports: int, generations: int, skipped: list<string>}  $result
+     * @param  array{created: int, updated: int, removed: int, models: int, cards: int, skipped: list<string>}  $result
      */
     public static function message(array $result): string
     {
@@ -676,11 +643,11 @@ TXT;
         $message = $parts === [] ? 'Nothing to change.' : 'Foliage palette updated: '.implode(', ', $parts).'.';
 
         $pending = [];
-        if ($result['imports'] > 0) {
-            $pending[] = $result['imports'].' Poly Haven '.Str::plural('import', $result['imports']);
+        if ($result['models'] > 0) {
+            $pending[] = $result['models'].' Meshy '.Str::plural('model', $result['models']);
         }
-        if ($result['generations'] > 0) {
-            $pending[] = $result['generations'].' AI '.Str::plural('generation', $result['generations']);
+        if ($result['cards'] > 0) {
+            $pending[] = $result['cards'].' AI '.Str::plural('card', $result['cards']);
         }
         if ($pending !== []) {
             $message .= ' '.ucfirst(implode(' and ', $pending)).' running — keep the foliage page open so they can be optimised; types use procedural meshes until then.';

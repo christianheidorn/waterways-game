@@ -15,7 +15,8 @@ use Throwable;
 
 /**
  * Generates a foliage "card" image with an OpenRouter image model. Models that support a transparent
- * background get one; for the others the browser keys out the plain white background while baking.
+ * background get one; for the others the browser keys out a flat magenta (or cyan) background while
+ * baking, with colour decontamination so thin leaves keep no fringe.
  *
  * Options: prompt (required), style (0 photoreal … 100 stylized), model.
  */
@@ -43,7 +44,8 @@ class GenerateFoliageAsset implements ShouldQueue
         $model = (string) ($this->options['model'] ?? '') ?: $settings->imageModel();
         $style = max(0, min(100, (int) ($this->options['style'] ?? ($asset->style === 'stylized' ? 80 : 10))));
         $transparent = $client->imageModelSupports($model, 'background', 'transparent');
-        $finalPrompt = $prompts->cardPrompt($userPrompt, $asset->kind, $style, $transparent);
+        $keyColor = FoliagePrompts::keyColor($userPrompt);
+        $finalPrompt = $prompts->cardPrompt($userPrompt, $asset->kind, $style, $transparent, $keyColor);
 
         $asset->forceFill([
             'status' => 'processing',
@@ -79,7 +81,7 @@ class GenerateFoliageAsset implements ShouldQueue
             'source_type' => 'card',
             'source_path' => $path,
             // Always let the baker key the background if the image turns out to have no alpha.
-            'bake_options' => ['key_background' => ! $transparent || $extension === 'jpg'],
+            'bake_options' => ['key_background' => ! $transparent || $extension === 'jpg', 'key_color' => $keyColor],
             'status' => 'awaiting_bake',
             'status_message' => 'Image generated — waiting to be baked in the studio.',
         ])->save();

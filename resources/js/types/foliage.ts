@@ -23,7 +23,12 @@ export type FoliageAssetStudio = FoliageAssetRef & {
     tags: string[];
     source_type: 'model' | 'card';
     source_file_url: string | null;
-    bake_options: { key_background?: boolean };
+    bake_options: {
+        key_background?: boolean;
+        key_color?: string;
+        generator?: 'meshy';
+        route?: 'text' | 'image';
+    };
     target_height: number | null;
     meta: {
         height?: number;
@@ -45,29 +50,6 @@ export type FoliageAssetStudio = FoliageAssetRef & {
 };
 
 export type { FoliageAssetStyle };
-
-/** One Poly Haven model (App\Services\Foliage\PolyHavenModels::summary). */
-export type FoliageBrowseItem = {
-    ref: string;
-    name: string;
-    thumbnail_url: string;
-    categories: string[];
-    tags: string[];
-    author: string;
-    license: string;
-    source_url: string;
-    polycount: number;
-    too_heavy: boolean;
-    kind: FoliageKind;
-    imported_asset_id: number | null;
-};
-
-export type FoliageBrowseResponse = {
-    items: FoliageBrowseItem[];
-    page: number;
-    has_more: boolean;
-    total: number;
-};
 
 export type FoliageMapOption = {
     id: number;
@@ -92,16 +74,8 @@ export type FoliagePlanAsset =
           thumbnail_url: string | null;
           height: number | null;
       }
-    | {
-          type: 'import';
-          source: 'polyhaven';
-          ref: string;
-          name: string;
-          thumbnail_url: string | null;
-          polycount: number | null;
-          source_url: string;
-      }
-    | { type: 'generate'; prompt: string }
+    | { type: 'model'; prompt: string }
+    | { type: 'card'; prompt: string }
     | { type: 'procedural' }
     | { type: 'upload' };
 
@@ -145,8 +119,8 @@ export type FoliagePlan = {
     notes: string[];
     types: FoliagePlanRow[];
     estimate: {
-        imports: number;
-        generations: number;
+        models: number;
+        cards: number;
         generation_note: string;
     };
     brief: {

@@ -1,3 +1,4 @@
+import { AiCreditsBadge } from '@/components/ai-credits';
 import { useForm } from '@inertiajs/react';
 import { Sparkles, WandSparkles } from 'lucide-react';
 import type { FormEvent } from 'react';
@@ -349,24 +350,28 @@ function GenerateBody({
                 </>
             )}
 
-            <DialogFooter className="gap-2">
-                <DialogClose asChild>
-                    <Button type="button" variant="secondary">
-                        Cancel
+            <DialogFooter className="flex-wrap items-center gap-2 sm:justify-between">
+                <AiCreditsBadge providers={['openrouter']} />
+                <div className="flex gap-2">
+                    <DialogClose asChild>
+                        <Button type="button" variant="secondary">
+                            Cancel
+                        </Button>
+                    </DialogClose>
+                    <Button
+                        type="submit"
+                        disabled={
+                            !ai.configured ||
+                            form.processing ||
+                            !form.data.prompt.trim()
+                        }
+                        className="bg-violet-600 text-white hover:bg-violet-600/90 dark:bg-violet-500 dark:hover:bg-violet-500/90"
+                    >
+                        {form.processing ? <Spinner /> : <Sparkles />}
+                        Generate{' '}
+                        {form.data.variants > 1 ? form.data.variants : ''}
                     </Button>
-                </DialogClose>
-                <Button
-                    type="submit"
-                    disabled={
-                        !ai.configured ||
-                        form.processing ||
-                        !form.data.prompt.trim()
-                    }
-                    className="bg-violet-600 text-white hover:bg-violet-600/90 dark:bg-violet-500 dark:hover:bg-violet-500/90"
-                >
-                    {form.processing ? <Spinner /> : <Sparkles />}
-                    Generate {form.data.variants > 1 ? form.data.variants : ''}
-                </Button>
+                </div>
             </DialogFooter>
         </form>
     );

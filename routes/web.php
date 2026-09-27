@@ -55,7 +55,6 @@ Route::get('game/{map}', [StudioController::class, 'game'])->name('game.show');
 
 Route::get('foliage', [FoliageTypeController::class, 'index'])->name('foliage.index');
 Route::post('foliage/assets/upload', [FoliageAssetController::class, 'upload'])->name('foliage.assets.upload');
-Route::post('foliage/assets/import', [FoliageAssetController::class, 'import'])->name('foliage.assets.import');
 Route::post('foliage/assets/generate', [FoliageAssetController::class, 'generate'])->name('foliage.assets.generate');
 Route::put('foliage/assets/{asset}', [FoliageAssetController::class, 'update'])->name('foliage.assets.update');
 Route::post('foliage/assets/{asset}/rebake', [FoliageAssetController::class, 'rebake'])->name('foliage.assets.rebake');

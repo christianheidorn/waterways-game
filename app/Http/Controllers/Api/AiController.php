@@ -6,10 +6,13 @@ use App\Http\Controllers\Controller;
 use App\Models\Material;
 use App\Services\Ai\AiNotConfiguredException;
 use App\Services\Ai\MaterialPrompts;
+use App\Services\Ai\MeshyClient;
+use App\Services\Ai\MeshyException;
 use App\Services\Ai\OpenRouterClient;
 use App\Services\Ai\OpenRouterException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\Rule;
 
 /**
@@ -32,6 +35,38 @@ class AiController extends Controller
         } catch (OpenRouterException $e) {
             return response()->json(['configured' => true, 'image' => [], 'text' => [], 'message' => $e->getMessage()], 502);
         }
+    }
+
+    /**
+     * Remaining OpenRouter (USD) and Meshy credits. Keys never leave the server.
+     */
+    public function credits(Request $request, OpenRouterClient $openRouter, MeshyClient $meshy): JsonResponse
+    {
+        $fresh = $request->boolean('fresh');
+        $result = [
+            'openrouter' => ['configured' => $openRouter->configured()],
+            'meshy' => ['configured' => $meshy->configured()],
+        ];
+
+        if ($openRouter->configured()) {
+            try {
+                $result['openrouter'] += $fresh
+                    ? tap($openRouter->credits(), fn ($c) => Cache::put('openrouter.credits', $c, 20))
+                    : Cache::remember('openrouter.credits', 20, fn () => $openRouter->credits());
+            } catch (OpenRouterException $e) {
+                $result['openrouter']['error'] = $e->getMessage();
+            }
+        }
+
+        if ($meshy->configured()) {
+            try {
+                $result['meshy']['balance'] = $meshy->balance($fresh);
+            } catch (MeshyException $e) {
+                $result['meshy']['error'] = $e->getMessage();
+            }
+        }
+
+        return response()->json($result);
     }
 
     public function enhancePrompt(Request $request, MaterialPrompts $prompts): JsonResponse

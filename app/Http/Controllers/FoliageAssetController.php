@@ -4,7 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Enums\FoliageKind;
 use App\Jobs\GenerateFoliageAsset;
-use App\Jobs\ImportFoliageAsset;
+use App\Jobs\GenerateMeshyAsset;
 use App\Models\FoliageAsset;
 use App\Models\FoliageType;
 use App\Services\Ai\MaterialPrompts;
@@ -20,10 +20,12 @@ use Illuminate\Validation\Rule;
 use RuntimeException;
 
 /**
- * The foliage asset library: Poly Haven imports, GLB / glTF / zip uploads and AI generated cards.
+ * The foliage asset library: GLB / glTF / zip uploads, Meshy 3D generation and AI plant cards.
  */
 class FoliageAssetController extends Controller
 {
+    public const ENGINES = ['meshy_text', 'meshy_image', 'card'];
+
     public function __construct(private readonly FoliageAssetQueue $queue) {}
 
     public function upload(Request $request, ModelUploads $uploads): RedirectResponse
@@ -67,51 +69,50 @@ class FoliageAssetController extends Controller
         return back();
     }
 
-    public function import(Request $request): RedirectResponse
-    {
-        $data = $request->validate([
-            'refs' => ['required', 'array', 'min:1', 'max:30'],
-            'refs.*' => ['required', 'string', 'max:120', 'regex:/^[A-Za-z0-9_.-]+$/'],
-            'kind' => ['nullable', Rule::enum(FoliageKind::class)],
-        ]);
-
-        $imported = [];
-        foreach (array_unique($data['refs']) as $ref) {
-            $imported[] = $this->queue->importPolyHaven($ref, $data['kind'] ?? null)->name;
-        }
-
-        $this->toast('info', 'Importing '.implode(', ', array_slice($imported, 0, 4)).(count($imported) > 4 ? ' and '.(count($imported) - 4).' more' : '').'…');
-
-        return back();
-    }
-
+    /**
+     * AI generation. Engines: "meshy_text" (Meshy text to 3D), "meshy_image" (OpenRouter concept image →
+     * Meshy image to 3D) and "card" (one OpenRouter image baked into crossed cards).
+     */
     public function generate(Request $request, AiSettings $ai): RedirectResponse
     {
         $data = $request->validate([
-            'prompt' => ['required', 'string', 'max:1000'],
+            'engine' => ['required', Rule::in(self::ENGINES)],
+            'prompt' => ['required', 'string', 'max:600'],
             'name' => ['nullable', 'string', 'max:80'],
-            'kind' => ['required', Rule::enum(FoliageKind::class), Rule::notIn(['rock'])],
+            'kind' => ['required', Rule::enum(FoliageKind::class)],
             'style' => ['required', 'integer', 'between:0,100'],
-            'target_height' => ['required', 'numeric', 'between:0.05,80'],
+            'target_height' => ['nullable', 'required_if:engine,card', 'numeric', 'between:0.05,80'],
             'variants' => ['required', 'integer', 'between:1,4'],
+            'meshy_model' => ['nullable', 'string', 'max:40'],
             'model' => ['nullable', 'string', 'max:200', 'regex:'.AiSettings::MODEL_PATTERN],
-        ], [
-            'kind.not_in' => 'Rocks cannot be generated as flat cards — import a rock model from Poly Haven instead.',
         ]);
 
-        if (! $ai->configured()) {
-            $message = 'AI is not configured: add an OpenRouter API key under Settings → AI.';
-            $this->toast('error', $message);
+        $engine = $data['engine'];
+        $error = match (true) {
+            $engine === 'card' && $data['kind'] === 'rock' => ['kind', 'Rocks cannot be flat cards — generate them as a Meshy 3D model.'],
+            $engine !== 'meshy_text' && ! $ai->configured() => ['ai', 'OpenRouter is not configured: add an OpenRouter API key under Settings → AI.'],
+            str_starts_with($engine, 'meshy') && ! $ai->meshyConfigured() => ['ai', 'Meshy is not configured: add a Meshy API key under Settings → AI.'],
+            default => null,
+        };
+        if ($error !== null) {
+            $this->toast('error', $error[1]);
 
-            return back()->withErrors(['ai' => $message]);
+            return back()->withErrors([$error[0] => $error[1]]);
         }
 
+        $kind = FoliageKind::from($data['kind']);
+        $height = isset($data['target_height']) ? (float) $data['target_height'] : null;
         $name = trim((string) ($data['name'] ?? '')) ?: MaterialPrompts::summary($data['prompt'], 36);
+
         for ($n = 1; $n <= $data['variants']; $n++) {
-            $this->queue->generate($name.($data['variants'] > 1 ? " #{$n}" : ''), FoliageKind::from($data['kind']), (int) $data['style'], (float) $data['target_height'], $data['prompt'], $data['model'] ?? null);
+            $variant = $name.($data['variants'] > 1 ? " #{$n}" : '');
+            $engine === 'card'
+                ? $this->queue->generate($variant, $kind, (int) $data['style'], (float) $height, $data['prompt'], $data['model'] ?? null)
+                : $this->queue->meshy($variant, $kind, (int) $data['style'], $height, $data['prompt'], $engine === 'meshy_image' ? 'image' : 'text', $data['meshy_model'] ?? null);
         }
 
-        $this->toast('info', 'Generating '.$data['variants'].' foliage '.Str::plural('card', $data['variants']).'…');
+        $what = $engine === 'card' ? Str::plural('card', $data['variants']) : Str::plural('3D model', $data['variants']).' with Meshy';
+        $this->toast('info', "Generating {$data['variants']} {$what}…");
 
         return back();
     }
@@ -162,14 +163,17 @@ class FoliageAssetController extends Controller
             return $this->rebake($asset);
         }
 
-        if ($asset->source === 'polyhaven' && $asset->source_ref) {
-            $asset->forceFill(['status' => 'queued', 'status_message' => 'Queued for download…'])->save();
-            $this->queue->dispatch(new ImportFoliageAsset($asset, $asset->source_ref));
+        $options = $asset->bake_options ?? [];
+        if (($options['generator'] ?? null) === 'meshy' && ! empty($options['prompt'])) {
+            $asset->forceFill(['status' => 'queued', 'status_message' => 'Queued for Meshy…', 'bake_options' => [...$options, 'meshy' => []]])->save();
+            $this->queue->dispatch(new GenerateMeshyAsset($asset, [
+                'route' => $options['route'] ?? 'text', 'prompt' => $options['prompt'], 'style' => (int) ($options['style'] ?? 20), 'model' => $options['meshy_model'] ?? null,
+            ]));
         } elseif ($asset->source === 'ai' && $asset->ai_prompt) {
             $asset->forceFill(['status' => 'queued', 'status_message' => 'Queued for generation…'])->save();
             $this->queue->dispatch(new GenerateFoliageAsset($asset, ['prompt' => $this->userPrompt($asset), 'model' => $asset->ai_model]));
         } else {
-            $this->toast('error', 'The uploaded source file is gone — upload the model again.');
+            $this->toast('error', 'The source file is gone — upload or generate the model again.');
         }
 
         return back();

@@ -3,7 +3,6 @@ import type { FoliageType } from '@game/shared/types';
 import {
     Box,
     Cpu,
-    Download,
     ExternalLink,
     ImageOff,
     Package,
@@ -38,7 +37,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import type { BakeState } from '@/hooks/use-foliage-bake-queue';
 import {
-    FOLIAGE_SOURCE_LABELS,
+    assetSourceLabel,
     formatMetres,
     formatTriangles,
     kindIcon,
@@ -53,7 +52,6 @@ type Props = {
     kinds: KindOption[];
     bake: BakeState | null;
     bakeSupported: boolean;
-    onBrowse: () => void;
     onUpload: () => void;
     onGenerate: () => void;
 };
@@ -64,7 +62,6 @@ export function AssetLibrary({
     kinds,
     bake,
     bakeSupported,
-    onBrowse,
     onUpload,
     onGenerate,
 }: Props) {
@@ -94,25 +91,21 @@ export function AssetLibrary({
                     <div className="max-w-md space-y-1">
                         <h2 className="font-semibold">No foliage assets yet</h2>
                         <p className="text-sm text-muted-foreground">
-                            Import free CC0 plant, tree and rock scans from Poly
-                            Haven, upload glTF models or whole nature kits, or
-                            generate plant cards with AI. Assets are optimised
-                            for the game (LODs and impostors) right in this
-                            browser.
+                            Generate textured 3D trees, shrubs and rocks with
+                            Meshy, paint grass and flower cards with AI, or
+                            upload glTF models and whole nature kits. Assets are
+                            optimised for the game (LODs and impostors) right in
+                            this browser.
                         </p>
                     </div>
                     <div className="flex flex-wrap justify-center gap-2">
-                        <Button onClick={onBrowse}>
-                            <Download />
-                            Browse Poly Haven
+                        <Button onClick={onGenerate}>
+                            <Sparkles />
+                            Generate with AI
                         </Button>
                         <Button variant="outline" onClick={onUpload}>
                             <Upload />
                             Upload models
-                        </Button>
-                        <Button variant="outline" onClick={onGenerate}>
-                            <Sparkles />
-                            Generate with AI
                         </Button>
                     </div>
                 </div>
@@ -130,10 +123,6 @@ export function AssetLibrary({
                             {shown.length} of {assets.length}
                         </span>
                         <div className="ml-auto flex flex-wrap gap-2">
-                            <Button size="sm" onClick={onBrowse}>
-                                <Download />
-                                Poly Haven
-                            </Button>
                             <Button
                                 size="sm"
                                 variant="outline"
@@ -142,11 +131,7 @@ export function AssetLibrary({
                                 <Upload />
                                 Upload
                             </Button>
-                            <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={onGenerate}
-                            >
+                            <Button size="sm" onClick={onGenerate}>
                                 <Sparkles />
                                 Generate
                             </Button>
@@ -263,7 +248,7 @@ function AssetCard({
                     {asset.name}
                 </h3>
                 <p className="truncate text-xs text-muted-foreground">
-                    {FOLIAGE_SOURCE_LABELS[asset.source]}
+                    {assetSourceLabel(asset)}
                     {asset.status === 'ready' && (
                         <>
                             {' · '}
@@ -372,7 +357,7 @@ function AssetDetail({
             <DialogHeader>
                 <DialogTitle>{asset.name}</DialogTitle>
                 <DialogDescription>
-                    {FOLIAGE_SOURCE_LABELS[asset.source]}
+                    {assetSourceLabel(asset)}
                     {asset.author ? ` · ${asset.author}` : ''}
                     {asset.license ? ` · ${asset.license}` : ''}
                     {asset.source_url && (

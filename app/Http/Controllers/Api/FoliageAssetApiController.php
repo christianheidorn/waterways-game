@@ -2,39 +2,18 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Enums\FoliageKind;
 use App\Http\Controllers\Controller;
 use App\Models\FoliageAsset;
-use App\Services\Foliage\PolyHavenModels;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
-use Illuminate\Validation\Rule;
-use Throwable;
 
 /**
- * JSON endpoints for the foliage asset library: browsing Poly Haven and receiving browser bakes.
+ * JSON endpoints for the foliage asset library: asset details and receiving browser bakes.
  */
 class FoliageAssetApiController extends Controller
 {
-    public function browse(Request $request, PolyHavenModels $polyHaven): JsonResponse
-    {
-        $data = $request->validate([
-            'q' => ['nullable', 'string', 'max:100'],
-            'kind' => ['nullable', Rule::enum(FoliageKind::class)],
-            'page' => ['nullable', 'integer', 'min:1', 'max:100'],
-        ]);
-
-        try {
-            return response()->json($polyHaven->search($data['q'] ?? null, $data['kind'] ?? null, (int) ($data['page'] ?? 1)));
-        } catch (Throwable $e) {
-            report($e);
-
-            return response()->json(['message' => 'Could not reach Poly Haven: '.$e->getMessage()], 502);
-        }
-    }
-
     public function show(FoliageAsset $asset): JsonResponse
     {
         return response()->json($asset->loadCount('types')->toStudioArray());

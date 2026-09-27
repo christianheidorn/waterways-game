@@ -99,28 +99,35 @@ Queued jobs (terrain, imports, AI generation) need a queue worker; `composer dev
 
 **Outbound hosts** used by the studio: `s3.amazonaws.com` (elevation), `esa-worldcover.s3.eu-central-1.amazonaws.com`,
 `overpass-api.de` / `overpass.kumi.systems` / `overpass.private.coffee`, `api.polyhaven.com`, `dl.polyhaven.org`,
-`cdn.polyhaven.com` (thumbnails, also for foliage models), `ambientcg.com`, `acg-media.struffelproductions.com`,
-`acg-download.struffelproductions.com`, `openrouter.ai`; in the browser also the map tile servers and
+`cdn.polyhaven.com` (thumbnails), `ambientcg.com`, `acg-media.struffelproductions.com`,
+`acg-download.struffelproductions.com`, `openrouter.ai`, `api.meshy.ai` and `assets.meshy.ai` (Meshy); in the browser also the map tile servers and
 `nominatim.openstreetmap.org`.
 
 ## Foliage assets and the AI foliage palette
 
-**Foliage library** (Studio → Foliage) has two tabs: _Foliage types_ (the palette the brush paints: kind,
-colours, size, density, slope / altitude rules, cull distance) and the _Asset library_ of 3D models a type can
-use instead of its procedural mesh. Assets come from:
+**Foliage library** (Studio → Foliage) has two tabs:
 
-- **Poly Haven** (CC0): about 90 photoscanned plants, trees, grasses, flowers and rocks. The largest
-  "hero" trees (e.g. the 17 M-triangle `pine_tree_01`) are too heavy for real-time foliage and are not offered.
-- **Uploads**: `.glb`, self-contained `.gltf`, or a `.zip` of glTF / GLB models, for example free CC0 nature
-  kits from [Quaternius](https://quaternius.com) or the [Kenney Nature Kit](https://kenney.nl/assets/nature-kit)
-  (the best source for stylized looks). Every model in the zip becomes an asset.
-- **AI generation** via OpenRouter: an image model paints one plant (with a transparent background where the
-  model supports it, otherwise white, which is keyed out). The plant is baked into crossed alpha-tested cards,
-  the classic technique for grass, flowers, reeds and shrubs. It also works for distant or stylized trees.
-  Full 3D generation (image-to-3D) is not available on OpenRouter, and rocks cannot be generated.
+- _Foliage types_: the palette the brush paints. Each type sets kind, colours, size, density, slope / altitude
+  rules and cull distance.
+- _Asset library_: 3D models a type can use instead of its procedural mesh.
 
-Imported sources are **baked in the browser** (`resources/game/tools/FoliageBaker.ts`, which uses
-meshoptimizer). The bake:
+Assets come from:
+
+- **Meshy 3D** ([meshy.ai](https://www.meshy.ai), Settings → AI → Meshy key): textured 3D trees, shrubs and
+  rocks, from text (preview mesh → PBR refine) or from an OpenRouter concept image (image to 3D). A model costs
+  about 30 Meshy credits (15 with Meshy 5) and takes a few minutes; the job polls Meshy in the background.
+  Meshy's community library is only available through its Enterprise "showcases" API, billed per request, so it is
+  not integrated.
+- **AI plant cards** (OpenRouter): one plant image, cut out and baked into crossed alpha-tested cards, the classic
+  technique for grass, flowers and reeds. The background is transparent when the image model supports it;
+  otherwise it is a flat magenta or cyan chroma key, and colour decontamination removes fringes.
+- **Uploads**: `.glb`, self-contained `.gltf`, or a `.zip` of glTF / GLB models, e.g. the free CC0 nature kits from
+  [Quaternius](https://quaternius.com) or the [Kenney Nature Kit](https://kenney.nl/assets/nature-kit).
+
+Remaining OpenRouter and Meshy credits are shown in Settings → AI, on the foliage page and in the generate
+dialogs (`GET /api/ai/credits`).
+
+Every source is **baked in the browser** (`resources/game/tools/FoliageBaker.ts`, using meshoptimizer). The bake:
 
 - normalises the model to metres, with its pivot at the base;
 - decimates to per-kind triangle budgets, dropping and enlarging leaf cards instead of collapsing them;
@@ -128,20 +135,20 @@ meshoptimizer). The bake:
 - limits textures to 1K;
 - uploads a game-ready GLB with a thumbnail.
 
-Keep the foliage page open while assets show _Waiting to be optimised_. The game streams LOD0 → LOD1 →
-impostor by distance, with leaf-shaped shadows and wind.
+Keep the foliage page open while assets show _Waiting to be optimised_.
+
+**In the game editor** the Foliage tool shows your types as tiles with thumbnails: baked model thumbnails, or
+thumbnails of the procedural mesh rendered in-game.
 
 **AI foliage palette** (✨ _AI palette_ on the foliage page):
 
-1. Pick a map (real-world maps contribute coordinates, height range, water and ESA land cover) and/or describe a
-   region.
+1. Pick a map and/or describe a region.
 2. Choose a look from realistic to stylized.
-3. The text model proposes, for every existing type, whether to keep, change or remove it, and which types to
-   add. Each proposal comes with a model: library asset → Poly Haven import → AI card → procedural mesh.
+3. The text model proposes keep / change / remove for every type and suggests types to add. Each proposal comes
+   with a model: library asset → Meshy 3D → AI card → procedural mesh.
 
-Sizes are planned as real heights in metres and converted to each model's scale. Removing a type that is
-already placed on a map is left unticked. You approve, rename or swap the model of every row before
-anything changes.
+Sizes are planned as real heights in metres. You approve every row and can switch its model (Meshy, card,
+procedural, keep current) before anything changes.
 
 ## Requirements
 

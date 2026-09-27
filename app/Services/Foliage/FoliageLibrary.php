@@ -119,4 +119,21 @@ class FoliageLibrary
 
         return Str::limit(Str::headline(preg_replace('/[_\-.]+/', ' ', $name) ?? $name) ?: 'Model', 80, '');
     }
+
+    /** A relative path without traversal, or null. */
+    public static function safeRelativePath(string $path): ?string
+    {
+        $parts = [];
+        foreach (explode('/', str_replace('\\', '/', $path)) as $part) {
+            if ($part === '' || $part === '.') {
+                continue;
+            }
+            if ($part === '..' || str_contains($part, ':')) {
+                return null;
+            }
+            $parts[] = $part;
+        }
+
+        return $parts === [] ? null : implode('/', $parts);
+    }
 }

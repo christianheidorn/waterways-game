@@ -13,12 +13,12 @@ import {
 } from 'lucide-react';
 import type { FormEvent, ReactNode } from 'react';
 import { useEffect, useId, useRef, useState } from 'react';
+import { AiCreditsBadge } from '@/components/ai-credits';
 import { ColorField } from '@/components/color-field';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { FoliagePreview } from '@/components/foliage-preview';
 import { FoliageAiPlanDialog } from '@/components/foliage/ai-plan-dialog';
 import { AssetLibrary, BakeStatus } from '@/components/foliage/asset-library';
-import { FoliageBrowseDialog } from '@/components/foliage/browse-dialog';
 import { FoliageGenerateDialog } from '@/components/foliage/generate-dialog';
 import { FoliageUploadDialog } from '@/components/foliage/upload-dialog';
 import { MaterialThumb } from '@/components/materials/material-thumb';
@@ -50,7 +50,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useFoliageBakeQueue } from '@/hooks/use-foliage-bake-queue';
 import {
     FOLIAGE_ICONS,
-    FOLIAGE_SOURCE_LABELS,
+    assetSourceLabel,
     formatMetres,
     formatTriangles,
 } from '@/lib/foliage';
@@ -66,7 +66,12 @@ type Props = {
     assets: FoliageAssetStudio[];
     maps: FoliageMapOption[];
     proceduralHeights: Record<FoliageKind, number>;
-    ai: { configured: boolean; image_model: string; text_model: string };
+    ai: {
+        configured: boolean;
+        image_model: string;
+        text_model: string;
+        meshy_configured: boolean;
+    };
 };
 
 type FoliageForm = Omit<FoliageType, 'id' | 'model_url' | 'asset'> & {
@@ -125,9 +130,9 @@ export default function FoliageIndex({
             return 'types';
         }
     });
-    const [dialog, setDialog] = useState<
-        'browse' | 'upload' | 'generate' | 'plan' | null
-    >(null);
+    const [dialog, setDialog] = useState<'upload' | 'generate' | 'plan' | null>(
+        null,
+    );
     const editing = foliageTypes.find((f) => f.id === editingId) ?? null;
     const bake = useFoliageBakeQueue(assets);
 
@@ -185,7 +190,14 @@ export default function FoliageIndex({
                     </div>
                 </div>
 
-                <BakeStatus bake={bake.current} waiting={bake.waiting} />
+                <div className="-mt-3 flex flex-wrap items-center justify-between gap-2">
+                    <BakeStatus
+                        bake={bake.current}
+                        waiting={bake.waiting}
+                        className="flex-1"
+                    />
+                    <AiCreditsBadge className="ml-auto" />
+                </div>
 
                 <Tabs value={tab} onValueChange={changeTab} className="gap-4">
                     <TabsList>
@@ -211,7 +223,6 @@ export default function FoliageIndex({
                             kinds={kinds}
                             bake={bake.current}
                             bakeSupported={bake.supported}
-                            onBrowse={() => setDialog('browse')}
                             onUpload={() => setDialog('upload')}
                             onGenerate={() => setDialog('generate')}
                         />
@@ -270,12 +281,6 @@ export default function FoliageIndex({
                 </SheetContent>
             </Sheet>
 
-            <FoliageBrowseDialog
-                open={dialog === 'browse'}
-                onOpenChange={(o) => setDialog(o ? 'browse' : null)}
-                library={assets}
-                kinds={kinds}
-            />
             <FoliageUploadDialog
                 open={dialog === 'upload'}
                 onOpenChange={(o) => setDialog(o ? 'upload' : null)}
@@ -286,6 +291,7 @@ export default function FoliageIndex({
                 onOpenChange={(o) => setDialog(o ? 'generate' : null)}
                 kinds={kinds}
                 aiConfigured={ai.configured}
+                meshyConfigured={ai.meshy_configured}
                 imageModel={ai.image_model}
             />
             <FoliageAiPlanDialog
@@ -293,6 +299,7 @@ export default function FoliageIndex({
                 onOpenChange={(o) => setDialog(o ? 'plan' : null)}
                 maps={maps}
                 aiConfigured={ai.configured}
+                meshyConfigured={ai.meshy_configured}
             />
         </>
     );
@@ -986,7 +993,7 @@ function AssetPicker({
                                 <Icon />
                                 <span className="truncate">{a.name}</span>
                                 <span className="text-xs text-muted-foreground">
-                                    {FOLIAGE_SOURCE_LABELS[a.source]}
+                                    {assetSourceLabel(a)}
                                     {a.status === 'ready'
                                         ? ` · ${formatMetres(a.height)}`
                                         : ` · ${a.status.replace('_', ' ')}`}

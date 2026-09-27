@@ -78,6 +78,7 @@ export function useFoliageBakeQueue(assets: FoliageAssetStudio[]): {
                                       url: asset.source_file_url!,
                                       keyBackground:
                                           !!asset.bake_options.key_background,
+                                      keyColor: asset.bake_options.key_color,
                                   }
                                 : {
                                       type: 'model',

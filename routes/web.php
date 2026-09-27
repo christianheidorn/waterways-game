@@ -1,6 +1,8 @@
 <?php
 
 use App\Http\Controllers\AiSettingsController;
+use App\Http\Controllers\FoliageAiController;
+use App\Http\Controllers\FoliageAssetController;
 use App\Http\Controllers\FoliageTypeController;
 use App\Http\Controllers\GameSettingsController;
 use App\Http\Controllers\LandCoverController;
@@ -52,6 +54,15 @@ Route::delete('materials/{material}', [MaterialController::class, 'destroy'])->n
 Route::get('game/{map}', [StudioController::class, 'game'])->name('game.show');
 
 Route::get('foliage', [FoliageTypeController::class, 'index'])->name('foliage.index');
+Route::post('foliage/assets/upload', [FoliageAssetController::class, 'upload'])->name('foliage.assets.upload');
+Route::post('foliage/assets/import', [FoliageAssetController::class, 'import'])->name('foliage.assets.import');
+Route::post('foliage/assets/generate', [FoliageAssetController::class, 'generate'])->name('foliage.assets.generate');
+Route::put('foliage/assets/{asset}', [FoliageAssetController::class, 'update'])->name('foliage.assets.update');
+Route::post('foliage/assets/{asset}/rebake', [FoliageAssetController::class, 'rebake'])->name('foliage.assets.rebake');
+Route::post('foliage/assets/{asset}/retry', [FoliageAssetController::class, 'retry'])->name('foliage.assets.retry');
+Route::post('foliage/assets/{asset}/create-type', [FoliageAssetController::class, 'createType'])->name('foliage.assets.create-type');
+Route::delete('foliage/assets/{asset}', [FoliageAssetController::class, 'destroy'])->name('foliage.assets.destroy');
+Route::post('foliage/ai/apply', [FoliageAiController::class, 'apply'])->name('foliage.ai.apply');
 Route::post('foliage', [FoliageTypeController::class, 'store'])->name('foliage.store');
 Route::put('foliage/{foliageType}', [FoliageTypeController::class, 'update'])->name('foliage.update');
 Route::delete('foliage/{foliageType}', [FoliageTypeController::class, 'destroy'])->name('foliage.destroy');

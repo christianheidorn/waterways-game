@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Enums\FoliageKind;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * @property int $id
@@ -13,6 +14,9 @@ use Illuminate\Database\Eloquent\Model;
  * @property string $color
  * @property string $color_secondary
  * @property string|null $model_path
+ * @property int|null $foliage_asset_id
+ * @property string $tint
+ * @property-read FoliageAsset|null $asset
  * @property float $min_scale
  * @property float $max_scale
  * @property float $density
@@ -27,7 +31,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property bool $allow_underwater
  */
 #[Fillable([
-    'name', 'kind', 'color', 'color_secondary', 'model_path', 'min_scale', 'max_scale', 'density',
+    'name', 'kind', 'color', 'color_secondary', 'model_path', 'foliage_asset_id', 'tint', 'min_scale', 'max_scale', 'density',
     'min_slope', 'max_slope', 'min_height', 'max_height', 'align_to_normal', 'random_yaw',
     'cast_shadows', 'cull_distance', 'allow_underwater',
 ])]
@@ -52,6 +56,24 @@ class FoliageType extends Model
         ];
     }
 
+    /** @return BelongsTo<FoliageAsset, $this> */
+    public function asset(): BelongsTo
+    {
+        return $this->belongsTo(FoliageAsset::class, 'foliage_asset_id');
+    }
+
+    /**
+     * The model the game renders: the linked asset's baked GLB once it is ready, else a legacy upload.
+     */
+    public function modelUrl(): ?string
+    {
+        if ($this->asset?->isReady()) {
+            return $this->asset->toGameArray()['model_url'];
+        }
+
+        return $this->model_path ? '/storage/'.$this->model_path : null;
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -63,7 +85,10 @@ class FoliageType extends Model
             'kind' => $this->kind->value,
             'color' => $this->color,
             'color_secondary' => $this->color_secondary,
-            'model_url' => $this->model_path ? '/storage/'.$this->model_path : null,
+            'model_url' => $this->modelUrl(),
+            'foliage_asset_id' => $this->foliage_asset_id,
+            'asset' => $this->asset?->toGameArray(),
+            'tint' => $this->tint ?? '#ffffff',
             'min_scale' => $this->min_scale,
             'max_scale' => $this->max_scale,
             'density' => $this->density,

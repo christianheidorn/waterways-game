@@ -203,7 +203,7 @@ export class EditorPanel {
     refresh(): void {
         const s = this.editor.state;
         this.groupSeg.set(s.group);
-        const key = `${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => t.id + t.name).join()}`;
+        const key = `${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => t.id + t.name + (t.asset?.thumbnail_url ?? '')).join()}`;
 
         if (key !== this.renderedKey) {
             this.renderedKey = key;
@@ -740,8 +740,10 @@ export class EditorPanel {
                     input,
                     h('span', {
                         class: 'ww-swatch',
+                        title: type.asset ? `Model: ${type.asset.name}` : 'Procedural mesh',
                         style: {
-                            background: `linear-gradient(135deg, ${type.color}, ${type.color_secondary})`,
+                            // Baked model thumbnail over the colour gradient (shown while it loads / if missing).
+                            background: `${type.asset?.thumbnail_url ? `center / cover no-repeat url("${type.asset.thumbnail_url}"), ` : ''}linear-gradient(135deg, ${type.color}, ${type.color_secondary})`,
                         },
                     }),
                     h('span', { class: 'ww-list-label' }, type.name),

@@ -2,27 +2,26 @@ import { Head, useForm } from '@inertiajs/react';
 import type { FoliageKind, FoliageType } from '@game/shared/types';
 import {
     Box,
-    Flower,
     Leaf,
-    Mountain,
-    Palmtree,
+    Package,
     Pencil,
     Plus,
-    Shrub,
-    Sprout,
     Trash2,
-    TreePine,
-    Trees,
     Upload,
-    Wheat,
+    Wand2,
     X,
 } from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
 import type { FormEvent, ReactNode } from 'react';
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { ColorField } from '@/components/color-field';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { FoliagePreview } from '@/components/foliage-preview';
+import { FoliageAiPlanDialog } from '@/components/foliage/ai-plan-dialog';
+import { AssetLibrary, BakeStatus } from '@/components/foliage/asset-library';
+import { FoliageBrowseDialog } from '@/components/foliage/browse-dialog';
+import { FoliageGenerateDialog } from '@/components/foliage/generate-dialog';
+import { FoliageUploadDialog } from '@/components/foliage/upload-dialog';
+import { MaterialThumb } from '@/components/materials/material-thumb';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
 import { SliderField } from '@/components/slider-field';
@@ -47,27 +46,32 @@ import {
 } from '@/components/ui/sheet';
 import { Spinner } from '@/components/ui/spinner';
 import { Switch } from '@/components/ui/switch';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { useFoliageBakeQueue } from '@/hooks/use-foliage-bake-queue';
+import {
+    FOLIAGE_ICONS,
+    FOLIAGE_SOURCE_LABELS,
+    formatMetres,
+    formatTriangles,
+} from '@/lib/foliage';
 import { formatNumber } from '@/lib/format';
 import foliage from '@/routes/foliage';
+import type { FoliageAssetStudio, FoliageMapOption } from '@/types';
 
 type Kind = { value: FoliageKind; label: string };
 
 type Props = {
     foliageTypes: FoliageType[];
     kinds: Kind[];
+    assets: FoliageAssetStudio[];
+    maps: FoliageMapOption[];
+    proceduralHeights: Record<FoliageKind, number>;
+    ai: { configured: boolean; image_model: string; text_model: string };
 };
 
-type FoliageForm = Omit<FoliageType, 'id' | 'model_url'>;
-
-const FOLIAGE_ICONS: Record<FoliageKind, LucideIcon> = {
-    conifer: TreePine,
-    broadleaf: Trees,
-    palm: Palmtree,
-    bush: Shrub,
-    grass: Sprout,
-    flower: Flower,
-    reed: Wheat,
-    rock: Mountain,
+type FoliageForm = Omit<FoliageType, 'id' | 'model_url' | 'asset'> & {
+    foliage_asset_id: number | null;
+    tint: string;
 };
 
 const NEW_FOLIAGE: FoliageForm = {
@@ -87,25 +91,75 @@ const NEW_FOLIAGE: FoliageForm = {
     cast_shadows: true,
     cull_distance: 400,
     allow_underwater: false,
+    foliage_asset_id: null,
+    tint: '#ffffff',
 };
 
 function toForm(type: FoliageType): FoliageForm {
-    const { id: _id, model_url: _model, ...rest } = type;
+    const { id: _id, model_url: _model, asset: _asset, ...rest } = type;
 
-    return rest;
+    return {
+        ...rest,
+        foliage_asset_id: type.foliage_asset_id ?? null,
+        tint: type.tint ?? '#ffffff',
+    };
 }
 
-export default function FoliageIndex({ foliageTypes, kinds }: Props) {
+type Tab = 'types' | 'assets';
+
+export default function FoliageIndex({
+    foliageTypes,
+    kinds,
+    assets,
+    maps,
+    proceduralHeights,
+    ai,
+}: Props) {
     const [open, setOpen] = useState(false);
     const [editingId, setEditingId] = useState<number | null>(null);
     const [formKey, setFormKey] = useState(0);
+    const [tab, setTab] = useState<Tab>(() => {
+        try {
+            return (localStorage.getItem('foliage.tab') as Tab) ?? 'types';
+        } catch {
+            return 'types';
+        }
+    });
+    const [dialog, setDialog] = useState<
+        'browse' | 'upload' | 'generate' | 'plan' | null
+    >(null);
     const editing = foliageTypes.find((f) => f.id === editingId) ?? null;
+    const bake = useFoliageBakeQueue(assets);
 
     const openEditor = (id: number | null) => {
         setEditingId(id);
         setFormKey((k) => k + 1);
         setOpen(true);
     };
+
+    const changeTab = (value: string) => {
+        setTab(value as Tab);
+
+        try {
+            localStorage.setItem('foliage.tab', value);
+        } catch {
+            // Storage unavailable (private mode): the tab is just not remembered.
+        }
+    };
+
+    // "Create foliage type" from an asset redirects here with ?type=ID: open its editor.
+    useEffect(() => {
+        const id = Number(
+            new URLSearchParams(window.location.search).get('type'),
+        );
+
+        if (id && foliageTypes.some((t) => t.id === id)) {
+            changeTab('types');
+            openEditor(id);
+            window.history.replaceState(null, '', window.location.pathname);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     return (
         <>
@@ -116,44 +170,91 @@ export default function FoliageIndex({ foliageTypes, kinds }: Props) {
                         title="Foliage library"
                         description="Trees, plants and rocks you can paint onto any map in the studio. Shared by all maps."
                     />
-                    <Button onClick={() => openEditor(null)}>
-                        <Plus />
-                        New foliage type
-                    </Button>
-                </div>
-
-                {foliageTypes.length === 0 ? (
-                    <div className="flex flex-col items-center gap-4 rounded-2xl border border-dashed px-6 py-16 text-center">
-                        <div className="flex size-12 items-center justify-center rounded-full bg-muted">
-                            <Leaf className="size-6 text-muted-foreground" />
-                        </div>
-                        <div className="space-y-1">
-                            <h2 className="font-semibold">No foliage yet</h2>
-                            <p className="max-w-sm text-sm text-muted-foreground">
-                                Add a first tree, bush or rock type to start
-                                planting in the studio.
-                            </p>
-                        </div>
+                    <div className="flex flex-wrap gap-2">
+                        <Button
+                            variant="outline"
+                            onClick={() => setDialog('plan')}
+                        >
+                            <Wand2 />
+                            AI palette
+                        </Button>
                         <Button onClick={() => openEditor(null)}>
                             <Plus />
                             New foliage type
                         </Button>
                     </div>
-                ) : (
-                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                        {foliageTypes.map((type) => (
-                            <FoliageCard
-                                key={type.id}
-                                type={type}
-                                kindLabel={
-                                    kinds.find((k) => k.value === type.kind)
-                                        ?.label ?? type.kind
-                                }
-                                onEdit={() => openEditor(type.id)}
-                            />
-                        ))}
-                    </div>
-                )}
+                </div>
+
+                <BakeStatus bake={bake.current} waiting={bake.waiting} />
+
+                <Tabs value={tab} onValueChange={changeTab} className="gap-4">
+                    <TabsList>
+                        <TabsTrigger value="types">
+                            <Leaf />
+                            Foliage types
+                            <span className="text-muted-foreground tabular-nums">
+                                {foliageTypes.length}
+                            </span>
+                        </TabsTrigger>
+                        <TabsTrigger value="assets">
+                            <Package />
+                            Asset library
+                            <span className="text-muted-foreground tabular-nums">
+                                {assets.length}
+                            </span>
+                        </TabsTrigger>
+                    </TabsList>
+
+                    <TabsContent value="assets">
+                        <AssetLibrary
+                            assets={assets}
+                            kinds={kinds}
+                            bake={bake.current}
+                            bakeSupported={bake.supported}
+                            onBrowse={() => setDialog('browse')}
+                            onUpload={() => setDialog('upload')}
+                            onGenerate={() => setDialog('generate')}
+                        />
+                    </TabsContent>
+
+                    <TabsContent value="types">
+                        {foliageTypes.length === 0 ? (
+                            <div className="flex flex-col items-center gap-4 rounded-2xl border border-dashed px-6 py-16 text-center">
+                                <div className="flex size-12 items-center justify-center rounded-full bg-muted">
+                                    <Leaf className="size-6 text-muted-foreground" />
+                                </div>
+                                <div className="space-y-1">
+                                    <h2 className="font-semibold">
+                                        No foliage yet
+                                    </h2>
+                                    <p className="max-w-sm text-sm text-muted-foreground">
+                                        Add a first tree, bush or rock type to
+                                        start planting in the studio.
+                                    </p>
+                                </div>
+                                <Button onClick={() => openEditor(null)}>
+                                    <Plus />
+                                    New foliage type
+                                </Button>
+                            </div>
+                        ) : (
+                            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                                {foliageTypes.map((type) => (
+                                    <FoliageCard
+                                        key={type.id}
+                                        type={type}
+                                        kindLabel={
+                                            kinds.find(
+                                                (k) => k.value === type.kind,
+                                            )?.label ?? type.kind
+                                        }
+                                        onEdit={() => openEditor(type.id)}
+                                    />
+                                ))}
+                            </div>
+                        )}
+                    </TabsContent>
+                </Tabs>
             </div>
 
             <Sheet open={open} onOpenChange={setOpen}>
@@ -162,10 +263,37 @@ export default function FoliageIndex({ foliageTypes, kinds }: Props) {
                         key={formKey}
                         type={editing}
                         kinds={kinds}
+                        assets={assets}
+                        proceduralHeights={proceduralHeights}
                         onSaved={() => setOpen(false)}
                     />
                 </SheetContent>
             </Sheet>
+
+            <FoliageBrowseDialog
+                open={dialog === 'browse'}
+                onOpenChange={(o) => setDialog(o ? 'browse' : null)}
+                library={assets}
+                kinds={kinds}
+            />
+            <FoliageUploadDialog
+                open={dialog === 'upload'}
+                onOpenChange={(o) => setDialog(o ? 'upload' : null)}
+                kinds={kinds}
+            />
+            <FoliageGenerateDialog
+                open={dialog === 'generate'}
+                onOpenChange={(o) => setDialog(o ? 'generate' : null)}
+                kinds={kinds}
+                aiConfigured={ai.configured}
+                imageModel={ai.image_model}
+            />
+            <FoliageAiPlanDialog
+                open={dialog === 'plan'}
+                onOpenChange={(o) => setDialog(o ? 'plan' : null)}
+                maps={maps}
+                aiConfigured={ai.configured}
+            />
         </>
     );
 }
@@ -208,16 +336,33 @@ function FoliageCard({
     return (
         <article className="flex flex-col rounded-xl border bg-card p-4 shadow-xs">
             <div className="flex items-start gap-3">
-                <KindIcon type={type} />
+                {type.asset?.thumbnail_url ? (
+                    <MaterialThumb
+                        src={type.asset.thumbnail_url}
+                        alt={type.asset.name}
+                        className="size-11 shrink-0 rounded-xl"
+                    />
+                ) : (
+                    <KindIcon type={type} />
+                )}
                 <div className="min-w-0 flex-1">
                     <h2 className="truncate font-semibold">{type.name}</h2>
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                         <Badge variant="secondary">{kindLabel}</Badge>
-                        {type.model_url && (
-                            <Badge variant="outline">
-                                <Box />
-                                GLB model
+                        {type.asset ? (
+                            <Badge variant="outline" title={type.asset.name}>
+                                <Package />
+                                {type.asset.model_url
+                                    ? 'Model'
+                                    : 'Model pending'}
                             </Badge>
+                        ) : (
+                            type.model_url && (
+                                <Badge variant="outline">
+                                    <Box />
+                                    GLB model
+                                </Badge>
+                            )
                         )}
                     </div>
                 </div>
@@ -241,9 +386,10 @@ function FoliageCard({
                         /100 m²
                     </span>
                 </Stat>
-                <Stat label="Scale">
-                    {formatNumber(type.min_scale)}–
-                    {formatNumber(type.max_scale)}×
+                <Stat label={type.asset?.height ? 'Size' : 'Scale'}>
+                    {type.asset?.height
+                        ? `${formatNumber(type.min_scale * type.asset.height, 1)}–${formatNumber(type.max_scale * type.asset.height, 1)} m`
+                        : `${formatNumber(type.min_scale)}–${formatNumber(type.max_scale)}×`}
                 </Stat>
                 <Stat label="Cull">
                     {formatNumber(type.cull_distance, 0)} m
@@ -307,10 +453,14 @@ function Stat({ label, children }: { label: string; children: ReactNode }) {
 function FoliageEditor({
     type,
     kinds,
+    assets,
+    proceduralHeights,
     onSaved,
 }: {
     type: FoliageType | null;
     kinds: Kind[];
+    assets: FoliageAssetStudio[];
+    proceduralHeights: Record<FoliageKind, number>;
     onSaved: () => void;
 }) {
     const id = useId();
@@ -320,11 +470,21 @@ function FoliageEditor({
     const set = <K extends keyof FoliageForm>(key: K, value: FoliageForm[K]) =>
         form.setData((prev) => ({ ...prev, [key]: value }));
     // The preview follows the unsaved form values; the id seeds the procedural mesh like in-game.
+    const asset =
+        assets.find((a) => a.id === form.data.foliage_asset_id) ?? null;
+    const legacyModel = type && !type.asset ? type.model_url : null;
     const previewType: FoliageType = {
         ...form.data,
         id: type?.id ?? 0,
-        model_url: type?.model_url ?? null,
+        asset,
+        model_url: asset ? asset.model_url : legacyModel,
     };
+    // Metres of the rendered model at scale 1 (asset → baked height, procedural → built-in size).
+    const baseHeight = asset
+        ? asset.height
+        : legacyModel
+          ? null
+          : proceduralHeights[form.data.kind];
 
     const submit = (e: FormEvent) => {
         e.preventDefault();
@@ -394,8 +554,8 @@ function FoliageEditor({
                             </SelectContent>
                         </Select>
                         <p className="text-xs text-muted-foreground">
-                            Picks the procedural mesh used when no model is
-                            uploaded.
+                            Drives wind, land-cover placement and the procedural
+                            mesh used when no model is set.
                         </p>
                         <InputError message={errors.kind} />
                     </div>
@@ -424,6 +584,25 @@ function FoliageEditor({
                     </div>
                 </section>
 
+                <EditorSection title="Model">
+                    <AssetPicker
+                        assets={assets}
+                        kind={form.data.kind}
+                        value={form.data.foliage_asset_id}
+                        onChange={(v) => set('foliage_asset_id', v)}
+                        legacyModel={legacyModel}
+                    />
+                    <InputError message={errors.foliage_asset_id} />
+                    {asset && (
+                        <ColorField
+                            label="Model tint"
+                            value={form.data.tint}
+                            onChange={(v) => set('tint', v)}
+                            error={errors.tint}
+                        />
+                    )}
+                </EditorSection>
+
                 <EditorSection title="Placement">
                     <SliderField
                         label="Density"
@@ -445,6 +624,11 @@ function FoliageEditor({
                             max={20}
                             step={0.05}
                             unit="×"
+                            description={
+                                baseHeight
+                                    ? `≈ ${formatMetres(form.data.min_scale * baseHeight)} tall`
+                                    : undefined
+                            }
                             error={errors.min_scale}
                         />
                         <SliderField
@@ -455,6 +639,11 @@ function FoliageEditor({
                             max={20}
                             step={0.05}
                             unit="×"
+                            description={
+                                baseHeight
+                                    ? `≈ ${formatMetres(form.data.max_scale * baseHeight)} tall`
+                                    : undefined
+                            }
                             error={errors.max_scale}
                         />
                         <SliderField
@@ -531,14 +720,7 @@ function FoliageEditor({
                     />
                 </EditorSection>
 
-                {type ? (
-                    <ModelUpload type={type} />
-                ) : (
-                    <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                        Save this foliage type first to upload a custom .glb
-                        model.
-                    </p>
-                )}
+                {type && !asset && <ModelUpload type={type} />}
             </div>
 
             <SheetFooter className="flex-row justify-end gap-2 border-t">
@@ -666,7 +848,7 @@ function ModelUpload({ type }: { type: FoliageType }) {
     };
 
     return (
-        <EditorSection title="Custom model">
+        <EditorSection title="Direct .glb upload">
             <div className="grid gap-3 rounded-lg border p-4">
                 <div className="flex items-center gap-3">
                     <div className="flex size-10 items-center justify-center rounded-md bg-muted">
@@ -692,8 +874,9 @@ function ModelUpload({ type }: { type: FoliageType }) {
                                     Procedural mesh
                                 </div>
                                 <div className="text-xs text-muted-foreground">
-                                    Upload a binary glTF (.glb, max 50 MB) to
-                                    replace it.
+                                    Upload a game-ready binary glTF (.glb, max
+                                    50 MB) as-is. Prefer the asset library: it
+                                    builds LODs and impostors for you.
                                 </div>
                             </>
                         )}
@@ -751,6 +934,111 @@ function ModelUpload({ type }: { type: FoliageType }) {
                 />
             </div>
         </EditorSection>
+    );
+}
+
+function AssetPicker({
+    assets,
+    kind,
+    value,
+    onChange,
+    legacyModel,
+}: {
+    assets: FoliageAssetStudio[];
+    kind: FoliageKind;
+    value: number | null;
+    onChange: (value: number | null) => void;
+    legacyModel: string | null;
+}) {
+    const usable = assets.filter(
+        (a) => a.status !== 'failed' || a.id === value,
+    );
+    // Same kind first, then the rest.
+    const sorted = [
+        ...usable.filter((a) => a.kind === kind),
+        ...usable.filter((a) => a.kind !== kind),
+    ];
+    const selected = assets.find((a) => a.id === value) ?? null;
+
+    return (
+        <div className="grid gap-3">
+            <Select
+                value={value === null ? 'none' : String(value)}
+                onValueChange={(v) => onChange(v === 'none' ? null : Number(v))}
+            >
+                <SelectTrigger
+                    className="h-auto w-full py-2"
+                    aria-label="Model"
+                >
+                    <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="max-h-80">
+                    <SelectItem value="none">
+                        {legacyModel
+                            ? 'Uploaded .glb model'
+                            : 'Procedural mesh (from kind and colours)'}
+                    </SelectItem>
+                    {sorted.map((a) => {
+                        const Icon = FOLIAGE_ICONS[a.kind] ?? Leaf;
+
+                        return (
+                            <SelectItem key={a.id} value={String(a.id)}>
+                                <Icon />
+                                <span className="truncate">{a.name}</span>
+                                <span className="text-xs text-muted-foreground">
+                                    {FOLIAGE_SOURCE_LABELS[a.source]}
+                                    {a.status === 'ready'
+                                        ? ` · ${formatMetres(a.height)}`
+                                        : ` · ${a.status.replace('_', ' ')}`}
+                                </span>
+                            </SelectItem>
+                        );
+                    })}
+                </SelectContent>
+            </Select>
+            {selected ? (
+                <div className="flex items-center gap-3 rounded-lg border p-2">
+                    <MaterialThumb
+                        src={selected.thumbnail_url}
+                        alt={selected.name}
+                        className="size-14 shrink-0 rounded-md"
+                    />
+                    <div className="min-w-0 text-xs text-muted-foreground">
+                        <div className="truncate text-sm font-medium text-foreground">
+                            {selected.name}
+                        </div>
+                        {selected.status === 'ready' ? (
+                            <>
+                                {formatMetres(selected.height)} tall at scale 1
+                                · {selected.triangles.length} LODs (
+                                {selected.triangles
+                                    .map(formatTriangles)
+                                    .join(' / ')}{' '}
+                                tris)
+                            </>
+                        ) : (
+                            <>
+                                Not optimised yet — the procedural mesh is used
+                                until it is.
+                            </>
+                        )}
+                        {selected.kind !== kind && (
+                            <div className="text-amber-700 dark:text-amber-400">
+                                The asset is a {selected.kind}; this type is a{' '}
+                                {kind}.
+                            </div>
+                        )}
+                    </div>
+                </div>
+            ) : (
+                assets.length === 0 && (
+                    <p className="text-xs text-muted-foreground">
+                        Import, upload or generate models in the Asset library
+                        tab to use them here.
+                    </p>
+                )
+            )}
+        </div>
     );
 }
 

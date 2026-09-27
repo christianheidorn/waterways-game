@@ -30,7 +30,7 @@ final class GameManifest
             'environment' => $map->resolvedEnvironment(),
             'settings' => $this->settings->all(),
             'layers' => $map->layers->map->toGameArray()->values()->all(),
-            'foliage_types' => FoliageType::query()->orderBy('name')->get()->map->toGameArray()->values()->all(),
+            'foliage_types' => FoliageType::query()->with('asset')->orderBy('name')->get()->map->toGameArray()->values()->all(),
             'assets' => [
                 'heightmap' => $asset('heightmap'),
                 'splatmap' => $asset('splatmap'),

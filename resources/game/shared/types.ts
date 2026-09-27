@@ -159,13 +159,41 @@ export type FoliageKind =
     | 'reed'
     | 'rock';
 
+export type FoliageAssetStyle = 'realistic' | 'stylized';
+
+/**
+ * A baked foliage model from the studio's foliage asset library (App\Models\FoliageAsset::toGameArray).
+ *
+ * Baked GLBs (see resources/game/tools/FoliageBaker.ts) contain top-level nodes named "LOD0", "LOD1", …
+ * ordered from most to least detailed; the last one is usually a crossed-card impostor. Units are metres,
+ * the pivot sits at the base of the model (y = 0) and +Y is up.
+ */
+export type FoliageAssetRef = {
+    id: number;
+    name: string;
+    style: FoliageAssetStyle;
+    model_url: string | null;
+    thumbnail_url: string | null;
+    /** Real-world height of the baked model in metres (before per-instance scale). */
+    height: number | null;
+    /** Triangles per LOD. */
+    triangles: number[];
+    /** Fraction of cull distance where each LOD starts (LOD0 = 0). */
+    lod_distances: number[];
+};
+
 export type FoliageType = {
     id: number;
     name: string;
     kind: FoliageKind;
     color: string;
     color_secondary: string;
+    /** Model to render (the asset's baked GLB when an asset is linked, else a legacy uploaded GLB). */
     model_url: string | null;
+    foliage_asset_id?: number | null;
+    asset?: FoliageAssetRef | null;
+    /** Multiplied onto model materials (white = unchanged). */
+    tint?: string;
     min_scale: number;
     max_scale: number;
     /** Instances per 100 m² when painting at full strength. */

@@ -1,6 +1,8 @@
 <?php
 
 use App\Http\Controllers\Api\AiController;
+use App\Http\Controllers\Api\FoliageAiController;
+use App\Http\Controllers\Api\FoliageAssetApiController;
 use App\Http\Controllers\Api\MapAiController;
 use App\Http\Controllers\Api\MapDataController;
 use App\Http\Controllers\Api\MaterialApiController;
@@ -24,3 +26,9 @@ Route::get('materials/{material}', [MaterialApiController::class, 'show'])->name
 
 Route::get('ai/models', [AiController::class, 'models'])->name('api.ai.models');
 Route::post('ai/enhance-prompt', [AiController::class, 'enhancePrompt'])->name('api.ai.enhance-prompt');
+
+Route::get('foliage/browse/polyhaven', [FoliageAssetApiController::class, 'browse'])->name('api.foliage.browse');
+Route::get('foliage/assets/{asset}', [FoliageAssetApiController::class, 'show'])->name('api.foliage.assets.show');
+Route::post('foliage/assets/{asset}/bake', [FoliageAssetApiController::class, 'bake'])->name('api.foliage.assets.bake');
+Route::post('foliage/assets/{asset}/bake-failed', [FoliageAssetApiController::class, 'bakeFailed'])->name('api.foliage.assets.bake-failed');
+Route::post('foliage/ai/plan', [FoliageAiController::class, 'plan'])->name('api.foliage.ai.plan');

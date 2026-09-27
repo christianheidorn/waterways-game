@@ -3,7 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Enums\FoliageKind;
+use App\Models\FoliageAsset;
 use App\Models\FoliageType;
+use App\Models\Map;
+use App\Services\Foliage\FoliageLibrary;
+use App\Support\AiSettings;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -13,11 +17,24 @@ use Inertia\Response;
 
 class FoliageTypeController extends Controller
 {
-    public function index(): Response
+    public function index(AiSettings $ai): Response
     {
+        $ai = $ai->toFrontend();
+
         return Inertia::render('foliage/index', [
-            'foliageTypes' => FoliageType::query()->orderBy('name')->get()->map->toGameArray()->values(),
+            'foliageTypes' => FoliageType::query()->with('asset')->orderBy('name')->get()->map->toGameArray()->values(),
             'kinds' => collect(FoliageKind::cases())->map(fn (FoliageKind $k) => ['value' => $k->value, 'label' => $k->label()]),
+            'assets' => FoliageAsset::query()->withCount('types')->latest()->latest('id')->get()
+                ->map(fn (FoliageAsset $a) => $a->toStudioArray())->values(),
+            'maps' => Map::query()->orderBy('name')->get(['id', 'name', 'source', 'center_lat', 'center_lng'])
+                ->map(fn (Map $m) => ['id' => $m->id, 'name' => $m->name, 'source' => $m->source->value, 'real_world' => $m->center_lat !== null])->values(),
+            'kindHeights' => FoliageLibrary::KIND_HEIGHT,
+            'proceduralHeights' => FoliageLibrary::PROCEDURAL_HEIGHT,
+            'ai' => [
+                'configured' => $ai['configured'],
+                'image_model' => $ai['image_model'],
+                'text_model' => $ai['text_model'],
+            ],
         ]);
     }
 
@@ -106,6 +123,8 @@ class FoliageTypeController extends Controller
             'cast_shadows' => ['required', 'boolean'],
             'cull_distance' => ['required', 'numeric', 'between:20,5000'],
             'allow_underwater' => ['required', 'boolean'],
-        ]);
+            'foliage_asset_id' => ['nullable', 'integer', 'exists:foliage_assets,id'],
+            'tint' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
+        ]) + ['tint' => '#ffffff'];
     }
 }

@@ -21,7 +21,7 @@ class OpenRouterClient
     public const MODELS_TTL = 3600;
 
     /** Image parameters we may send; each is only included when the model declares support. */
-    private const IMAGE_PARAMS = ['resolution', 'aspect_ratio', 'size', 'quality', 'output_format', 'n', 'seed'];
+    private const IMAGE_PARAMS = ['resolution', 'aspect_ratio', 'size', 'quality', 'output_format', 'background', 'n', 'seed'];
 
     public function __construct(private readonly AiSettings $settings) {}
 
@@ -378,6 +378,19 @@ class OpenRouterClient
      *
      * @return array<string, mixed>|null
      */
+    /**
+     * Whether an image model accepts $parameter (with $value, for enum parameters).
+     */
+    public function imageModelSupports(string $model, string $parameter, ?string $value = null): bool
+    {
+        $spec = $this->imageModelParameters($model);
+        if ($spec === null || ! array_key_exists($parameter, $spec)) {
+            return false;
+        }
+
+        return $value === null || $this->fitParameter($spec[$parameter], $value) !== null;
+    }
+
     private function imageModelParameters(string $model): ?array
     {
         try {

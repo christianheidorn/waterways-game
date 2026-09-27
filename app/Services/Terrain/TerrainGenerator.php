@@ -5,6 +5,8 @@ namespace App\Services\Terrain;
 use App\Enums\MapSource;
 use App\Enums\TerrainStatus;
 use App\Models\Map;
+use App\Services\LandCover\LandCoverGrid;
+use App\Services\LandCover\LandCoverService;
 use App\Support\DefaultTerrainLayers;
 use Illuminate\Support\Str;
 
@@ -19,6 +21,7 @@ class TerrainGenerator
         private readonly TerrariumElevationSource $elevation,
         private readonly OverpassWaterSource $overpass,
         private readonly WaterSurfaceBuilder $water,
+        private readonly LandCoverService $landCover,
     ) {}
 
     /**
@@ -60,8 +63,18 @@ class TerrainGenerator
                 break;
         }
 
-        $report(90, 'Saving terrain');
-        $this->store($map, $result, $message);
+        $landCover = null;
+        $withLandCover = $map->source === MapSource::RealWorld && $map->use_landcover !== false;
+        if ($withLandCover) {
+            $report(92, 'Reading land cover');
+            $landCover = $this->landCover->source()->classGrid($map);
+            $message = $landCover === null
+                ? LandCoverService::withSummary($message, Str::limit('Land cover unavailable: '.$this->landCover->source()->warning, 100))
+                : LandCoverService::withSummary($message, $landCover->summary());
+        }
+
+        $report($withLandCover ? 95 : 90, $landCover === null ? 'Saving terrain' : 'Painting land cover');
+        $this->store($map, $result, $message, $landCover);
         $report(100, $message ?? 'Terrain ready');
     }
 
@@ -124,7 +137,7 @@ class TerrainGenerator
         return Str::limit($message, 250);
     }
 
-    private function store(Map $map, WaterSurfaceResult $result, ?string $warning): void
+    private function store(Map $map, WaterSurfaceResult $result, ?string $warning, ?LandCoverGrid $landCover = null): void
     {
         $this->storage->write($map, 'heightmap', $result->terrain->toBinary());
 
@@ -134,9 +147,21 @@ class TerrainGenerator
             $this->storage->delete($map, 'water');
         }
 
-        // Fresh terrain invalidates painting and foliage; the game auto-paints on load.
-        $this->storage->delete($map, 'splatmap');
+        // Fresh terrain invalidates painting and foliage; the game auto-paints on load unless
+        // the splat is painted from real-world land cover (before the map is marked ready).
         $this->storage->delete($map, 'foliage');
+        $mapping = null;
+
+        if ($landCover !== null) {
+            [$splat, $mapping] = $this->landCover->paint(
+                $map, $landCover, $result->terrain, $result->hasWater() ? $result->water : null,
+            );
+            $this->storage->write($map, 'landcover', $landCover->toBinary());
+            $this->storage->write($map, 'splatmap', $splat);
+        } else {
+            $this->storage->delete($map, 'splatmap');
+            $this->storage->delete($map, 'landcover');
+        }
 
         [$min, $max] = $result->terrain->range();
         $attributes = [
@@ -149,6 +174,10 @@ class TerrainGenerator
             'revision' => $map->revision + 1,
         ];
 
+        if ($mapping !== null && empty($map->landcover_mapping)) {
+            $attributes['landcover_mapping'] = $mapping;
+        }
+
         if ($result->oceanDetected()) {
             $attributes['environment'] = array_merge($map->environment ?? [], ['ocean_enabled' => true]);
         }
@@ -158,5 +187,6 @@ class TerrainGenerator
         if (! $map->layers()->exists()) {
             DefaultTerrainLayers::createFor($map);
         }
+
     }
 }

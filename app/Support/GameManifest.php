@@ -36,6 +36,8 @@ final class GameManifest
                 'splatmap' => $asset('splatmap'),
                 'water' => $asset('water'),
                 'foliage' => $asset('foliage'),
+                // ESA WorldCover class per sample (Uint8, resolution²), real-world maps only.
+                'landcover' => $asset('landcover'),
             ],
             'endpoints' => [
                 'save_heightmap' => route('api.maps.assets.update', [$map, 'heightmap']),

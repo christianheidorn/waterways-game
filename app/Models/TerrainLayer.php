@@ -10,6 +10,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property int $id
  * @property int $map_id
  * @property int $slot
+ * @property int|null $material_id
+ * @property string $tint
+ * @property float $roughness_scale
+ * @property float $normal_strength
  * @property string $name
  * @property string $color
  * @property string $color_secondary
@@ -26,7 +30,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property int $auto_priority
  */
 #[Fillable([
-    'slot', 'name', 'color', 'color_secondary', 'roughness', 'noise_scale', 'variation', 'bump',
+    'slot', 'material_id', 'tint', 'roughness_scale', 'normal_strength', 'name', 'color', 'color_secondary', 'roughness', 'noise_scale', 'variation', 'bump',
     'texture_path', 'texture_scale', 'auto_min_height', 'auto_max_height', 'auto_min_slope',
     'auto_max_slope', 'auto_priority',
 ])]
@@ -38,6 +42,9 @@ class TerrainLayer extends Model
     {
         return [
             'slot' => 'integer',
+            'material_id' => 'integer',
+            'roughness_scale' => 'float',
+            'normal_strength' => 'float',
             'roughness' => 'float',
             'noise_scale' => 'float',
             'variation' => 'float',
@@ -49,6 +56,12 @@ class TerrainLayer extends Model
             'auto_max_slope' => 'float',
             'auto_priority' => 'integer',
         ];
+    }
+
+    /** @return BelongsTo<Material, $this> */
+    public function material(): BelongsTo
+    {
+        return $this->belongsTo(Material::class);
     }
 
     /** @return BelongsTo<Map, $this> */
@@ -79,6 +92,11 @@ class TerrainLayer extends Model
             'auto_min_slope' => $this->auto_min_slope,
             'auto_max_slope' => $this->auto_max_slope,
             'auto_priority' => $this->auto_priority,
+            'material_id' => $this->material_id,
+            'material' => $this->material?->isReady() ? $this->material->toGameArray() : null,
+            'tint' => $this->tint,
+            'roughness_scale' => $this->roughness_scale,
+            'normal_strength' => $this->normal_strength,
         ];
     }
 }

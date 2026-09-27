@@ -4,6 +4,7 @@ import type { FormEvent, ReactNode } from 'react';
 import { useState } from 'react';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { GeoAreaPreview } from '@/components/geo-area-picker';
+import { LandcoverCard } from '@/components/maps/landcover-card';
 import InputError from '@/components/input-error';
 import { MapStatusBadge, TerrainProgress } from '@/components/map-status';
 import { MapTabs } from '@/components/map-tabs';
@@ -44,9 +45,11 @@ import type { MapDetail } from '@/types';
 type Props = {
     map: MapDetail;
     resolutions: number[];
+    /** Terrain layers (slot + name) for the land cover mapping. */
+    layers?: { slot: number; name: string }[];
 };
 
-export default function ShowMap({ map, resolutions }: Props) {
+export default function ShowMap({ map, resolutions, layers }: Props) {
     const pending = isPendingStatus(map.terrain_status);
 
     usePendingPoll(pending, ['map']);
@@ -93,6 +96,10 @@ export default function ShowMap({ map, resolutions }: Props) {
                             </div>
                         </Panel>
 
+                        {map.source === 'real_world' && (
+                            <LandcoverCard map={map} layers={layers} />
+                        )}
+
                         <DetailsForm map={map} />
                     </div>
 
@@ -130,6 +137,9 @@ export default function ShowMap({ map, resolutions }: Props) {
                                         </Fact>
                                         <Fact label="Water import">
                                             {map.import_water ? 'On' : 'Off'}
+                                        </Fact>
+                                        <Fact label="Land cover">
+                                            {map.use_landcover ? 'On' : 'Off'}
                                         </Fact>
                                     </>
                                 )}
@@ -340,6 +350,7 @@ function RegenerateDialog({
         center_lng: map.center_lng,
         height_scale: map.height_scale,
         import_water: map.import_water,
+        use_landcover: map.use_landcover ?? true,
         seed: map.seed,
         lake_depth: map.lake_depth,
         river_depth: map.river_depth,

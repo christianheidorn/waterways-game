@@ -3,7 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\Map;
+use App\Models\Material;
 use App\Models\TerrainLayer;
+use App\Services\Materials\MaterialLibrary;
+use App\Support\AiSettings;
 use App\Support\DefaultTerrainLayers;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -20,6 +23,11 @@ class TerrainLayerController extends Controller
             'map' => MapController::summary($map),
             'layers' => $map->layers->map->toGameArray()->values(),
             'maxLayers' => TerrainLayer::MAX_LAYERS,
+            // Library for the material picker; loaded lazily (partial reload) when the picker opens.
+            'materials' => Inertia::optional(fn () => Material::query()->withCount('layers')->latest()->latest('id')->get()
+                ->map(fn (Material $m) => $m->toStudioArray())->values()),
+            'categories' => MaterialLibrary::categoryOptions(),
+            'ai' => ['configured' => app(AiSettings::class)->configured()],
         ]);
     }
 
@@ -34,7 +42,7 @@ class TerrainLayerController extends Controller
             return back();
         }
 
-        $data = $this->validated($request);
+        $data = $this->withMaterialDefaults($request, $this->validated($request));
         $map->layers()->create([...$data, 'slot' => $free[0]]);
 
         $this->toast('success', 'Layer added.');
@@ -46,9 +54,40 @@ class TerrainLayerController extends Controller
     {
         abort_unless($layer->map_id === $map->id, 404);
 
-        $layer->update($this->validated($request));
+        $data = $this->validated($request);
+        if (array_key_exists('material_id', $data)) {
+            $data['material_id'] = $data['material_id'] !== null ? (int) $data['material_id'] : null;
+        }
+        if (array_key_exists('material_id', $data) && $data['material_id'] !== $layer->material_id) {
+            $data = $this->withMaterialDefaults($request, $data);
+        }
+
+        $layer->update($data);
 
         $this->toast('success', "{$layer->name} saved.");
+
+        return back();
+    }
+
+    /**
+     * Quick material assignment from the picker; texture_scale follows the material's tile size.
+     */
+    public function assignMaterial(Request $request, Map $map, TerrainLayer $layer): RedirectResponse
+    {
+        abort_unless($layer->map_id === $map->id, 404);
+
+        $data = $request->validate([
+            'material_id' => ['present', 'nullable', 'integer', 'exists:materials,id'],
+        ]);
+
+        $material = $data['material_id'] !== null ? Material::query()->find($data['material_id']) : null;
+
+        $layer->update([
+            'material_id' => $material?->id,
+            ...($material ? ['texture_scale' => $material->tile_size] : []),
+        ]);
+
+        $this->toast('success', $material ? "{$layer->name} now uses {$material->name}." : "{$layer->name} uses procedural colours.");
 
         return back();
     }
@@ -110,6 +149,23 @@ class TerrainLayerController extends Controller
     }
 
     /**
+     * Default texture_scale to the assigned material's tile size unless it was sent explicitly.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function withMaterialDefaults(Request $request, array $data): array
+    {
+        $materialId = $data['material_id'] ?? null;
+
+        if ($materialId !== null && ! $request->has('texture_scale')) {
+            $data['texture_scale'] = (float) Material::query()->whereKey($materialId)->value('tile_size');
+        }
+
+        return $data;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function validated(Request $request): array
@@ -124,7 +180,11 @@ class TerrainLayerController extends Controller
             'noise_scale' => ['required', 'numeric', 'between:0.1,500'],
             'variation' => ['required', 'numeric', 'between:0,1'],
             'bump' => ['required', 'numeric', 'between:0,2'],
-            'texture_scale' => ['required', 'numeric', 'between:0.1,200'],
+            'texture_scale' => ['sometimes', 'required', 'numeric', 'between:0.1,200'],
+            'material_id' => ['sometimes', 'nullable', 'integer', 'exists:materials,id'],
+            'tint' => ['sometimes', 'required', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
+            'roughness_scale' => ['sometimes', 'required', 'numeric', 'between:0,3'],
+            'normal_strength' => ['sometimes', 'required', 'numeric', 'between:0,3'],
             'auto_min_height' => ['nullable', 'numeric'],
             'auto_max_height' => ['nullable', 'numeric'],
             'auto_min_slope' => ['nullable', 'numeric', 'between:0,90'],

@@ -42,6 +42,9 @@ final class GameSettingsSchema
                 SettingField::select('water_quality', 'Water quality', 'medium', [
                     'low' => 'Low', 'medium' => 'Medium', 'high' => 'High',
                 ], 'Resolution of the refraction/depth pass used by water.'),
+                SettingField::select('terrain_texture_resolution', 'Terrain texture resolution', '1024', [
+                    '512' => '512 px', '1024' => '1K', '2048' => '2K',
+                ], 'Resolution of material textures on the terrain (GPU memory grows 4× per step).'),
                 SettingField::boolean('antialias', 'Anti-aliasing (MSAA)', true),
                 SettingField::boolean('bloom', 'Bloom', true),
                 SettingField::boolean('ambient_occlusion', 'Ambient occlusion', false, 'Screen-space ambient occlusion (GTAO). Expensive.'),

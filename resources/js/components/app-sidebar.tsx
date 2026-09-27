@@ -1,6 +1,7 @@
 import { Link } from '@inertiajs/react';
 import {
     Clapperboard,
+    Layers,
     LayoutGrid,
     Map as MapIcon,
     Palette,
@@ -22,6 +23,7 @@ import { edit as editAppearance } from '@/routes/appearance';
 import foliage from '@/routes/foliage';
 import gameSettings from '@/routes/game-settings';
 import maps from '@/routes/maps';
+import materials from '@/routes/materials';
 import type { NavGroup } from '@/types';
 
 const navGroups: NavGroup[] = [
@@ -46,6 +48,12 @@ const navGroups: NavGroup[] = [
                 href: foliage.index(),
                 icon: Trees,
                 activePrefix: '/foliage',
+            },
+            {
+                title: 'Materials',
+                href: materials.index(),
+                icon: Layers,
+                activePrefix: '/materials',
             },
         ],
     },

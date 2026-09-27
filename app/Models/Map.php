@@ -50,7 +50,7 @@ use Illuminate\Support\Facades\Storage;
     'name', 'slug', 'description', 'source', 'resolution', 'size', 'center_lat', 'center_lng',
     'height_scale', 'import_water', 'lake_depth', 'river_depth', 'shore_angle', 'bank_angle', 'smoothing', 'seed', 'min_height', 'max_height', 'spawn_x', 'spawn_z', 'spawn_yaw',
     'environment', 'terrain_status', 'terrain_progress', 'terrain_message', 'revision', 'is_default',
-    'terrain_generated_at',
+    'terrain_generated_at', 'landcover_mapping', 'use_landcover',
 ])]
 class Map extends Model
 {
@@ -65,6 +65,8 @@ class Map extends Model
             'source' => MapSource::class,
             'terrain_status' => TerrainStatus::class,
             'environment' => 'array',
+            'landcover_mapping' => 'array',
+            'use_landcover' => 'boolean',
             'import_water' => 'boolean',
             'is_default' => 'boolean',
             'resolution' => 'integer',
@@ -97,7 +99,7 @@ class Map extends Model
     /** @return HasMany<TerrainLayer, $this> */
     public function layers(): HasMany
     {
-        return $this->hasMany(TerrainLayer::class)->orderBy('slot');
+        return $this->hasMany(TerrainLayer::class)->with('material')->orderBy('slot');
     }
 
     public function getRouteKeyName(): string

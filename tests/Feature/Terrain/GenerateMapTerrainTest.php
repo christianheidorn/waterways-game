@@ -46,6 +46,8 @@ class GenerateMapTerrainTest extends TestCase
             'seed' => 1337,
             'height_scale' => 1,
             'import_water' => true,
+            // Land cover has its own tests (tests/Feature/LandCover); keep these offline.
+            'use_landcover' => false,
             'terrain_status' => TerrainStatus::Queued,
             'revision' => 3,
         ], $attributes));

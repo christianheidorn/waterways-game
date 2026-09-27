@@ -68,6 +68,41 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
 - **Viewport:** Unreal-style camera controls and an optional 100 m grid.
 - **Saving:** Ctrl+S saves, with an optional autosave. Each save also stores a thumbnail for the studio.
 
+## Terrain materials, AI and land cover
+
+**Material library** (Studio → Materials): reusable PBR materials (albedo, normal, roughness, AO, height)
+that any map's terrain layers can use. Sources:
+
+- **Poly Haven / ambientCG** — search and import CC0 photo-scanned materials at 1K/2K/4K.
+- **Upload** — drop in any PBR set (maps are detected by file name; DirectX normals are flipped automatically)
+  or a single photo (the other maps are derived and it can be made seamless).
+- **AI generation** via [OpenRouter](https://openrouter.ai): describe a material, pick an image model and
+  variants; the result is made seamless, de-lit, and normal/roughness/AO/height maps are derived. _AI edit_
+  creates variants of an existing material from a prompt.
+- `php artisan waterways:starter-materials` imports a curated CC0 starter set and assigns it to default layers
+  (also run by `composer setup` / the seeder; offline-safe).
+
+**Terrain rendering** uses texture arrays with anti-tiling, triplanar projection on cliffs, height-based
+blending between layers, far-distance blending, AO and wet shores. Resolution: _Game settings → Graphics →
+Terrain texture resolution_.
+
+**AI assistance** (Studio → Settings → AI): enter an OpenRouter key (stored encrypted, or set
+`OPENROUTER_API_KEY`) and choose image and text models. Besides generation, the text model can
+_suggest materials and paint rules_ for a map (Terrain layers page) and _review a screenshot_ of the current
+view in the studio workspace (✨ button) with one-click fixes that preview live in the game.
+
+**Land cover** (real-world maps): ESA WorldCover 2021 (10 m, © ESA, CC-BY 4.0) is read on generation and
+used to paint the terrain layers (forest floor under forests, meadow on grassland, …) and to guide foliage
+scattering. The class → layer mapping is editable on the map page.
+
+Queued jobs (terrain, imports, AI generation) need a queue worker; `composer dev` runs one.
+
+**Outbound hosts** used by the studio: `s3.amazonaws.com` (elevation), `esa-worldcover.s3.eu-central-1.amazonaws.com`,
+`overpass-api.de` / `overpass.kumi.systems` / `overpass.private.coffee`, `api.polyhaven.com`, `dl.polyhaven.org`,
+`cdn.polyhaven.com` (thumbnails), `ambientcg.com`, `acg-media.struffelproductions.com`,
+`acg-download.struffelproductions.com`, `openrouter.ai`; in the browser also the map tile servers and
+`nominatim.openstreetmap.org`.
+
 ## Requirements
 
 - PHP 8.3+ with `gd`, `pdo_sqlite` and `curl`, plus Composer.

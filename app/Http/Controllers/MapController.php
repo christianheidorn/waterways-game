@@ -6,7 +6,10 @@ use App\Enums\MapSource;
 use App\Enums\TerrainStatus;
 use App\Jobs\GenerateMapTerrain;
 use App\Models\Map;
+use App\Services\LandCover\LandCoverService;
+use App\Services\LandCover\WorldCoverClasses;
 use App\Services\Terrain\TerrainShaping;
+use App\Services\Terrain\TerrainStorage;
 use App\Support\EnvironmentDefaults;
 use App\Support\GameManifest;
 use Illuminate\Http\RedirectResponse;
@@ -58,6 +61,7 @@ class MapController extends Controller
         return Inertia::render('maps/show', [
             'map' => self::detail($map),
             'resolutions' => Map::RESOLUTIONS,
+            'layers' => $map->layers->map(fn ($l) => ['slot' => $l->slot, 'name' => $l->name])->values(),
         ]);
     }
 
@@ -139,6 +143,7 @@ class MapController extends Controller
             'center_lng' => [$realWorld ? 'required' : 'nullable', 'numeric', 'between:-180,180'],
             'height_scale' => ['sometimes', 'numeric', 'min:0.1', 'max:5'],
             'import_water' => ['sometimes', 'boolean'],
+            'use_landcover' => ['sometimes', 'boolean'],
             'lake_depth' => ['sometimes', 'numeric', 'min:0.5', 'max:100'],
             'river_depth' => ['sometimes', 'numeric', 'min:0.2', 'max:30'],
             'shore_angle' => ['sometimes', 'numeric', 'min:1', 'max:60'],
@@ -146,6 +151,16 @@ class MapController extends Controller
             'smoothing' => ['sometimes', 'numeric', 'min:0', 'max:1'],
             'seed' => ['nullable', 'integer', 'min:1', 'max:999999'],
         ]);
+    }
+
+    /**
+     * Class code → percentage as a JSON object (null without land cover).
+     */
+    private static function landCoverStats(Map $map): ?object
+    {
+        $stats = app(LandCoverService::class)->stats($map);
+
+        return $stats === null ? null : (object) $stats;
     }
 
     private function uniqueSlug(string $name): string
@@ -195,6 +210,12 @@ class MapController extends Controller
             'seed' => $map->seed,
             'bounds' => $map->bounds(),
             'terrain_generated_at' => $map->terrain_generated_at?->toIso8601String(),
+            'use_landcover' => $map->use_landcover ?? true,
+            'landcover_mapping' => $map->landcover_mapping,
+            'landcover_available' => app(TerrainStorage::class)->exists($map, 'landcover'),
+            'landcover_stats' => self::landCoverStats($map),
+            'landcover_classes' => WorldCoverClasses::legend(),
+            'landcover_attribution' => WorldCoverClasses::ATTRIBUTION,
         ];
     }
 }

@@ -14,6 +14,7 @@ import {
     RotateCw,
     Save,
     Settings2,
+    Sparkles,
     Sun,
     TreePine,
     TriangleAlert,
@@ -22,6 +23,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import AppLogoIcon from '@/components/app-logo-icon';
+import { AiReviewSheet } from '@/components/studio/ai-review-sheet';
 import { LiveSettings } from '@/components/studio/live-settings';
 import { useGameBridge } from '@/components/studio/use-game-bridge';
 import { Button } from '@/components/ui/button';
@@ -92,8 +94,10 @@ export default function MapEditor({
     settings,
     settingsGroups,
 }: Props) {
-    const { iframeRef, state, send, onFrameLoad } = useGameBridge(initialMode);
+    const { iframeRef, state, send, onFrameLoad, captureScreenshot } =
+        useGameBridge(initialMode);
     const [panel, setPanel] = useState<'environment' | 'settings' | null>(null);
+    const [reviewOpen, setReviewOpen] = useState(false);
     const [frameKey, setFrameKey] = useState(0);
     const src = useMemo(
         () => `${gameUrl}?embedded=1&mode=${initialMode}`,
@@ -291,6 +295,12 @@ export default function MapEditor({
                     </span>
 
                     <IconButton
+                        icon={Sparkles}
+                        label="AI review"
+                        active={reviewOpen}
+                        onClick={() => setReviewOpen(true)}
+                    />
+                    <IconButton
                         icon={Sun}
                         label="Environment"
                         active={panel === 'environment'}
@@ -440,6 +450,15 @@ export default function MapEditor({
                     )}
                 </SheetContent>
             </Sheet>
+
+            <AiReviewSheet
+                open={reviewOpen}
+                onOpenChange={setReviewOpen}
+                mapSlug={map.slug}
+                ready={state.ready}
+                captureScreenshot={captureScreenshot}
+                send={send}
+            />
         </>
     );
 }

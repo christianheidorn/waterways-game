@@ -62,4 +62,15 @@ export type MapDetail = MapSummary & {
     seed: number;
     bounds: MapBounds | null;
     terrain_generated_at: string | null;
+    /** Real-world maps: paint terrain layers from ESA WorldCover land cover. */
+    use_landcover: boolean;
+    /** WorldCover class code ("10", "20", …) → terrain layer slot (null = leave unpainted). */
+    landcover_mapping: Record<string, number | null> | null;
+    /** Whether land cover data has been downloaded for this map. */
+    landcover_available: boolean;
+    /** WorldCover class code → share of the map area in percent. */
+    landcover_stats: Record<string, number> | null;
+    /** WorldCover legend (code, label, colour). */
+    landcover_classes?: { code: number; label: string; color: string }[];
+    landcover_attribution?: string;
 };

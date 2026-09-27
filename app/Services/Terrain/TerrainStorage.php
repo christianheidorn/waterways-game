@@ -13,6 +13,7 @@ use RuntimeException;
  * - heightmap.f32  Float32 LE, resolution² samples, metres
  * - water.f32      Float32 LE, resolution² water surface heights (NO_WATER where dry)
  * - splat.u8       Uint8, resolution² × 8 channel weights (two RGBA textures, interleaved per texel)
+ * - landcover.u8   Uint8, resolution² ESA WorldCover class codes (0 = no data), real-world maps only
  * - foliage.json   {"version":1,"instances":{"<typeId>":[x,y,z,yaw,scale,tiltX,tiltZ,...]}}
  */
 class TerrainStorage
@@ -26,6 +27,7 @@ class TerrainStorage
         'water' => 'water.f32',
         'splatmap' => 'splat.u8',
         'foliage' => 'foliage.json',
+        'landcover' => 'landcover.u8',
     ];
 
     public function disk(): Filesystem
@@ -68,6 +70,7 @@ class TerrainStorage
         return match ($asset) {
             'heightmap', 'water' => $samples * 4,
             'splatmap' => $samples * self::SPLAT_CHANNELS,
+            'landcover' => $samples,
             default => null,
         };
     }

@@ -1,11 +1,18 @@
 import { Link } from '@inertiajs/react';
-import { Gamepad2, MonitorCog, Palette, PersonStanding } from 'lucide-react';
+import {
+    Gamepad2,
+    MonitorCog,
+    Palette,
+    PersonStanding,
+    Sparkles,
+} from 'lucide-react';
 import type { PropsWithChildren } from 'react';
 import Heading from '@/components/heading';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { useCurrentUrl } from '@/hooks/use-current-url';
 import { cn, toUrl } from '@/lib/utils';
+import aiSettings from '@/routes/ai-settings';
 import { edit as editAppearance } from '@/routes/appearance';
 import gameSettings from '@/routes/game-settings';
 import type { NavItem } from '@/types';
@@ -25,6 +32,11 @@ const sidebarNavItems: NavItem[] = [
         title: 'Editor',
         href: gameSettings.edit('editor'),
         icon: Gamepad2,
+    },
+    {
+        title: 'AI (OpenRouter)',
+        href: aiSettings.edit(),
+        icon: Sparkles,
     },
     {
         title: 'Appearance',

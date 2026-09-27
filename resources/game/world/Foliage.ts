@@ -32,7 +32,100 @@ type TypeRenderer = {
 export type FoliagePlacementContext = {
     heights: Heightfield;
     waterLevelAt: (x: number, z: number) => number | null;
+    /** ESA WorldCover class at a world position (0 = unknown), for real-world maps. */
+    landCoverAt?: (x: number, z: number) => number;
 };
+
+/**
+ * How likely each foliage kind grows on each ESA WorldCover class (10 trees, 20 shrubland,
+ * 30 grassland, 40 cropland, 50 built-up, 60 bare, 70 snow, 80 water, 90 wetland, 95 mangroves,
+ * 100 moss & lichen). Unknown classes fall back to the procedural masks.
+ */
+const LAND_COVER_AFFINITY: Record<string, Record<number, number>> = {
+    tree: {
+        10: 1,
+        95: 0.9,
+        20: 0.18,
+        30: 0.04,
+        40: 0.01,
+        60: 0.03,
+        90: 0.08,
+        100: 0.04,
+        50: 0.01,
+        70: 0,
+        80: 0,
+    },
+    bush: {
+        20: 1,
+        10: 0.5,
+        30: 0.25,
+        40: 0.05,
+        60: 0.15,
+        90: 0.4,
+        95: 0.6,
+        100: 0.3,
+        50: 0.02,
+        70: 0,
+        80: 0,
+    },
+    grass: {
+        30: 1,
+        100: 0.9,
+        20: 0.7,
+        40: 0.5,
+        10: 0.3,
+        90: 0.8,
+        95: 0.2,
+        60: 0.12,
+        50: 0.05,
+        70: 0,
+        80: 0,
+    },
+    flower: {
+        30: 1,
+        100: 0.6,
+        20: 0.4,
+        40: 0.15,
+        10: 0.1,
+        90: 0.3,
+        60: 0.05,
+        50: 0.02,
+        70: 0,
+        80: 0,
+    },
+    reed: {
+        90: 1,
+        95: 0.6,
+        80: 1,
+        30: 0.4,
+        20: 0.4,
+        40: 0.2,
+        10: 0.2,
+        60: 0.1,
+        50: 0,
+        70: 0,
+        100: 0.3,
+    },
+    rock: {
+        60: 1.6,
+        70: 0.4,
+        100: 0.9,
+        20: 0.8,
+        30: 0.6,
+        10: 0.7,
+        40: 0.2,
+        50: 0.1,
+        90: 0.2,
+        80: 0.5,
+        95: 0.1,
+    },
+};
+
+function affinityGroup(kind: string): keyof typeof LAND_COVER_AFFINITY {
+    return kind === 'conifer' || kind === 'broadleaf' || kind === 'palm'
+        ? 'tree'
+        : (kind as keyof typeof LAND_COVER_AFFINITY);
+}
 
 /**
  * Instanced foliage split into spatial cells per foliage type, so painting only rebuilds nearby
@@ -379,6 +472,22 @@ export class Foliage {
                         case 'rock':
                             p = 0.25 + smooth01(15, 40, hf.slope(x, z)) * 0.75;
                             break;
+                    }
+
+                    // Real-world maps: follow the actual land cover (forests, meadows, wetlands…).
+                    const lc = ctx.landCoverAt?.(x, z) ?? 0;
+
+                    if (lc !== 0) {
+                        const group = affinityGroup(type.kind);
+                        const affinity =
+                            LAND_COVER_AFFINITY[group]?.[lc] ?? 0.5;
+
+                        if (group === 'tree' && lc === 10) {
+                            // Inside mapped forest: dense, with small natural clearings.
+                            p = 0.55 + p * 0.45;
+                        }
+
+                        p *= affinity;
                     }
 
                     if (rand() > p) {

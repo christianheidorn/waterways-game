@@ -46,7 +46,9 @@ export type ShellToGameMessage =
       }
     | { type: 'updateLayers'; layers: TerrainLayer[] }
     | { type: 'updateFoliageTypes'; foliageTypes: FoliageType[] }
-    | { type: 'focusGame' };
+    | { type: 'focusGame' }
+    /** Ask the game for a screenshot of the current view (used by the AI review). */
+    | { type: 'captureScreenshot'; requestId: string };
 
 /** Messages the game posts to the shell. */
 export type GameToShellMessage =
@@ -58,7 +60,21 @@ export type GameToShellMessage =
     | { type: 'saveState'; state: SaveState; message?: string }
     | { type: 'toolGroupChanged'; group: EditorToolGroup }
     | { type: 'stats'; stats: GameStats }
-    | { type: 'error'; message: string };
+    | { type: 'error'; message: string }
+    | {
+          type: 'screenshot';
+          requestId: string;
+          /** JPEG data URL, max 1280 px wide, editor overlays hidden. */
+          dataUrl: string;
+          mode: GameMode;
+          camera: {
+              x: number;
+              y: number;
+              z: number;
+              yaw: number;
+              pitch: number;
+          };
+      };
 
 export const SHELL_SOURCE = 'waterways-shell';
 export const GAME_SOURCE = 'waterways-game';

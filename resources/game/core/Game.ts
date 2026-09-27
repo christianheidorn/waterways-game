@@ -30,6 +30,7 @@ import { Terrain } from '../world/Terrain';
 import { TerrainMaterial } from '../world/TerrainMaterial';
 import { Water } from '../world/Water';
 import { WaterReflection } from '../world/WaterReflection';
+import { Wetness } from '../world/Wetness';
 import { Api } from './Api';
 import { Bridge } from './Bridge';
 import type { BootConfig } from './config';
@@ -43,6 +44,9 @@ type World = {
     terrain: Terrain;
     water: Water;
     foliage: Foliage;
+    wetness: Wetness;
+    /** ESA WorldCover class lookup for real-world maps (0 = unknown). */
+    landCoverAt?: (x: number, z: number) => number;
 };
 
 /**
@@ -268,7 +272,12 @@ export class Game {
               );
 
         this.progress(0.72, 'Building terrain mesh');
-        const material = new TerrainMaterial(splat, m.map.size, res);
+        const material = new TerrainMaterial(
+            splat,
+            m.map.size,
+            res,
+            Number(m.settings.graphics.terrain_texture_resolution ?? 1024),
+        );
         material.setLayers(m.layers);
         const terrain = new Terrain(heights, material);
         this.scene.add(terrain.group);
@@ -285,6 +294,29 @@ export class Game {
         );
         this.scene.add(foliage.group);
 
+        let landCoverAt: ((x: number, z: number) => number) | undefined;
+
+        if (assets.landcover) {
+            const classes = new Uint8Array(
+                await this.api.binary(assets.landcover),
+            );
+
+            if (classes.length === res * res) {
+                landCoverAt = (x, z) => {
+                    const { gx, gz } = heights.toGrid(x, z);
+                    const c = Math.min(res - 1, Math.max(0, Math.round(gx)));
+                    const r = Math.min(res - 1, Math.max(0, Math.round(gz)));
+
+                    return classes[r * res + c];
+                };
+            }
+        }
+
+        const wetness = new Wetness(heights, waterGrid);
+        wetness.compute();
+        material.setWetness(wetness.texture);
+        water.onRebuild = () => wetness.invalidate();
+
         this.world = {
             heights,
             splat,
@@ -293,6 +325,8 @@ export class Game {
             terrain,
             water,
             foliage,
+            wetness,
+            landCoverAt,
         };
         this.progress(0.97, 'Compiling shaders');
     }
@@ -371,6 +405,7 @@ export class Game {
                 {
                     heights: this.world.heights,
                     waterLevelAt: (x, z) => this.world.water.levelAt(x, z),
+                    landCoverAt: this.world.landCoverAt,
                 },
                 this.manifest.foliage_types.map((t) => t.id),
                 this.manifest.map.id,
@@ -507,6 +542,7 @@ export class Game {
         this.atmosphere.update(dt, focus);
         this.world.terrain.updateLod(this.camera);
         this.world.water.update(dt, this.camera);
+        this.world.wetness.update(dt);
         this.world.foliage.update(dt, this.camera);
 
         const waterLevel = this.world.water.levelAt(
@@ -617,7 +653,6 @@ export class Game {
         const renderer = this.renderer;
         renderer.shadowMap.needsUpdate = true;
         const water = this.world.water;
-        this.renderReflection(dt);
 
         if (this.waterTarget && water.hasWater()) {
             water.group.visible = false;
@@ -637,6 +672,8 @@ export class Game {
             );
             // The composer render must not redraw the shadow map a second time.
             renderer.shadowMap.needsUpdate = false;
+            // Reflection after the prepass: the shadow map exists (and is current) by now.
+            this.renderReflection(dt);
         } else {
             water.setSceneTextures(null);
         }
@@ -798,6 +835,9 @@ export class Game {
         );
         this.world.terrain.lodBias = g.terrain_lod_bias;
         this.world.foliage.densityScale = g.foliage_density;
+        this.world.material.setTextureSize(
+            Number(g.terrain_texture_resolution ?? 1024),
+        );
         this.world.foliage.distanceScale = g.foliage_distance;
         this.camera.far = g.draw_distance;
         this.camera.updateProjectionMatrix();
@@ -950,6 +990,32 @@ export class Game {
         }
     }
 
+    /** Renders the current view without editor overlays and posts it to the studio (AI review). */
+    private sendScreenshot(requestId: string): void {
+        this.world.material.hideBrush();
+        this.renderFrame(0);
+        const src = this.renderer.domElement;
+        const scale = Math.min(1, 1280 / src.width);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(src.width * scale);
+        canvas.height = Math.round(src.height * scale);
+        canvas
+            .getContext('2d')!
+            .drawImage(src, 0, 0, canvas.width, canvas.height);
+        const euler = new THREE.Euler().setFromQuaternion(
+            this.camera.quaternion,
+            'YXZ',
+        );
+        const p = this.camera.position;
+        this.bridge.send({
+            type: 'screenshot',
+            requestId,
+            dataUrl: canvas.toDataURL('image/jpeg', 0.85),
+            mode: this.mode,
+            camera: { x: p.x, y: p.y, z: p.z, yaw: euler.y, pitch: euler.x },
+        });
+    }
+
     private captureThumbnail(): string {
         this.world.material.hideBrush();
         this.renderFrame(0);
@@ -1042,6 +1108,9 @@ export class Game {
                 break;
             case 'focusGame':
                 this.renderer.domElement.focus();
+                break;
+            case 'captureScreenshot':
+                this.sendScreenshot(message.requestId);
                 break;
         }
     }

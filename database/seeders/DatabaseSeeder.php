@@ -8,6 +8,9 @@ use App\Jobs\GenerateMapTerrain;
 use App\Models\Map;
 use App\Support\EnvironmentDefaults;
 use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class DatabaseSeeder extends Seeder
 {
@@ -18,10 +21,21 @@ class DatabaseSeeder extends Seeder
     {
         $this->call(FoliageTypeSeeder::class);
 
-        if (Map::query()->exists()) {
-            return;
+        if (! Map::query()->exists()) {
+            $this->createStarterMap();
         }
 
+        // Starter PBR materials (Poly Haven, CC0). Needs network; the studio works without them.
+        try {
+            Artisan::call('waterways:starter-materials', ['--resolution' => '1k'], $this->command?->getOutput());
+        } catch (Throwable $e) {
+            Log::warning('Starter materials could not be imported: '.$e->getMessage());
+            $this->command?->warn('Starter materials skipped: '.$e->getMessage());
+        }
+    }
+
+    private function createStarterMap(): void
+    {
         $map = Map::query()->create([
             'name' => 'Waterways Valley',
             'slug' => 'waterways-valley',

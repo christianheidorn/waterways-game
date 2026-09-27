@@ -33,6 +33,7 @@ export default function CreateMap({ resolutions }: { resolutions: number[] }) {
         center_lng: null,
         height_scale: 1,
         import_water: true,
+        use_landcover: true,
         seed: null,
         ...SHAPING_DEFAULTS,
     });

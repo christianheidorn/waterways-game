@@ -9,6 +9,17 @@ import type {
 } from '@game/shared/protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+export type GameScreenshot = Extract<
+    GameToShellMessage,
+    { type: 'screenshot' }
+>;
+
+type PendingScreenshot = {
+    resolve: (shot: GameScreenshot) => void;
+    reject: (error: Error) => void;
+    timer: number;
+};
+
 export type GameBridgeState = {
     ready: boolean;
     loading: { progress: number; label: string } | null;
@@ -42,12 +53,42 @@ export function useGameBridge(initialMode: GameMode) {
         error: null,
     });
 
+    const pendingShots = useRef(new Map<string, PendingScreenshot>());
+
     const send = useCallback((message: ShellToGameMessage) => {
         iframeRef.current?.contentWindow?.postMessage(
             { source: SHELL_SOURCE, payload: message },
             window.location.origin,
         );
     }, []);
+
+    /** Asks the game for a JPEG of the current view (editor overlays hidden). */
+    const captureScreenshot = useCallback(
+        (timeoutMs = 15000): Promise<GameScreenshot> =>
+            new Promise((resolve, reject) => {
+                if (!iframeRef.current?.contentWindow) {
+                    reject(new Error('The game is not running.'));
+
+                    return;
+                }
+
+                const requestId =
+                    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+                        ? crypto.randomUUID()
+                        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+                const timer = window.setTimeout(() => {
+                    pendingShots.current.delete(requestId);
+                    reject(
+                        new Error(
+                            'The game did not return a screenshot in time.',
+                        ),
+                    );
+                }, timeoutMs);
+                pendingShots.current.set(requestId, { resolve, reject, timer });
+                send({ type: 'captureScreenshot', requestId });
+            }),
+        [send],
+    );
 
     useEffect(() => {
         const onMessage = (event: MessageEvent) => {
@@ -60,6 +101,18 @@ export function useGameBridge(initialMode: GameMode) {
             }
 
             const message = event.data.payload;
+
+            if (message.type === 'screenshot') {
+                const pending = pendingShots.current.get(message.requestId);
+
+                if (pending) {
+                    window.clearTimeout(pending.timer);
+                    pendingShots.current.delete(message.requestId);
+                    pending.resolve(message);
+                }
+
+                return;
+            }
 
             setState((prev) => reduce(prev, message));
         };
@@ -81,7 +134,20 @@ export function useGameBridge(initialMode: GameMode) {
         }));
     }, []);
 
-    return { iframeRef, state, send, onFrameLoad };
+    // Reject outstanding screenshot requests on unmount.
+    useEffect(() => {
+        const pending = pendingShots.current;
+
+        return () => {
+            pending.forEach((p) => {
+                window.clearTimeout(p.timer);
+                p.reject(new Error('The studio was closed.'));
+            });
+            pending.clear();
+        };
+    }, []);
+
+    return { iframeRef, state, send, onFrameLoad, captureScreenshot };
 }
 
 function reduce(

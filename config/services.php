@@ -42,6 +42,12 @@ return [
         )))),
     ],
 
+    'openrouter' => [
+        // Fallback when no key is stored in the studio (Settings → AI).
+        'key' => env('OPENROUTER_API_KEY'),
+        'url' => env('OPENROUTER_URL', 'https://openrouter.ai/api/v1'),
+    ],
+
     'slack' => [
         'notifications' => [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),

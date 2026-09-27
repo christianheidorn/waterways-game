@@ -27,6 +27,8 @@ export type TerrainFormData = {
     center_lng: number | null;
     height_scale: number;
     import_water: boolean;
+    /** Real-world only: paint terrain layers from ESA WorldCover land cover. */
+    use_landcover: boolean;
     seed: number | null;
     lake_depth: number;
     river_depth: number;
@@ -242,6 +244,26 @@ export function TerrainSourceFields({
                                 checked={data.import_water}
                                 onCheckedChange={(checked) =>
                                     onChange({ import_water: checked })
+                                }
+                            />
+                        </div>
+                        <div className="flex items-start justify-between gap-4 rounded-lg border p-4 md:col-start-2">
+                            <div className="space-y-1">
+                                <Label htmlFor={`${id}-landcover`}>
+                                    Use land cover
+                                </Label>
+                                <p className="text-xs text-muted-foreground">
+                                    Paint forest, grassland, fields, towns and
+                                    bare rock from ESA WorldCover 2021 (10 m,
+                                    CC-BY 4.0) instead of height/slope rules
+                                    only.
+                                </p>
+                            </div>
+                            <Switch
+                                id={`${id}-landcover`}
+                                checked={data.use_landcover}
+                                onCheckedChange={(checked) =>
+                                    onChange({ use_landcover: checked })
                                 }
                             />
                         </div>

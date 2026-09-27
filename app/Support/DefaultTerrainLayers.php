@@ -3,6 +3,7 @@
 namespace App\Support;
 
 use App\Models\Map;
+use App\Services\Materials\StarterMaterials;
 
 /**
  * The starter material palette every new map receives. Auto-paint rules are relative to the
@@ -48,6 +49,13 @@ final class DefaultTerrainLayers
         $env = $map->resolvedEnvironment();
 
         foreach (self::definitions($map->min_height, $map->max_height, (float) $env['sea_level']) as $definition) {
+            // Use the starter PBR material of the layer's category when the library has one.
+            $material = StarterMaterials::materialForLayer($definition['name']);
+            if ($material !== null) {
+                $definition['material_id'] = $material->id;
+                $definition['texture_scale'] = $material->tile_size;
+            }
+
             $map->layers()->updateOrCreate(['slot' => $definition['slot']], $definition);
         }
     }

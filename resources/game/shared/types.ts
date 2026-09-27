@@ -76,6 +76,7 @@ export type GraphicsSettings = {
     foliage_density: number;
     foliage_distance: number;
     water_quality: 'low' | 'medium' | 'high';
+    terrain_texture_resolution: '512' | '1024' | '2048';
     antialias: boolean;
     bloom: boolean;
     ambient_occlusion: boolean;
@@ -108,7 +109,15 @@ export type TerrainLayer = {
     variation: number;
     bump: number;
     texture_url: string | null;
+    /** Metres per texture repeat (defaults to the material's tile size when a material is assigned). */
     texture_scale: number;
+    material_id: number | null;
+    /** PBR material from the studio library; null → procedural colours above. */
+    material: TerrainMaterialRef | null;
+    /** Multiplied onto the material albedo. */
+    tint: string;
+    roughness_scale: number;
+    normal_strength: number;
     /** Automatic painting rules (used by "Auto paint" and for fresh maps). */
     auto_min_height: number | null;
     auto_max_height: number | null;
@@ -116,6 +125,26 @@ export type TerrainLayer = {
     auto_min_slope: number | null;
     auto_max_slope: number | null;
     auto_priority: number;
+};
+
+export type MaterialMapName =
+    | 'albedo'
+    | 'normal'
+    | 'roughness'
+    | 'ao'
+    | 'height';
+
+/** A PBR material from the studio library (App\Models\Material::toGameArray). */
+export type TerrainMaterialRef = {
+    id: number;
+    name: string;
+    /** Root-relative image URLs; only albedo is guaranteed. Normal maps use the OpenGL (+Y) convention. */
+    maps: Record<MaterialMapName, string | null>;
+    tile_size: number;
+    tint: string;
+    roughness_scale: number;
+    normal_strength: number;
+    height_contrast: number;
 };
 
 export type FoliageKind =
@@ -172,6 +201,8 @@ export type MapAssets = {
     splatmap: string | null;
     water: string | null;
     foliage: string | null;
+    /** ESA WorldCover class per heightmap sample (Uint8, resolution²), real-world maps only. */
+    landcover: string | null;
 };
 
 export type GameManifest = {

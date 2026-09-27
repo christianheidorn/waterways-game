@@ -58,6 +58,7 @@ export type EditorWorld = {
     layers: TerrainLayer[];
     foliageTypes: FoliageType[];
     spawn: { x: number; z: number; yaw: number } | null;
+    landCoverAt?: (x: number, z: number) => number;
 };
 
 export type EditorCallbacks = {
@@ -1070,6 +1071,7 @@ export class Editor {
             heights: this.world.heights,
             waterLevelAt: (x: number, z: number) =>
                 this.world.water.levelAt(x, z),
+            landCoverAt: this.world.landCoverAt,
         };
     }
 }

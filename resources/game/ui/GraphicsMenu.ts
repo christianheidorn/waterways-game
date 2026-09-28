@@ -1,4 +1,4 @@
-import { MonitorCog, RotateCcw, X } from 'lucide';
+import { MonitorCog, RefreshCw, RotateCcw, X } from 'lucide';
 import {
     applyGroupLevel,
     applyPreset,
@@ -14,6 +14,7 @@ import type { PresetName } from '../shared/graphicsPresets';
 import type { ProfileSection } from '../core/GpuProfiler';
 import type { FoliageTypeStat, GameStats } from '../shared/protocol';
 import type { GraphicsSettings, QualityLevel } from '../shared/types';
+import type { RendererBackend } from '../core/renderer';
 import { button, h, icon, segmented, slider, toggle } from './dom';
 import type { SegmentHandle, SliderHandle } from './dom';
 
@@ -75,6 +76,11 @@ export type GraphicsMenuHost = {
     onOpen?: () => void;
 };
 
+const BACKEND_LABELS: Record<RendererBackend, string> = {
+    webgpu: 'WebGPU',
+    webgl: 'WebGL 2',
+};
+
 const LEVEL_LABELS: Record<QualityLevel, string> = {
     low: 'Low',
     medium: 'Med',
@@ -103,6 +109,11 @@ export class GraphicsMenu {
     private targetFps: SliderHandle;
     private maxFps: SliderHandle;
     private dynRes: { el: HTMLElement; set: (v: boolean) => void };
+    private backendSelect: SegmentHandle<GraphicsSettings['renderer_backend']>;
+    private backendNote: HTMLElement;
+    private reloadButton: HTMLButtonElement;
+    /** Backend the renderer is running on (known after the first stats update). */
+    private activeBackend: RendererBackend | null = null;
     private readout: HTMLElement;
     private profileEl: HTMLElement;
     private foliageEl: HTMLElement;
@@ -216,6 +227,33 @@ export class GraphicsMenu {
             format: (v) => (v <= 0 ? 'Unlimited' : `${v} fps`),
             onInput: (v) => patch({ max_fps: v }),
         });
+        this.backendSelect = segmented<GraphicsSettings['renderer_backend']>(
+            [
+                {
+                    value: 'auto',
+                    label: 'Automatic',
+                    title: 'WebGPU when the browser supports it, WebGL 2 otherwise',
+                },
+                {
+                    value: 'webgpu',
+                    label: 'WebGPU',
+                    title: 'Metal / D3D12 / Vulkan: compute shaders, GPU-driven foliage culling',
+                },
+                {
+                    value: 'webgl',
+                    label: 'WebGL 2',
+                    title: 'Compatibility renderer',
+                },
+            ],
+            'auto',
+            (v) => patch({ renderer_backend: v }),
+            'ww-compact',
+        );
+        this.backendNote = h('span', { class: 'ww-muted' });
+        this.reloadButton = button('Reload', () => window.location.reload(), {
+            icon: RefreshCw,
+            title: 'Reload the game to switch the graphics API',
+        });
         this.readout = h('div', { class: 'ww-gfx-readout' }, '…');
         this.profileEl = h('div', { class: 'ww-gfx-profile' });
         this.foliageEl = h('div', { class: 'ww-gfx-profile' });
@@ -265,6 +303,26 @@ export class GraphicsMenu {
                     this.dynRes.el,
                     this.targetFps.el,
                     this.maxFps.el,
+                ),
+                h(
+                    'section',
+                    { class: 'ww-section' },
+                    h('h3', { class: 'ww-section-title' }, 'Graphics API'),
+                    h(
+                        'div',
+                        {
+                            class: 'ww-gfx-row',
+                            title: 'Renderer backend. Applies after a reload.',
+                        },
+                        h('span', { class: 'ww-gfx-row-label' }, 'Backend'),
+                        this.backendSelect.el,
+                    ),
+                    h(
+                        'div',
+                        { class: 'ww-gfx-row' },
+                        this.backendNote,
+                        this.reloadButton,
+                    ),
                 ),
                 h(
                     'section',
@@ -335,12 +393,27 @@ export class GraphicsMenu {
         this.dynRes.set(g.dynamic_resolution);
         this.targetFps.set(g.target_fps);
         this.maxFps.set(g.max_fps);
+        this.backendSelect.set(g.renderer_backend ?? 'auto');
+        this.syncBackendNote();
         const overrides = Object.keys(
             diffGraphics(g, this.host.defaults()),
         ).filter((k) => k !== 'quality_preset').length;
         this.overrideNote.textContent = overrides
             ? `${overrides} override${overrides === 1 ? '' : 's'} on this device`
             : 'Using project defaults';
+    }
+
+    /** Whether the chosen graphics API differs from the running one (a reload switches it). */
+    private syncBackendNote(): void {
+        const wanted = this.host.current().renderer_backend ?? 'auto';
+        const active = this.activeBackend;
+        const pending = !!active && wanted !== 'auto' && wanted !== active;
+        this.backendNote.textContent = active
+            ? pending
+                ? `Running on ${BACKEND_LABELS[active]} · reload to switch to ${BACKEND_LABELS[wanted as RendererBackend]}`
+                : `Running on ${BACKEND_LABELS[active]} · changes apply after a reload`
+            : 'Changes apply after a reload';
+        this.reloadButton.hidden = !pending;
     }
 
     /** Live readout; call with fresh stats (e.g. every 0.5 s). */
@@ -351,6 +424,9 @@ export class GraphicsMenu {
             passes: string[];
             /** Internal render resolution in pixels. */
             renderSize?: { x: number; y: number };
+            /** Output (canvas) resolution in pixels; larger than renderSize when upscaling. */
+            outputSize?: { x: number; y: number };
+            backend?: RendererBackend;
             profile?: ProfileSection[];
             gpuTimers?: boolean;
         },
@@ -359,15 +435,26 @@ export class GraphicsMenu {
             return;
         }
 
+        if (extra.backend && extra.backend !== this.activeBackend) {
+            this.activeBackend = extra.backend;
+            this.syncBackendNote();
+        }
+
         const size = extra.renderSize;
+        const out = extra.outputSize;
+        const upscaled =
+            size && out && (out.x !== size.x || out.y !== size.y)
+                ? ` → ${out.x}×${out.y}`
+                : '';
         const resolution = size
-            ? `${size.x}×${size.y} (${((size.x * size.y) / 1e6).toFixed(1)} MP)`
+            ? `${size.x}×${size.y} (${((size.x * size.y) / 1e6).toFixed(1)} MP)${upscaled}`
             : `${Math.round(extra.renderScale * 100)}%`;
         this.readout.textContent =
             `${stats.fps.toFixed(0)} fps · ${(1000 / Math.max(1, stats.fps)).toFixed(1)} ms frame · ${stats.frameMs.toFixed(1)} ms CPU` +
             (stats.gpuMs !== undefined
                 ? ` · ${stats.gpuMs.toFixed(1)} ms GPU`
                 : '') +
+            (extra.backend ? ` · ${BACKEND_LABELS[extra.backend]}` : '') +
             '\n' +
             `${stats.drawCalls.toLocaleString()} draw calls · ${(stats.triangles / 1e6).toFixed(2)}M triangles\n` +
             `Render ${resolution} · ${extra.passes.join(' → ')}`;
@@ -468,7 +555,7 @@ export class GraphicsMenu {
                     },
                     h('span', {}, x.name),
                     h('span', {}, fmt(x.gpuMs)),
-                    h('span', {}, x.cpuMs.toFixed(2)),
+                    h('span', {}, fmt(x.cpuMs)),
                 ),
             ),
         );
@@ -478,7 +565,7 @@ export class GraphicsMenu {
                 h(
                     'p',
                     { class: 'ww-muted' },
-                    'GPU timings are not available in this browser (EXT_disjoint_timer_query_webgl2).',
+                    'GPU timings are not available in this browser (WebGPU timestamp-query / EXT_disjoint_timer_query_webgl2).',
                 ),
             );
         }

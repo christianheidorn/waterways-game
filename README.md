@@ -192,18 +192,28 @@ leave these values alone:
 
 | Preset    | Draw dist. | Shadows (dist.) | AA   | AO          | Terrain tex. / aniso | Foliage density / dist. / shadow | Render scale / Retina cap |
 | --------- | ---------- | --------------- | ---- | ----------- | -------------------- | -------------------------------- | ------------------------- |
-| Low       | 4 km       | low (90 m)      | FXAA | off         | 512 / 2×             | 0.4 / 0.5× / off                 | 0.7 + sharpen / 1×        |
-| Medium    | 7 km       | medium (150 m)  | FXAA | off         | 1K / 4×              | 0.7 / 0.75× / 60 m               | 0.85 + sharpen / 1.25×    |
+| Low       | 4 km       | low (90 m)      | FXAA | off         | 512 / 2×             | 0.4 / 0.5× / off                 | 0.7 (FSR 1) / 1×          |
+| Medium    | 7 km       | medium (150 m)  | FXAA | off         | 1K / 4×              | 0.7 / 0.75× / 60 m               | 0.85 (FSR 1) / 1.25×      |
 | High      | 12 km      | high (220 m)    | TAA  | off         | 1K / 8×              | 1 / 1× / 120 m                   | 1 / 1.5×                  |
 | Epic      | 20 km      | ultra (400 m)   | TAA  | GTAO medium | 2K / 16×             | 1 / 1.5× / 250 m                 | 1 / 2×                    |
 | Cinematic | 30 km      | ultra (700 m)   | TAA  | GTAO high   | 2K / 16×             | 1 / 2× / 350 m                   | 1.25 (supersampled) / 3×  |
 
-**Retina / HiDPI resolution cap.** `max_pixel_ratio` caps the device pixel ratio the game renders at; the
-render scale applies on top. A MacBook's 2× Retina screen at native resolution has four times the pixels of
-the same window on a 1× screen, and every full-screen pass (TAA, light shafts, bloom, grading …) pays for
-each of them. At High, the cap of 1.5× renders 56 % of the native pixels and the browser upsamples the
-canvas, which is what Unreal's screen percentage / TSR does on high-DPI displays. Epic renders native Retina
-(2×). 1× screens are not affected.
+**Retina / HiDPI resolution cap.** `max_pixel_ratio` caps the device pixel ratio of the output (the
+canvas); the browser upsamples the canvas to the screen. A MacBook's 2× Retina screen at native resolution
+has four times the pixels of the same window on a 1× screen, and every full-screen pass (TAA, light shafts,
+bloom, grading …) pays for each of them. At High, the cap of 1.5× outputs 56 % of the native pixels. Epic
+outputs native Retina (2×). 1× screens are not affected.
+
+**Render scale (TSR-style upscaling).** The render scale applies on top of the capped resolution, like
+Unreal's screen percentage:
+
+- Below 1× the canvas stays at the capped resolution and only the scene (and the screen-space lighting
+  passes: GTAO, contact shadows, SSR, light shafts) renders at the lower resolution. With TAA, TAAU
+  (temporal upsampling, like UE's TSR) reconstructs the output resolution from the jittered frames; the post
+  effects after it (depth of field, motion blur, eye adaptation, bloom, grading) run at the output
+  resolution. With FXAA, SMAA or no AA, AMD FSR 1 (edge-adaptive upscaling + RCAS sharpening, strength set by
+  `sharpen`) upscales the finished image as the last step.
+- Above 1× (Cinematic's 1.25) the canvas itself is supersampled and the browser downsamples it.
 
 **Scalability groups.** Like UE's `sg.*` groups, you can set each group to Low, Medium, High or Epic on its
 own:
@@ -218,28 +228,27 @@ own:
 - Shading
 - Resolution
 
-**Render pipeline** (`resources/game/core/PostFx.ts`). Passes run in this order:
+**Render pipeline** (`resources/game/core/PostFx.ts`): three.js' node-based `RenderPipeline`, written in
+TSL, the same on WebGPU and WebGL 2. The full pass order is under
+[Post-processing and photo mode](#post-processing-and-photo-mode). GTAO's `ao_quality` sets its resolution
+scale, sample count and radius. Grading, FXAA, SMAA and FSR 1 run after tone mapping because they need
+display-referred input. MSAA instead uses a 4× multisampled scene target.
 
-1. Scene
-2. GTAO: `ao_quality` sets the resolution scale, sample count and radius
-3. Bloom
-4. Output: ACES tone mapping and sRGB
-5. Colour grading, display-referred: saturation, contrast, vignette, and neighbourhood-clamped sharpening
-6. FXAA or SMAA, if selected
+Passes that would do nothing are skipped. For example, the grading terms are left out when every grading
+value is neutral, and the light-shaft passes are skipped while the sun is off-screen. The effect graph is
+rebuilt only when that set of passes changes; other changes only update uniforms. Every change applies
+live, without a reload.
 
-Grading, FXAA and SMAA run after tone mapping because they need display-referred input. MSAA instead uses a
-4× multisampled scene target.
-
-Passes that would do nothing are skipped. For example, the grading pass is left out when every grading value
-is neutral. The composer is rebuilt only when that set of passes changes; other changes only update
-uniforms. Every change applies live, without a reload.
+**Graphics API.** `renderer_backend` picks WebGPU (Metal / D3D12 / Vulkan; compute shaders, GPU-driven
+foliage culling), WebGL 2, or Automatic (WebGPU when the browser supports it). It applies after a reload;
+the in-game menu has a Reload button and shows the backend the game is running on.
 
 **Resolution and frame rate:**
 
-- **Dynamic resolution** keeps the canvas at the full render scale. The post-processing chain renders at a
-  lower scale (down to 0.5×) and the last pass upscales it.
-    - The controller uses GPU timer queries (`EXT_disjoint_timer_query_webgl2`) when the browser supports
-      them.
+- **Dynamic resolution** keeps the canvas at the output resolution and lowers the scene's render scale
+  (down to 0.5×); TAAU (or FSR 1 without TAA) upscales it, so the image stays stable while the scale moves.
+    - The controller uses the profiler's GPU time (WebGPU timestamp queries, or
+      `EXT_disjoint_timer_query_webgl2` on WebGL 2) when the browser supports them.
     - Otherwise it uses the smoothed frame interval. With vsync on, it steps up after a stable period and waits
       longer after each step up that fails.
     - The stats overlay shows the current scale.
@@ -252,32 +261,40 @@ uniforms. Every change applies live, without a reload.
 
 - Choose a preset, set each scalability group, or change render scale, the Retina resolution cap, dynamic
   resolution, target FPS and the FPS limit.
-- A live readout shows FPS, frame time (CPU and GPU), draw calls, triangles, the internal render resolution
-  in pixels and the active pass chain.
+- A live readout shows FPS, frame time (CPU and GPU), the graphics API, draw calls, triangles, the internal
+  render resolution in pixels (and the output resolution when upscaling) and the active pass chain.
 - **Per-pass profiler** (like UE's `stat gpu`): while the menu is open, every pass is timed on the GPU with
-  timer queries and on the CPU. The table shows the update, water refraction and reflection, scene and
-  shadows, and each post-processing pass. The heaviest GPU pass is highlighted. GPU times need
-  `EXT_disjoint_timer_query_webgl2` (Chrome and Edge on desktop).
+  timestamp queries and the CPU sections are timed too. The pipeline's passes all run inside one
+  `RenderPipeline.render()`, so each draw is attributed by the name of its pass or render target: the table
+  lists the update, water reflection, shadows, scene, GTAO, SSR, light shafts, TAA / TAAU, DoF, eye
+  adaptation, bloom, output and so on. The heaviest GPU pass is highlighted. GPU times need WebGPU's
+  `timestamp-query` feature or `EXT_disjoint_timer_query_webgl2` on WebGL 2 (Chrome and Edge on desktop).
 - Your changes are stored in `localStorage` (`waterways.graphics.overrides.v1`) and applied on top of the
   project settings.
 - **Reset to project defaults** removes your changes.
 
 ## Post-processing and photo mode
 
-The render pipeline (`resources/game/core/PostFx.ts`, one module per effect in `core/postfx/`) runs in this
-order. Every stage exists only when it is enabled.
+The render pipeline (`resources/game/core/PostFx.ts`, one TSL module per effect in `core/postfx/`, three's
+TSL nodes for GTAO, SSR, TAA / TAAU, bloom, FXAA, SMAA and FSR 1) runs in this order. Every stage exists
+only when it is enabled.
 
-1. HDR scene with depth, plus player velocity when needed.
-2. GTAO and contact shadows.
-3. Screen-space reflections on wet ground.
-4. Light shafts.
-5. TAA (temporal AA with reprojection and variance clipping).
-6. Depth of field (physical circle of confusion, autofocus or click-to-focus).
-7. Motion blur.
-8. Auto exposure (GPU histogram, no read-backs).
-9. Bloom and lens flare.
-10. One output pass: chromatic aberration, tone mapping, sharpening, 3D-LUT colour grade, saturation and
-    contrast, vignette, film grain and letterbox.
+1. HDR scene with depth. Extra render targets (MRT) only when an effect needs them: motion vectors (TAA,
+   motion blur; the skinned player and instanced foliage included), view normals (GTAO, SSR) and
+   metalness / roughness (SSR).
+2. GTAO and contact shadows (sun or moon direction, ray-marched through the depth buffer).
+3. Screen-space reflections where the material is glossy (wet ground: the terrain's roughness).
+4. Light shafts (radial blur of the bright sky around the sun or moon).
+5. HDR lighting composite of 2-4 at the scene resolution.
+6. TAA, or TAAU below 1× render scale (see Graphics quality). Everything after this runs at the output
+   resolution.
+7. Depth of field (physical circle of confusion, autofocus or click-to-focus).
+8. Motion blur (skipped for stills and on camera cuts).
+9. Auto exposure (GPU histogram without read-backs: compute shaders on WebGPU, a luminance reduction on
+   WebGL 2).
+10. Bloom and lens flare.
+11. Output: chromatic aberration, tone mapping, sharpening, 3D-LUT colour grade, saturation and contrast,
+    vignette; then FXAA / SMAA and FSR 1 when selected; film grain, dither and letterbox.
 
 **Quality switches** live in Game settings → Graphics → Cinematic effects and are set by the presets:
 

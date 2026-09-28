@@ -1,6 +1,18 @@
-import * as THREE from 'three';
-import type { FrameUniforms } from './common';
-import { colorTarget, FRAME_UNIFORMS, scaledSize } from './common';
+import * as THREE from 'three/webgpu';
+import {
+    attribute,
+    float,
+    Fn,
+    ivec2,
+    passTexture,
+    texture,
+    uniform,
+    varying,
+    vec2,
+    vec4,
+} from 'three/tsl';
+import type { FrameContext, TextureNode, Vec4Node } from './common';
+import { luma, ScreenPass } from './common';
 
 const CELL = 128;
 const CELLS = 4;
@@ -123,84 +135,86 @@ const ELEMENTS: number[][] = [
     [-1.1, 0.42, 3, 1, 0.03, 0.022, 0.04],
 ];
 
-const FlareVertex = /* glsl */ `
-    ${FRAME_UNIFORMS}
-    uniform sampler2D tColor;
-    uniform vec2 uLightUv;
-    uniform float uAspect;
-    uniform float uScale;
-    uniform float uExposure;
-    attribute vec2 corner;
-    attribute vec4 params;
-    attribute vec3 tint;
-    varying vec2 vAtlasUv;
-    varying vec3 vColor;
-
-    void main() {
-        // Occlusion: fraction of sky in a small disc around the light (soft when partly covered).
-        float vis = 0.0;
-
-        for (int i = 0; i < 16; i++) {
-            float a = float(i) * 2.39996323;
-            vec2 o = vec2(cos(a) / uAspect, sin(a)) * 0.012 * sqrt((float(i) + 0.5) / 16.0);
-            vec2 uv = uLightUv + o;
-            float inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
-            vis += isSky(textureLod(tDepth, uv, 0.0).x) ? inside : 0.0;
-        }
-
-        vis /= 16.0;
-        // Clouds over the sun: the sky there is no longer blinding.
-        float glare = luma(textureLod(tColor, clamp(uLightUv, vec2(0.0), vec2(1.0)), 0.0).rgb) * uExposure;
-        vis *= smoothstep(1.2, 5.0, glare);
-        vec2 edge = min(uLightUv, 1.0 - uLightUv);
-        vis *= smoothstep(-0.05, 0.08, min(edge.x, edge.y));
-
-        vec2 lightNdc = uLightUv * 2.0 - 1.0;
-        vec2 center = lightNdc * params.x;
-        vec2 offset = corner * params.y * vec2(params.w / uAspect, 1.0);
-        // Ghosts brighten as the light moves off-centre (more internal reflection).
-        float ghost = params.x < 0.99 ? 0.5 + 0.7 * length(lightNdc) : 1.0;
-        vColor = tint * uScale * vis * ghost;
-        vAtlasUv = vec2((corner.x * 0.5 + 0.5 + params.z) / ${CELLS.toFixed(1)}, corner.y * 0.5 + 0.5);
-        gl_Position = vis > 0.001 ? vec4(center + offset, 0.0, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
-    }
-`;
-
-const FlareFragment = /* glsl */ `
-    uniform sampler2D tAtlas;
-    varying vec2 vAtlasUv;
-    varying vec3 vColor;
-
-    void main() {
-        gl_FragColor = vec4(texture2D(tAtlas, vAtlasUv).rgb * vColor, 1.0);
-    }
-`;
-
 /**
  * Screen-space lens flare for the sun: procedural sprites (glow + starburst, anamorphic streak,
  * hexagonal ghosts along the axis through the screen centre, halo ring) drawn additively into a half
  * resolution HDR target that the output pass adds before tone mapping (so it blooms and grades like
- * real light). Occlusion is tested in the vertex shader against the depth buffer and the sky
- * brightness at the sun, so terrain, trees and clouds hide it smoothly.
- *
- * (three's Lensflare object was evaluated: it copies the framebuffer for occlusion, which breaks with
- * multisampled HDR targets, and it would be jittered / blurred by TAA and depth of field.)
+ * real light). Occlusion is measured in a 1×1 pass against the depth buffer and the sky brightness at
+ * the sun, so terrain, trees and clouds hide it smoothly; hidden sprites are culled in the vertex stage.
  */
-export class LensFlare {
-    private readonly target: THREE.WebGLRenderTarget;
+export class LensFlare extends THREE.TempNode {
+    /** 1×1 occlusion: r = visible fraction of the sun disc. */
+    readonly visibility = new ScreenPass('Lens flare', {
+        size: [1, 1],
+        filter: THREE.NearestFilter,
+    });
+    /** Light position in screen UV (TSL convention, origin top left). */
+    readonly lightUv = uniform(new THREE.Vector2(0.5, 0.5));
+    private readonly aspect = uniform(1);
+    private readonly brightness = uniform(1);
+    private readonly exposure = uniform(1);
+    private readonly target: THREE.RenderTarget;
     private readonly mesh: THREE.Mesh;
-    private readonly material: THREE.ShaderMaterial;
-    private readonly atlas: THREE.Texture;
+    private readonly material = new THREE.NodeMaterial();
+    private readonly atlas = createAtlas();
     private readonly camera = new THREE.OrthographicCamera();
-    readonly lightUv = new THREE.Vector2();
+    private readonly output: TextureNode;
     private readonly clearColor = new THREE.Color();
+    /** Post chain scale relative to the drawing buffer. */
+    scale = 1;
+    private hidden: THREE.Texture | null = null;
 
-    constructor(uniforms: FrameUniforms, width: number, height: number) {
-        this.target = colorTarget(
-            scaledSize(width, 0.5),
-            scaledSize(height, 0.5),
-        );
-        this.atlas = createAtlas();
+    constructor(f: FrameContext, sceneColor: TextureNode) {
+        super('vec4');
+        this.updateBeforeType = THREE.NodeUpdateType.FRAME;
+        this.target = new THREE.RenderTarget(1, 1, {
+            depthBuffer: false,
+            type: THREE.HalfFloatType,
+            generateMipmaps: false,
+        });
+        this.target.texture.name = 'Lens flare';
+        this.output = passTexture(
+            this as unknown as THREE.PassNode,
+            this.target.texture,
+        ) as unknown as TextureNode;
+
+        this.visibility.fragment = Fn(() => {
+            const vis = float(0).toVar();
+
+            for (let i = 0; i < 16; i++) {
+                const a = i * 2.39996323;
+                const r = 0.012 * Math.sqrt((i + 0.5) / 16);
+                const p = this.lightUv
+                    .add(
+                        vec2(
+                            float(Math.cos(a) * r).div(this.aspect),
+                            Math.sin(a) * r,
+                        ),
+                    )
+                    .toVar();
+                const inside = p
+                    .greaterThanEqual(vec2(0))
+                    .all()
+                    .and(p.lessThanEqual(vec2(1)).all());
+                vis.addAssign(
+                    inside
+                        .and(f.isSky(f.rawDepth(p)))
+                        .select(float(1), float(0)),
+                );
+            }
+
+            vis.divAssign(16);
+            // Clouds over the sun: the sky there is no longer blinding.
+            const glare = luma(
+                sceneColor.sample(this.lightUv.clamp(0, 1)).rgb,
+            ).mul(this.exposure);
+            vis.mulAssign(glare.smoothstep(1.2, 5));
+            const edge = this.lightUv.min(this.lightUv.oneMinus());
+            vis.mulAssign(edge.x.min(edge.y).smoothstep(-0.05, 0.08));
+
+            return vec4(vis, 0, 0, 1);
+        })() as Vec4Node;
+
         const corners: number[] = [];
         const params: number[] = [];
         const tints: number[] = [];
@@ -249,66 +263,105 @@ export class LensFlare {
             new THREE.Float32BufferAttribute(tints, 3),
         );
         geometry.setIndex(index);
-        this.material = new THREE.ShaderMaterial({
-            name: 'WaterwaysLensFlare',
-            uniforms: {
-                ...uniforms,
-                tColor: { value: null },
-                tAtlas: { value: this.atlas },
-                uLightUv: { value: this.lightUv },
-                uAspect: { value: 1 },
-                uScale: { value: 1 },
-                uExposure: { value: 1 },
-            },
-            vertexShader: FlareVertex,
-            fragmentShader: FlareFragment,
-            blending: THREE.AdditiveBlending,
-            depthTest: false,
-            depthWrite: false,
-            transparent: true,
-            toneMapped: false,
-        });
-        this.mesh = new THREE.Mesh(geometry, this.material);
+
+        const corner = attribute<'vec2'>('corner', 'vec2');
+        const param = attribute<'vec4'>('params', 'vec4');
+        const tint = attribute<'vec3'>('tint', 'vec3');
+        const vis = this.visibility.getTextureNode().load(ivec2(0, 0)).x;
+        // Light position in NDC (y up).
+        const lightNdc = this.lightUv.mul(vec2(2, -2)).add(vec2(-1, 1));
+        // Ghosts brighten as the light moves off-centre (more internal reflection).
+        const ghost = param.x
+            .lessThan(0.99)
+            .select(lightNdc.length().mul(0.7).add(0.5), float(1));
+        const color = varying(tint.mul(this.brightness).mul(vis).mul(ghost));
+        const atlasUv = varying(
+            vec2(
+                corner.x.mul(0.5).add(0.5).add(param.z).div(CELLS),
+                corner.y.mul(0.5).add(0.5),
+            ),
+        );
+        const position = lightNdc
+            .mul(param.x)
+            .add(corner.mul(param.y).mul(vec2(param.w.div(this.aspect), 1)));
+        const m = this.material;
+        m.name = 'Lens flare';
+        m.vertexNode = vis
+            .greaterThan(0.001)
+            .select(vec4(position, 0, 1), vec4(2, 2, 2, 1));
+        m.fragmentNode = vec4(texture(this.atlas, atlasUv).rgb.mul(color), 1);
+        m.blending = THREE.AdditiveBlending;
+        m.transparent = true;
+        m.depthTest = false;
+        m.depthWrite = false;
+        this.mesh = new THREE.Mesh(geometry, m);
+        this.mesh.name = 'Lens flare';
         this.mesh.frustumCulled = false;
     }
 
-    get texture(): THREE.Texture {
-        return this.target.texture;
-    }
-
-    setSize(width: number, height: number): void {
-        this.target.setSize(scaledSize(width, 0.5), scaledSize(height, 0.5));
+    getTextureNode(): TextureNode {
+        return this.output;
     }
 
     /**
-     * `scale` is the flare brightness in display units (intensity × light strength); `exposure` the
-     * display exposure used to convert to HDR scene units and to judge the sky's brightness.
+     * `brightness` is the flare strength in display units (intensity × light strength), `exposure` the
+     * display exposure used to convert to HDR scene units and to judge the sky's brightness. A zero
+     * brightness skips the pass (consumers read `black`).
      */
-    render(
-        renderer: THREE.WebGLRenderer,
-        sceneColor: THREE.Texture,
-        scale: number,
+    setParams(
+        brightness: number,
         exposure: number,
         aspect: number,
+        black: THREE.Texture,
     ): void {
-        const u = this.material.uniforms;
-        u.tColor.value = sceneColor;
-        u.uAspect.value = aspect;
-        u.uScale.value = scale / Math.max(1e-4, exposure);
-        u.uExposure.value = exposure;
+        this.brightness.value = brightness / Math.max(1e-4, exposure);
+        this.exposure.value = exposure;
+        this.aspect.value = aspect;
+        this.hidden = brightness > 0 ? null : black;
+        this.visibility.setBypass(this.hidden);
+    }
+
+    override updateBefore(frame: THREE.NodeFrame): boolean | undefined {
+        if (this.hidden) {
+            this.output.value = this.hidden;
+
+            return undefined;
+        }
+
+        const renderer = frame.renderer as THREE.Renderer;
+        renderer.getDrawingBufferSize(size);
+        const w = Math.max(1, Math.round(size.x * 0.5 * this.scale));
+        const h = Math.max(1, Math.round(size.y * 0.5 * this.scale));
+
+        if (this.target.width !== w || this.target.height !== h) {
+            this.target.setSize(w, h);
+        }
+
+        state = THREE.RendererUtils.resetRendererState(renderer, state);
         renderer.getClearColor(this.clearColor);
-        const alpha = renderer.getClearAlpha();
         renderer.setRenderTarget(this.target);
         renderer.setClearColor(0x000000, 0);
         renderer.clear(true, false, false);
         renderer.render(this.mesh, this.camera);
-        renderer.setClearColor(this.clearColor, alpha);
+        THREE.RendererUtils.restoreRendererState(renderer, state);
+        this.output.value = this.target.texture;
+
+        return undefined;
     }
 
-    dispose(): void {
+    override setup(): THREE.Node {
+        return this.output;
+    }
+
+    override dispose(): void {
+        super.dispose();
+        this.visibility.dispose();
         this.target.dispose();
         this.mesh.geometry.dispose();
         this.material.dispose();
         this.atlas.dispose();
     }
 }
+
+const size = new THREE.Vector2();
+let state: ReturnType<typeof THREE.RendererUtils.resetRendererState>;

@@ -1,132 +1,122 @@
-import * as THREE from 'three';
-import type { FrameUniforms } from './common';
-import { FRAME_UNIFORMS, fullscreenMaterial, setDefine } from './common';
+import * as THREE from 'three/webgpu';
+import { float, Fn, ivec2, mix, uniform, uv, vec2, vec4 } from 'three/tsl';
+import type {
+    FloatNode,
+    FrameContext,
+    TextureNode,
+    Vec2Node,
+    Vec3Node,
+    Vec4Node,
+} from './common';
+import { ScreenPass } from './common';
 
-/**
- * HDR lighting composite, one full-resolution pass for all screen-space lighting terms computed at
- * lower resolution: × ambient occlusion (GTAO), × contact shadows (depth-aware bilateral upsample so
- * shadows never bleed across silhouettes), screen-space reflections (premultiplied), + god rays (weighted
- * by the air in front of each surface, so close foreground is not washed out).
- */
-const CompositeShader = /* glsl */ `
-    ${FRAME_UNIFORMS}
-    uniform sampler2D tColor;
-    uniform sampler2D tAO;
-    uniform float uAOIntensity;
-    uniform sampler2D tContact;
-    uniform vec2 uContactSize;
-    uniform float uContactStrength;
-    uniform sampler2D tSsr;
-    uniform sampler2D tRays;
-    uniform vec3 uRayColor;
-    varying vec2 vUv;
-
-    float contactShadow() {
-        float z = linearDepth(vUv);
-        vec2 p = vUv * uContactSize - 0.5;
-        ivec2 i0 = ivec2(floor(p));
-        vec2 f = fract(p);
-        ivec2 maxI = ivec2(uContactSize) - 1;
-        float sum = 0.0;
-        float wsum = 0.0;
-
-        for (int k = 0; k < 4; k++) {
-            ivec2 o = ivec2(k & 1, k >> 1);
-            vec2 s = texelFetch(tContact, clamp(i0 + o, ivec2(0), maxI), 0).rg;
-            vec2 bw = mix(1.0 - f, f, vec2(o));
-            float w = bw.x * bw.y * exp(-abs(s.y - z) / (0.03 * z + 0.05) * 3.0) + 1e-4;
-            sum += s.x * w;
-            wsum += w;
-        }
-
-        return sum / wsum;
-    }
-
-    void main() {
-        vec3 c = texture2D(tColor, vUv).rgb;
-
-        #if AO
-            c *= mix(1.0, texture2D(tAO, vUv).r, uAOIntensity);
-        #endif
-
-        #if CONTACT
-            c *= mix(1.0, contactShadow(), uContactStrength);
-        #endif
-
-        #if SSR
-            vec4 r = texture2D(tSsr, vUv);
-            c = c * (1.0 - r.a) + r.rgb;
-        #endif
-
-        #if RAYS
-            // In-scattering builds up with the distance travelled through the air: close surfaces (a trunk
-            // or foliage right in front of the camera) get little of it instead of being washed out.
-            float airDepth = 1.0 - exp(-linearDepth(vUv) / 25.0);
-            c += texture2D(tRays, vUv).rgb * uRayColor * airDepth;
-        #endif
-
-        gl_FragColor = vec4(c, 1.0);
-    }
-`;
-
-export type CompositeTerms = {
-    ao: THREE.Texture | null;
-    contact: THREE.Texture | null;
-    contactStrength: number;
-    ssr: THREE.Texture | null;
-    rays: THREE.Texture | null;
-    rayColor: THREE.Vector3;
+export type CompositeInputs = {
+    color: TextureNode;
+    /** GTAO (r = visibility). */
+    ao: TextureNode | null;
+    /** Contact shadows (r = visibility, g = linear depth) and the size of that buffer in pixels. */
+    contact: { texture: TextureNode; size: Vec2Node } | null;
+    /** Screen-space reflections (premultiplied), the reflective mask and view normals. */
+    ssr: {
+        reflection: Vec4Node;
+        gloss: FloatNode;
+        normal: Vec3Node;
+    } | null;
+    /** Light shafts in HDR scene units, before tinting. */
+    rays: TextureNode | null;
 };
 
+/**
+ * HDR lighting composite at the scene resolution, one pass for all screen-space lighting terms:
+ * × ambient occlusion, × contact shadows (depth-aware bilateral upsample so shadows never bleed across
+ * silhouettes), screen-space reflections, + light shafts (weighted by the air in front of each surface,
+ * so close foreground is not washed out).
+ */
 export class Composite {
-    readonly material: THREE.ShaderMaterial;
+    readonly pass = new ScreenPass('Composite');
+    readonly contactStrength = uniform(0);
+    readonly rayColor = uniform(new THREE.Vector3());
 
-    constructor(uniforms: FrameUniforms) {
-        this.material = fullscreenMaterial({
-            name: 'WaterwaysLightingComposite',
-            uniforms: {
-                ...uniforms,
-                tColor: { value: null },
-                tAO: { value: null },
-                uAOIntensity: { value: 0.8 },
-                tContact: { value: null },
-                uContactSize: { value: new THREE.Vector2(1, 1) },
-                uContactStrength: { value: 0 },
-                tSsr: { value: null },
-                tRays: { value: null },
-                uRayColor: { value: new THREE.Vector3() },
-            },
-            defines: { AO: 0, CONTACT: 0, SSR: 0, RAYS: 0 },
-            fragmentShader: CompositeShader,
-        });
-    }
+    constructor(f: FrameContext, inputs: CompositeInputs) {
+        const { ao, contact, ssr, rays } = inputs;
 
-    set(input: THREE.Texture, terms: CompositeTerms): void {
-        const m = this.material;
-        const u = m.uniforms;
-        u.tColor.value = input;
-        u.tAO.value = terms.ao;
-        u.tContact.value = terms.contact;
-        u.uContactStrength.value = terms.contactStrength;
-        u.tSsr.value = terms.ssr;
-        u.tRays.value = terms.rays;
-        (u.uRayColor.value as THREE.Vector3).copy(terms.rayColor);
+        const contactShadow = (
+            vUv: Vec2Node,
+            tex: TextureNode,
+            size: Vec2Node,
+        ) => {
+            const z = f.linearDepth(vUv);
+            const p = vUv.mul(size).sub(0.5);
+            const base = p.floor();
+            const frac = p.fract();
+            const maxI = size.sub(1);
+            let sum: FloatNode = float(0);
+            let wsum: FloatNode = float(1e-4 * 4);
 
-        if (terms.contact) {
-            const img = terms.contact.image as {
-                width: number;
-                height: number;
-            };
-            (u.uContactSize.value as THREE.Vector2).set(img.width, img.height);
-        }
+            for (const [ox, oy] of [
+                [0, 0],
+                [1, 0],
+                [0, 1],
+                [1, 1],
+            ]) {
+                const s = tex.load(
+                    ivec2(base.add(vec2(ox, oy)).clamp(vec2(0), maxI)),
+                );
+                const bx = ox ? frac.x : frac.x.oneMinus();
+                const by = oy ? frac.y : frac.y.oneMinus();
+                const w = bx
+                    .mul(by)
+                    .mul(
+                        s.y
+                            .sub(z)
+                            .abs()
+                            .div(z.mul(0.03).add(0.05))
+                            .mul(-3)
+                            .exp(),
+                    );
+                sum = sum.add(s.x.mul(w));
+                wsum = wsum.add(w);
+            }
 
-        setDefine(m, 'AO', terms.ao ? 1 : 0);
-        setDefine(m, 'CONTACT', terms.contact ? 1 : 0);
-        setDefine(m, 'SSR', terms.ssr ? 1 : 0);
-        setDefine(m, 'RAYS', terms.rays ? 1 : 0);
-    }
+            return sum.div(wsum);
+        };
 
-    dispose(): void {
-        this.material.dispose();
+        this.pass.fragment = Fn(() => {
+            const vUv = uv();
+            const c = inputs.color.sample(vUv).rgb.toVar();
+
+            if (ao) {
+                c.mulAssign(mix(1, ao.sample(vUv).r, 0.8));
+            }
+
+            if (contact) {
+                c.mulAssign(
+                    mix(
+                        1,
+                        contactShadow(vUv, contact.texture, contact.size),
+                        this.contactStrength,
+                    ),
+                );
+            }
+
+            if (ssr) {
+                const r = ssr.reflection;
+                const view = f.viewPosition(vUv, f.rawDepth(vUv)).normalize();
+                const ndv = ssr.normal.dot(view.negate()).max(0);
+                const fresnel = ndv.oneMinus().pow(5).mul(0.98).add(0.02);
+                const hit = r.a.greaterThan(0).select(float(1), float(0));
+                const w = ssr.gloss.mul(fresnel).mul(hit).clamp(0, 1);
+                c.assign(c.mul(w.oneMinus()).add(r.rgb));
+            }
+
+            if (rays) {
+                // In-scattering builds up with the distance travelled through the air: close surfaces
+                // (a trunk or foliage right in front of the camera) get little of it.
+                const air = f.linearDepth(vUv).div(-25).exp().oneMinus();
+                c.addAssign(rays.sample(vUv).rgb.mul(this.rayColor).mul(air));
+            }
+
+            return vec4(c, 1);
+        })() as Vec4Node;
     }
 }

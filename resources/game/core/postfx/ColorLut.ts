@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { ColorGrade } from '../../shared/types';
 
 export const LUT_SIZE = 32;
@@ -228,10 +228,14 @@ const GRADES: Record<Exclude<ColorGrade, 'neutral'>, (c: Rgb) => Rgb> = {
     },
 };
 
-const cache = new Map<ColorGrade, THREE.Data3DTexture>();
+const cache = new Map<ColorGrade, THREE.DataTexture>();
 
-/** 32³ RGBA8 3D LUT for a grade (cached; neutral is the identity). */
-export function colorGradeLut(grade: ColorGrade): THREE.Data3DTexture {
+/**
+ * 32³ RGBA8 LUT for a grade (cached; neutral is the identity), as a 2D strip of 32 blue slices
+ * (x = blue × 32 + red, y = green): sampled with two bilinear lookups, which works the same on every
+ * backend (3D texture support differs).
+ */
+export function colorGradeLut(grade: ColorGrade): THREE.DataTexture {
     const cached = cache.get(grade);
 
     if (cached) {
@@ -247,7 +251,7 @@ export function colorGradeLut(grade: ColorGrade): THREE.Data3DTexture {
             for (let r = 0; r < n; r++) {
                 const input: Rgb = [r / (n - 1), g / (n - 1), b / (n - 1)];
                 const out = fn ? fn(input) : input;
-                const i = (b * n * n + g * n + r) * 4;
+                const i = (g * n * n + b * n + r) * 4;
                 data[i] = Math.round(clamp01(out[0]) * 255);
                 data[i + 1] = Math.round(clamp01(out[1]) * 255);
                 data[i + 2] = Math.round(clamp01(out[2]) * 255);
@@ -256,12 +260,12 @@ export function colorGradeLut(grade: ColorGrade): THREE.Data3DTexture {
         }
     }
 
-    const texture = new THREE.Data3DTexture(data, n, n, n);
+    const texture = new THREE.DataTexture(data, n * n, n);
     texture.format = THREE.RGBAFormat;
     texture.type = THREE.UnsignedByteType;
     texture.minFilter = THREE.LinearFilter;
     texture.magFilter = THREE.LinearFilter;
-    texture.wrapS = texture.wrapT = texture.wrapR = THREE.ClampToEdgeWrapping;
+    texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
     texture.unpackAlignment = 1;
     texture.needsUpdate = true;
     cache.set(grade, texture);

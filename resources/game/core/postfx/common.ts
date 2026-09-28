@@ -1,6 +1,26 @@
-import * as THREE from 'three';
-import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
+import * as THREE from 'three/webgpu';
+import {
+    context,
+    getScreenPosition,
+    getViewPosition,
+    interleavedGradientNoise,
+    passTexture,
+    perspectiveDepthToViewZ,
+    reference,
+    screenCoordinate,
+    texture,
+    uniform,
+    vec2,
+    vec3,
+    vec4,
+} from 'three/tsl';
 import type { ColorGrade } from '../../shared/types';
+
+export type FloatNode = THREE.Node<'float'>;
+export type Vec2Node = THREE.Node<'vec2'>;
+export type Vec3Node = THREE.Node<'vec3'>;
+export type Vec4Node = THREE.Node<'vec4'>;
+export type TextureNode = THREE.TextureNode;
 
 /** Scene lighting the post effects need (satisfied by world/Atmosphere). */
 export type LightSource = {
@@ -36,190 +56,282 @@ export type Look = {
     fogDensity: number;
 };
 
-export const FULLSCREEN_VERTEX = /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-        vUv = uv;
-        gl_Position = vec4(position.xy, 0.0, 1.0);
-    }`;
-
 /**
- * GLSL helpers shared by the depth based effects. Expects the PostContext frame uniforms
- * (tDepth, uNear, uFar, uProjInv, uProj, uViewInv …) to be declared by `FRAME_UNIFORMS`.
+ * Depth buffer access and view-space reconstruction shared by the depth based effects. Camera matrices
+ * are referenced (not copied), so they always match the scene render, including the TAA jitter.
+ * Screen UVs follow the TSL convention (origin top left) on both backends.
  */
-export const FRAME_UNIFORMS = /* glsl */ `
-    uniform sampler2D tDepth;
-    uniform float uNear;
-    uniform float uFar;
-    uniform mat4 uProj;
-    uniform mat4 uProjInv;
-    uniform mat4 uView;
-    uniform mat4 uViewInv;
-    uniform mat4 uReproj;
-    uniform vec2 uResolution;
-    uniform vec2 uTexel;
-    uniform vec2 uJitter;
-    uniform float uFrame;
-    uniform float uTime;
+export class FrameContext {
+    readonly near: FloatNode;
+    readonly far: FloatNode;
+    readonly projection: THREE.UniformNode<'mat4', THREE.Matrix4>;
+    readonly projectionInverse: THREE.UniformNode<'mat4', THREE.Matrix4>;
+    /** Camera world matrix (view → world). */
+    readonly cameraWorld: THREE.UniformNode<'mat4', THREE.Matrix4>;
+    /** Frame counter for animated noise. */
+    readonly frame = uniform(0);
 
-    float rawDepth(vec2 uv) { return texture2D(tDepth, uv).x; }
-
-    /** Positive view distance along -Z (metres) from a [0,1] depth buffer value. */
-    float linearizeDepth(float d) {
-        float z = d * 2.0 - 1.0;
-        return (2.0 * uNear * uFar) / (uFar + uNear - z * (uFar - uNear));
+    constructor(
+        camera: THREE.PerspectiveCamera,
+        /** Scene depth (hardware depth texture of the scene pass). */
+        readonly depth: TextureNode,
+    ) {
+        this.near = reference('near', 'float', camera) as unknown as FloatNode;
+        this.far = reference('far', 'float', camera) as unknown as FloatNode;
+        this.projection = uniform(camera.projectionMatrix);
+        this.projectionInverse = uniform(camera.projectionMatrixInverse);
+        this.cameraWorld = uniform(camera.matrixWorld);
     }
 
-    float linearDepth(vec2 uv) { return linearizeDepth(rawDepth(uv)); }
-
-    bool isSky(float d) { return d >= 0.9999999; }
-
-    vec3 viewPosition(vec2 uv, float d) {
-        vec4 p = uProjInv * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
-        return p.xyz / p.w;
+    rawDepth(uv: Vec2Node): FloatNode {
+        return this.depth.sample(uv).r as FloatNode;
     }
 
-    vec2 viewToUv(vec3 p) {
-        vec4 c = uProj * vec4(p, 1.0);
-        return c.xy / c.w * 0.5 + 0.5;
+    /** Positive distance along the view axis in metres. */
+    linearize(depth: FloatNode): FloatNode {
+        return perspectiveDepthToViewZ(depth, this.near, this.far).negate();
+    }
+
+    linearDepth(uv: Vec2Node): FloatNode {
+        return this.linearize(this.rawDepth(uv));
+    }
+
+    isSky(depth: FloatNode): THREE.Node<'bool'> {
+        return depth.greaterThanEqual(0.9999999);
+    }
+
+    viewPosition(uv: Vec2Node, depth: FloatNode): Vec3Node {
+        return getViewPosition(uv, depth, this.projectionInverse);
+    }
+
+    viewToUv(p: Vec3Node): Vec2Node {
+        return getScreenPosition(p, this.projection);
+    }
+
+    /**
+     * View-space normal from depth: the smaller of the two one-sided differences per axis (clean edges).
+     * `texel` is one pixel of the depth buffer in UV units.
+     */
+    viewNormal(uv: Vec2Node, p: Vec3Node, texel: Vec2Node): Vec3Node {
+        const at = (o: Vec2Node) => {
+            const q = uv.add(o);
+
+            return this.viewPosition(q, this.rawDepth(q));
+        };
+        const dx = vec2(texel.x, 0);
+        const dy = vec2(0, texel.y);
+        const l = at(dx.negate());
+        const r = at(dx);
+        const b = at(dy.negate());
+        const t = at(dy);
+        const hx = r.z.sub(p.z).abs().lessThan(p.z.sub(l.z).abs());
+        const hy = t.z.sub(p.z).abs().lessThan(p.z.sub(b.z).abs());
+        const ddx = hx.select(r.sub(p), p.sub(l));
+        // Screen UV y points down: flip the vertical difference so the normal faces the camera.
+        const ddy = hy.select(p.sub(t), b.sub(p));
+
+        return ddx.cross(ddy).normalize();
     }
 
     /** Interleaved gradient noise (Jimenez), animated per frame. */
-    float ign(vec2 px) {
-        px += 5.588238 * mod(uFrame, 64.0);
-        return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715))));
+    noise(salt: number | FloatNode = 0): FloatNode {
+        const offset = this.frame.add(salt).mod(64).mul(5.588238);
+
+        return interleavedGradientNoise(screenCoordinate.add(offset));
     }
+}
 
-    /** View-space normal from depth: the smaller of the two one-sided differences per axis (clean edges). */
-    vec3 viewNormal(vec2 uv, vec3 p) {
-        vec3 l = viewPosition(uv - vec2(uTexel.x, 0.0), rawDepth(uv - vec2(uTexel.x, 0.0)));
-        vec3 r = viewPosition(uv + vec2(uTexel.x, 0.0), rawDepth(uv + vec2(uTexel.x, 0.0)));
-        vec3 b = viewPosition(uv - vec2(0.0, uTexel.y), rawDepth(uv - vec2(0.0, uTexel.y)));
-        vec3 t = viewPosition(uv + vec2(0.0, uTexel.y), rawDepth(uv + vec2(0.0, uTexel.y)));
-        vec3 dx = abs(r.z - p.z) < abs(p.z - l.z) ? r - p : p - l;
-        vec3 dy = abs(t.z - p.z) < abs(p.z - b.z) ? t - p : p - b;
-        return normalize(cross(dx, dy));
-    }
+export function luma(c: Vec3Node): FloatNode {
+    return c.dot(vec3(0.2126, 0.7152, 0.0722));
+}
 
-    float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
-`;
-
-export type FrameUniforms = {
-    tDepth: THREE.IUniform<THREE.Texture | null>;
-    uNear: THREE.IUniform<number>;
-    uFar: THREE.IUniform<number>;
-    uProj: THREE.IUniform<THREE.Matrix4>;
-    uProjInv: THREE.IUniform<THREE.Matrix4>;
-    uView: THREE.IUniform<THREE.Matrix4>;
-    uViewInv: THREE.IUniform<THREE.Matrix4>;
-    uReproj: THREE.IUniform<THREE.Matrix4>;
-    uResolution: THREE.IUniform<THREE.Vector2>;
-    uTexel: THREE.IUniform<THREE.Vector2>;
-    uJitter: THREE.IUniform<THREE.Vector2>;
-    uFrame: THREE.IUniform<number>;
-    uTime: THREE.IUniform<number>;
+type ScreenPassOptions = {
+    /** Size relative to the renderer's drawing buffer (ignored with `size`). */
+    scale?: number;
+    /** Fixed size in pixels. */
+    size?: [number, number];
+    type?: THREE.TextureDataType;
+    filter?: THREE.MagnificationTextureFilter;
+    /** Keeps the previous frame's result readable through `previous` (ping-pong targets). */
+    feedback?: boolean;
 };
 
-export function createFrameUniforms(): FrameUniforms {
-    return {
-        tDepth: { value: null },
-        uNear: { value: 0.1 },
-        uFar: { value: 1000 },
-        uProj: { value: new THREE.Matrix4() },
-        uProjInv: { value: new THREE.Matrix4() },
-        uView: { value: new THREE.Matrix4() },
-        uViewInv: { value: new THREE.Matrix4() },
-        uReproj: { value: new THREE.Matrix4() },
-        uResolution: { value: new THREE.Vector2(1, 1) },
-        uTexel: { value: new THREE.Vector2(1, 1) },
-        uJitter: { value: new THREE.Vector2() },
-        uFrame: { value: 0 },
-        uTime: { value: 0 },
-    };
-}
+const quad = new THREE.QuadMesh(new THREE.NodeMaterial());
+const drawingSize = new THREE.Vector2();
+let rendererState: ReturnType<typeof THREE.RendererUtils.resetRendererState>;
 
-/** A full-screen shader material that never touches depth and is never tone mapped by three. */
-export function fullscreenMaterial(params: {
-    name: string;
-    uniforms: Record<string, THREE.IUniform>;
-    fragmentShader: string;
-    vertexShader?: string;
-    defines?: Record<string, string | number | boolean>;
-    blending?: THREE.Blending;
-}): THREE.ShaderMaterial {
-    return new THREE.ShaderMaterial({
-        name: params.name,
-        uniforms: params.uniforms,
-        defines: params.defines ?? {},
-        vertexShader: params.vertexShader ?? FULLSCREEN_VERTEX,
-        fragmentShader: params.fragmentShader,
-        depthTest: false,
-        depthWrite: false,
-        blending: params.blending ?? THREE.NoBlending,
-        toneMapped: false,
-    });
-}
+/**
+ * One full-screen draw into its own render target, as a node: consumers sample `getTextureNode()` and
+ * the pass renders (once per frame) right before the first draw that reads it. The render target and
+ * the draw are named after the pass (the GPU profiler attributes its time by that name).
+ *
+ * A pass can be bypassed at runtime without rebuilding the graph: consumers then read a replacement
+ * texture (e.g. the unmodified input, or a neutral 1×1 texture) and nothing is drawn.
+ */
+export class ScreenPass extends THREE.TempNode {
+    /** Size relative to the drawing buffer. */
+    scale: number;
+    /** Pixel size of this pass' target (set before each draw). */
+    readonly resolution = uniform(new THREE.Vector2(1, 1));
+    /** The effect: a vec4 fragment node, sampling its inputs at `uv()`. */
+    fragment: Vec4Node | null = null;
+    /** Last frame's result (feedback passes only). */
+    readonly previous: TextureNode;
+    private readonly targets: THREE.RenderTarget[];
+    private index = 0;
+    private readonly material = new THREE.NodeMaterial();
+    private readonly output: TextureNode;
+    private readonly fixedSize: [number, number] | null;
+    private replacement: THREE.Texture | null = null;
+    private replacementSource: THREE.Node | null = null;
 
-/** Sets a material define, recompiling only when the value changes. */
-export function setDefine(
-    material: THREE.ShaderMaterial,
-    name: string,
-    value: number,
-): void {
-    if (material.defines[name] !== value) {
-        material.defines[name] = value;
-        material.needsUpdate = true;
+    constructor(
+        readonly passName: string,
+        options: ScreenPassOptions = {},
+    ) {
+        super('vec4');
+        this.updateBeforeType = THREE.NodeUpdateType.FRAME;
+        this.scale = options.scale ?? 1;
+        this.fixedSize = options.size ?? null;
+        const filter = options.filter ?? THREE.LinearFilter;
+        const count = options.feedback ? 2 : 1;
+        this.targets = Array.from({ length: count }, () => {
+            const target = new THREE.RenderTarget(1, 1, {
+                depthBuffer: false,
+                type: options.type ?? THREE.HalfFloatType,
+                minFilter: filter,
+                magFilter: filter,
+                generateMipmaps: false,
+            });
+            target.texture.name = passName;
+
+            return target;
+        });
+        this.material.name = passName;
+        this.previous = texture(this.targets[count - 1].texture);
+        this.output = passTexture(
+            this as unknown as THREE.PassNode,
+            this.targets[0].texture,
+        ) as unknown as TextureNode;
     }
-}
 
-export function colorTarget(
-    width: number,
-    height: number,
-    options: THREE.RenderTargetOptions = {},
-): THREE.WebGLRenderTarget {
-    const target = new THREE.WebGLRenderTarget(
-        Math.max(1, width),
-        Math.max(1, height),
-        {
-            type: THREE.HalfFloatType,
-            minFilter: THREE.LinearFilter,
-            magFilter: THREE.LinearFilter,
-            depthBuffer: false,
-            generateMipmaps: false,
-            ...options,
-        },
-    );
-    target.texture.generateMipmaps = options.generateMipmaps ?? false;
+    getTextureNode(): TextureNode {
+        return this.output;
+    }
 
-    return target;
-}
+    /** The texture currently holding this pass' result. */
+    get texture(): THREE.Texture {
+        return this.output.value;
+    }
 
-/** Shared single triangle used by every full-screen pass. */
-export class Blitter {
-    private readonly quad = new FullScreenQuad();
+    get renderTarget(): THREE.RenderTarget {
+        return this.targets[this.index];
+    }
 
-    constructor(readonly renderer: THREE.WebGLRenderer) {}
-
-    draw(
-        material: THREE.Material,
-        target: THREE.WebGLRenderTarget | null,
-        clear = false,
+    /**
+     * Skip the draw and let consumers read `replacement` instead (null resumes). `source` is the pass
+     * node that produces the replacement; it is updated in this pass' place so it is current this frame.
+     */
+    setBypass(
+        replacement: THREE.Texture | null,
+        source: THREE.Node | null = null,
     ): void {
-        this.renderer.setRenderTarget(target);
+        this.replacement = replacement;
+        this.replacementSource = source;
+    }
 
-        if (clear) {
-            this.renderer.clear(true, false, false);
+    override updateBefore(frame: THREE.NodeFrame): boolean | undefined {
+        if (this.replacement) {
+            if (this.replacementSource) {
+                frame.updateBeforeNode(this.replacementSource);
+            }
+
+            const image = this.replacement.image as {
+                width?: number;
+                height?: number;
+            } | null;
+            this.resolution.value.set(image?.width ?? 1, image?.height ?? 1);
+            this.output.value = this.replacement;
+
+            return undefined;
         }
 
-        this.quad.material = material;
-        this.quad.render(this.renderer);
+        const renderer = frame.renderer as THREE.Renderer;
+        let width: number;
+        let height: number;
+
+        if (this.fixedSize) {
+            [width, height] = this.fixedSize;
+        } else {
+            renderer.getDrawingBufferSize(drawingSize);
+            // Floored like the scene pass, so passes at the scene scale match its buffers texel for texel.
+            width = Math.max(1, Math.floor(drawingSize.x * this.scale));
+            height = Math.max(1, Math.floor(drawingSize.y * this.scale));
+        }
+
+        const feedback = this.targets.length > 1;
+        const write = this.targets[feedback ? 1 - this.index : 0];
+
+        if (feedback) {
+            this.previous.value = this.targets[this.index].texture;
+        }
+
+        for (const target of this.targets) {
+            if (target.width !== width || target.height !== height) {
+                target.setSize(width, height);
+            }
+        }
+
+        this.resolution.value.set(width, height);
+        rendererState = THREE.RendererUtils.resetRendererState(
+            renderer,
+            rendererState,
+        );
+        renderer.setRenderTarget(write);
+        quad.material = this.material;
+        quad.name = this.passName;
+        quad.render(renderer);
+        THREE.RendererUtils.restoreRendererState(renderer, rendererState);
+
+        if (feedback) {
+            this.index = 1 - this.index;
+        }
+
+        this.output.value = write.texture;
+
+        return undefined;
     }
 
-    dispose(): void {
-        this.quad.dispose();
+    override setup(builder: THREE.NodeBuilder): THREE.Node {
+        const shared = (
+            builder as unknown as { getSharedContext(): object }
+        ).getSharedContext();
+        this.material.contextNode = context(shared) as never;
+        this.material.fragmentNode = this.fragment ?? vec4(0);
+        this.material.needsUpdate = true;
+
+        return this.output;
+    }
+
+    override dispose(): void {
+        super.dispose();
+
+        for (const target of this.targets) {
+            target.dispose();
+        }
+
+        this.material.dispose();
     }
 }
 
-export function scaledSize(size: number, scale: number): number {
-    return Math.max(1, Math.round(size * scale));
+/** 1×1 textures for bypassed passes (neutral inputs of the composite). */
+export function solidTexture(r: number, g: number, b: number, a = 1) {
+    const t = new THREE.DataTexture(
+        new Uint8Array([r * 255, g * 255, b * 255, a * 255]),
+        1,
+        1,
+    );
+    t.needsUpdate = true;
+
+    return t;
 }

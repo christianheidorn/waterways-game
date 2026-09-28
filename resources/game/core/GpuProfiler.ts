@@ -1,12 +1,13 @@
 import { InspectorBase, TimestampQuery } from 'three/webgpu';
+import type { Object3D, RenderTarget } from 'three/webgpu';
 import type { GameRenderer } from './renderer';
 
 export type ProfileSection = {
     name: string;
     /** GPU time in ms (smoothed); null when timestamp queries are unsupported or no result arrived yet. */
     gpuMs: number | null;
-    /** CPU (JavaScript + command submission) time in ms (smoothed). */
-    cpuMs: number;
+    /** CPU (JavaScript + command submission) time in ms (smoothed); null for passes rendered by nodes. */
+    cpuMs: number | null;
 };
 
 const SMOOTHING = 0.15;
@@ -17,20 +18,110 @@ type QueryPools = Record<
 >;
 
 /**
- * Hooks into the renderer's inspector: every render / compute call of a frame gets a timestamp query
- * id (uid); the profiler remembers which section was open when each one started.
+ * Section names for draws issued inside the render pipeline, by the name of the drawn object (three's
+ * post nodes name their full-screen quads, e.g. "Bloom [ High Pass ]"; the scene pass renders the scene
+ * under its pass name) or, failing that, the render target's texture name (our passes name both).
  */
-class SectionInspector extends InspectorBase {
-    section = 'Frame';
-    readonly owners = new Map<string, string>();
+const PASS_NAMES: [prefix: string, section: string][] = [
+    ['Shadow Map', 'Shadows'],
+    ['Scene', 'Scene'],
+    ['AO', 'GTAO'],
+    ['GTAONode', 'GTAO'],
+    ['Denoise', 'GTAO'],
+    ['SSR', 'SSR'],
+    ['TAAU', 'TAAU'],
+    ['TRAA', 'TAA'],
+    ['Bloom', 'Bloom'],
+    ['UnrealBloomPass', 'Bloom'],
+    ['SMAANode', 'SMAA'],
+    ['FSR1', 'FSR 1'],
+    ['Render Pipeline', 'Output'],
+    // Our own passes (core/postfx) are named after their section.
+    ['Contact shadows', 'Contact shadows'],
+    ['Light shafts', 'Light shafts'],
+    ['Composite', 'Composite'],
+    ['DoF', 'DoF'],
+    ['Motion blur', 'Motion blur'],
+    ['Eye adaptation', 'Eye adaptation'],
+    ['Lens flare', 'Lens flare'],
+    ['Output', 'Output'],
+];
 
-    override beginRender(uid: string): void {
-        this.owners.set(uid, this.section);
+/** Draws that are not named after a pass (the water reflection, custom passes) keep the open section. */
+function passSection(
+    object: Object3D | null,
+    target: RenderTarget | null,
+): string | null {
+    const names = [object?.name, target?.texture?.name];
+
+    for (const raw of names) {
+        if (!raw) {
+            continue;
+        }
+
+        // "Contact shadows [ RTT ]" → "Contact shadows".
+        const name = raw.replace(/\s*\[.*\]$/, '');
+
+        for (const [prefix, section] of PASS_NAMES) {
+            if (name.startsWith(prefix)) {
+                return section;
+            }
+        }
+
+        if (object && 'isQuadMesh' in object) {
+            return name;
+        }
     }
 
-    override beginCompute(uid: string): void {
-        this.owners.set(uid, this.section);
-    }
+    return null;
+}
+
+/**
+ * Hooks into the renderer's inspector: every render / compute call of a frame gets a timestamp query
+ * id (uid); the profiler remembers which section each one belongs to. It stays a plain InspectorBase
+ * (methods assigned per instance): three only warns about TSL `.toInspector()` on WebGL for other
+ * inspector classes.
+ */
+function createInspector(profiler: {
+    section: string;
+    detailed: boolean;
+    owners: Map<string, string>;
+    seen(section: string): void;
+}): InspectorBase {
+    const inspector = new InspectorBase();
+    inspector.beginRender = (
+        uid: string,
+        scene: Object3D,
+        _camera: unknown,
+        target: RenderTarget | null,
+    ) => {
+        const named = profiler.detailed ? passSection(scene, target) : null;
+        profiler.owners.set(uid, named ?? profiler.section);
+    };
+    // Listed when they finish: nested draws (a pass rendered on demand by a later one) come first.
+    inspector.finishRender = (uid: string) => {
+        const section = profiler.owners.get(uid);
+
+        if (section) {
+            profiler.seen(section);
+        }
+    };
+    inspector.beginCompute = (
+        uid: string,
+        computeNodes: { name?: string } | { name?: string }[],
+    ) => {
+        const node = Array.isArray(computeNodes)
+            ? computeNodes[0]
+            : computeNodes;
+        const named = profiler.detailed && node?.name ? node.name : null;
+        profiler.owners.set(uid, named ?? profiler.section);
+
+        if (named) {
+            profiler.seen(named);
+        }
+    };
+
+    return inspector;
 }
 
 /**
@@ -38,33 +129,47 @@ class SectionInspector extends InspectorBase {
  *
  * - GPU: the renderer's timestamp queries (`trackTimestamp`), one per render / compute call, on WebGPU
  *   (`timestamp-query`) and on WebGL 2 (EXT_disjoint_timer_query_webgl2). Results arrive a few frames
- *   late and are attributed to the section that issued each call.
- * - CPU: performance.now() between `mark`s.
+ *   late. Calls are attributed to the pass they belong to by name (the passes of the render pipeline,
+ *   which all run inside one `render()`), otherwise to the section opened with `mark()`.
+ * - CPU: performance.now() between `mark`s (not available per pipeline pass).
  *
  * With `detailed` off, the frame is a single section; its GPU total still drives dynamic resolution.
  */
 export class GpuProfiler {
-    private readonly inspector = new SectionInspector();
+    private readonly state = {
+        section: 'Frame',
+        detailed: false,
+        owners: new Map<string, string>(),
+        seen: (section: string) => {
+            if (!this.frameOrder.includes(section)) {
+                this.frameOrder.push(section);
+            }
+        },
+    };
     private open: { name: string; start: number } | null = null;
     private cpu = new Map<string, number>();
     private gpu = new Map<string, number>();
     private order: string[] = [];
     private frameOrder: string[] = [];
     private resolving = false;
-    /** Per-pass sections (true) or a single whole-frame measurement (false). */
-    detailed = false;
     /** Total GPU time of the most recent measured frame in ms (null until the first result / unsupported). */
     lastMs: number | null = null;
 
     constructor(private readonly renderer: GameRenderer) {
-        renderer.inspector = this.inspector;
+        renderer.inspector = createInspector(this.state);
+    }
+
+    /** Per-pass sections (true) or a single whole-frame measurement (false). */
+    get detailed(): boolean {
+        return this.state.detailed;
+    }
+
+    set detailed(value: boolean) {
+        this.state.detailed = value;
     }
 
     get supported(): boolean {
-        const backend = this.renderer.backend as {
-            trackTimestamp?: boolean;
-            hasFeature?: (name: string) => boolean;
-        };
+        const backend = this.renderer.backend as { trackTimestamp?: boolean };
 
         return !!backend.trackTimestamp;
     }
@@ -93,7 +198,7 @@ export class GpuProfiler {
 
         this.stop();
         this.order = this.frameOrder;
-        this.inspector.section = 'Frame';
+        this.state.section = 'Frame';
         void this.resolve();
     }
 
@@ -102,14 +207,14 @@ export class GpuProfiler {
         return this.order.map((name) => ({
             name,
             gpuMs: this.gpu.get(name) ?? null,
-            cpuMs: this.cpu.get(name) ?? 0,
+            cpuMs: this.cpu.get(name) ?? null,
         }));
     }
 
     private start(name: string): void {
         this.open = { name, start: performance.now() };
-        this.frameOrder.push(name);
-        this.inspector.section = name;
+        this.state.seen(name);
+        this.state.section = name;
     }
 
     private stop(): void {
@@ -124,6 +229,7 @@ export class GpuProfiler {
         }
 
         this.resolving = true;
+        const owners = this.state.owners;
 
         try {
             const renderer = this.renderer;
@@ -142,7 +248,7 @@ export class GpuProfiler {
             for (const pool of Object.values(pools)) {
                 for (const [uid, ms] of pool?.timestamps ?? []) {
                     const frame = Number(uid.slice(uid.lastIndexOf(':f') + 2));
-                    const section = this.inspector.owners.get(uid) ?? 'Other';
+                    const section = owners.get(uid) ?? 'Other';
                     const sums = frames.get(frame) ?? new Map<string, number>();
                     sums.set(section, (sums.get(section) ?? 0) + ms);
                     frames.set(frame, sums);
@@ -164,16 +270,16 @@ export class GpuProfiler {
             }
 
             // Forget uids of resolved frames (they are unique per frame).
-            for (const uid of this.inspector.owners.keys()) {
+            for (const uid of owners.keys()) {
                 const frame = Number(uid.slice(uid.lastIndexOf(':f') + 2));
 
                 if (frame <= latest) {
-                    this.inspector.owners.delete(uid);
+                    owners.delete(uid);
                 }
             }
 
-            if (this.inspector.owners.size > 4096) {
-                this.inspector.owners.clear();
+            if (owners.size > 4096) {
+                owners.clear();
             }
         } catch {
             // Device lost / unsupported: keep the CPU timings.

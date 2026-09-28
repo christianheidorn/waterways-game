@@ -761,6 +761,8 @@ export class Game {
             renderScale: this.effectiveRenderScale(),
             passes: this.postFx.passNames,
             renderSize: this.postFx.renderSize,
+            outputSize: this.postFx.outputSize,
+            backend: this.backend,
             profile: this.profiler?.sections(),
             gpuTimers: this.profiler?.supported,
         });
@@ -925,7 +927,7 @@ export class Game {
     }
 
     /**
-     * Device pixel ratio capped by `max_pixel_ratio`: a 2× Retina screen at 1.5 renders 56 % of the native
+     * Device pixel ratio capped by `max_pixel_ratio`: a 2× Retina screen at 1.5 outputs 56 % of the native
      * pixels (like UE's screen percentage on high-DPI displays); the browser upsamples the canvas.
      */
     private displayPixelRatio(): number {
@@ -934,11 +936,14 @@ export class Game {
         return Math.min(window.devicePixelRatio || 1, Math.max(1, cap));
     }
 
-    /** Canvas pixel ratio: capped device pixel ratio × render_scale (the upper bound for dynamic resolution). */
+    /**
+     * Canvas (output) pixel ratio: the capped device pixel ratio, supersampled when render_scale > 1. Below
+     * 1× the canvas stays at the display resolution and the scene is upscaled to it (TAAU / FSR 1).
+     */
     private basePixelRatio(): number {
         const scale = this.manifest?.settings.graphics.render_scale ?? 1;
 
-        return Math.min(this.displayPixelRatio() * scale, 3);
+        return Math.min(this.displayPixelRatio() * Math.max(1, scale), 3);
     }
 
     /** Render scale (× device pixel ratio) the scene is currently rendered at. */
@@ -970,7 +975,7 @@ export class Game {
             this.renderer.setSize(w, h, false);
         }
 
-        // The composer renders at the effective (possibly dynamic) scale; its last pass upscales to the canvas.
+        // The scene renders at the effective (possibly dynamic) scale; TAAU / FSR 1 upscale it to the canvas.
         const effective = Math.min(
             base,
             this.displayPixelRatio() * this.effectiveRenderScale(),
@@ -1123,9 +1128,6 @@ export class Game {
             this.dynamicResolution.reset(g.render_scale);
         }
 
-        // Wet-ground reflections mirror the terrain material; the player gets motion vectors (TAA, blur).
-        this.postFx.setTerrainSurface(this.world.material.uniforms);
-        this.postFx.setDynamicObjects([this.player.object]);
         this.postFx.configure(g);
         this.applyAnisotropy(g.anisotropy);
         this.resize();
@@ -1330,7 +1332,9 @@ export class Game {
                 this.postFx.setSize(w, h, base * scale);
             }
 
+            // 16 converging frames (TAA accumulates the jittered samples, eye adaptation and focus settle).
             for (let i = 0; i < 16; i++) {
+                this.postFx.beginStill();
                 this.renderFrame(0);
             }
 
@@ -1358,6 +1362,7 @@ export class Game {
     /** Renders the current view without editor overlays and posts it to the studio (AI review). */
     private sendScreenshot(requestId: string): void {
         this.world.material.hideBrush();
+        this.postFx.beginStill();
         this.renderFrame(0);
         const src = this.renderer.domElement;
         const scale = Math.min(1, 1280 / src.width);
@@ -1383,6 +1388,7 @@ export class Game {
 
     private captureThumbnail(): string {
         this.world.material.hideBrush();
+        this.postFx.beginStill();
         this.renderFrame(0);
         const src = this.renderer.domElement;
         const canvas = document.createElement('canvas');

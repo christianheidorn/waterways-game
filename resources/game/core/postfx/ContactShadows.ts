@@ -1,125 +1,104 @@
-import * as THREE from 'three';
-import type { Blitter, FrameUniforms } from './common';
-import {
-    colorTarget,
-    FRAME_UNIFORMS,
-    fullscreenMaterial,
-    scaledSize,
-} from './common';
+import * as THREE from 'three/webgpu';
+import { Break, float, Fn, If, Loop, uniform, uv, vec4 } from 'three/tsl';
+import type { FrameContext, Vec4Node } from './common';
+import { ScreenPass } from './common';
+
+const STEPS = 16;
 
 /**
- * Screen-space contact shadows (half resolution): a short ray march from each surface towards the
- * light through the depth buffer catches the small-scale occlusion shadow maps miss (feet, rocks and
+ * Screen-space contact shadows (half the scene resolution): a short ray march from each surface towards
+ * the light through the depth buffer catches the small-scale occlusion shadow maps miss (feet, rocks and
  * grass bases, crevices). The ray length scales with distance so the effect stays a few pixels long.
  * Output: r = light visibility (1 = unshadowed), g = linear depth (for the bilateral upsample).
  */
-const ContactShadowShader = /* glsl */ `
-    ${FRAME_UNIFORMS}
-    uniform vec3 uLightDirView;
-    varying vec2 vUv;
-
-    #define STEPS 16
-
-    void main() {
-        float d = rawDepth(vUv);
-        float z = linearizeDepth(d);
-
-        if (isSky(d)) {
-            gl_FragColor = vec4(1.0, z, 0.0, 1.0);
-            return;
-        }
-
-        vec3 p = viewPosition(vUv, d);
-        vec3 n = viewNormal(vUv, p);
-        float ndl = dot(n, uLightDirView);
-
-        // Faces turned away from the light are already dark (and self-shadow in the shadow map).
-        if (ndl <= 0.02 || z > 400.0) {
-            gl_FragColor = vec4(1.0, z, 0.0, 1.0);
-            return;
-        }
-
-        // About 5 % of the distance: a few dozen pixels on screen at any range.
-        float rayLength = clamp(z * 0.05, 0.3, 4.0);
-        // Assumed occluder thickness: rays towards a light behind the camera pass behind an occluder's
-        // front face, so this must cover the size of rocks and bushes (but not a trunk metres in front).
-        float thickness = clamp(0.3 + z * 0.05, 0.3, 4.0);
-        // Start slightly off the surface (along the normal) to avoid self-intersection.
-        vec3 origin = p + n * (0.03 + z * 0.004);
-        vec3 stepVec = uLightDirView * rayLength / float(STEPS);
-        float jitter = ign(gl_FragCoord.xy);
-        float occlusion = 0.0;
-
-        for (int i = 0; i < STEPS; i++) {
-            vec3 q = origin + stepVec * (float(i) + jitter);
-            vec2 uv = viewToUv(q);
-
-            if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
-                break;
-            }
-
-            float sceneZ = linearDepth(uv);
-            float delta = -q.z - sceneZ;
-
-            if (delta > 0.02 + z * 0.003 && delta < thickness) {
-                // Fade with distance along the ray so the shadow tapers off.
-                occlusion = 1.0 - (float(i) + jitter) / float(STEPS);
-                break;
-            }
-        }
-
-        // Grazing light: fade to avoid acne on surfaces almost parallel to the light.
-        occlusion *= smoothstep(0.02, 0.2, ndl) * (1.0 - smoothstep(200.0, 400.0, z));
-        gl_FragColor = vec4(1.0 - occlusion, z, 0.0, 1.0);
-    }
-`;
-
 export class ContactShadows {
-    private readonly target: THREE.WebGLRenderTarget;
-    private readonly material: THREE.ShaderMaterial;
-    readonly lightDirView = new THREE.Vector3();
+    readonly pass = new ScreenPass('Contact shadows', {
+        filter: THREE.NearestFilter,
+    });
+    /** Direction towards the light in view space. */
+    readonly lightDirView = uniform(new THREE.Vector3(0, 1, 0));
 
-    constructor(
-        uniforms: FrameUniforms,
-        private readonly blitter: Blitter,
-        width: number,
-        height: number,
-    ) {
-        this.target = colorTarget(
-            scaledSize(width, 0.5),
-            scaledSize(height, 0.5),
-            {
-                minFilter: THREE.NearestFilter,
-                magFilter: THREE.NearestFilter,
-            },
-        );
-        this.material = fullscreenMaterial({
-            name: 'WaterwaysContactShadows',
-            uniforms: {
-                ...uniforms,
-                uLightDirView: { value: this.lightDirView },
-            },
-            fragmentShader: ContactShadowShader,
-        });
+    constructor(f: FrameContext) {
+        const pass = this.pass;
+        pass.fragment = Fn(() => {
+            const vUv = uv();
+            const texel = pass.resolution.reciprocal();
+            const d = f.rawDepth(vUv);
+            const z = f.linearize(d);
+            const result = vec4(1, z, 0, 1).toVar();
+
+            If(f.isSky(d).not(), () => {
+                const p = f.viewPosition(vUv, d).toVar();
+                const n = f.viewNormal(vUv, p, texel).toVar();
+                const ndl = n.dot(this.lightDirView).toVar();
+
+                // Faces turned away from the light are already dark (and self-shadow in the shadow map).
+                If(ndl.greaterThan(0.02).and(z.lessThan(400)), () => {
+                    // About 5 % of the distance: a few dozen pixels on screen at any range.
+                    const rayLength = z.mul(0.05).clamp(0.3, 4);
+                    // Assumed occluder thickness: rays towards a light behind the camera pass behind an
+                    // occluder's front face, so this must cover rocks and bushes (not a trunk metres away).
+                    const thickness = z
+                        .mul(0.05)
+                        .add(0.3)
+                        .clamp(0.3, 4)
+                        .toVar();
+                    // Start slightly off the surface (along the normal) to avoid self-intersection.
+                    const origin = p.add(n.mul(z.mul(0.004).add(0.03))).toVar();
+                    const stepVec = this.lightDirView
+                        .mul(rayLength.div(STEPS))
+                        .toVar();
+                    const jitter = f.noise().toVar();
+                    const occlusion = float(0).toVar();
+                    const bias = z.mul(0.003).add(0.02).toVar();
+
+                    Loop(STEPS, ({ i }) => {
+                        const t = float(i).add(jitter);
+                        const q = origin.add(stepVec.mul(t)).toVar();
+                        const suv = f.viewToUv(q).toVar();
+
+                        If(
+                            suv.x
+                                .lessThan(0)
+                                .or(suv.y.lessThan(0))
+                                .or(suv.x.greaterThan(1))
+                                .or(suv.y.greaterThan(1)),
+                            () => {
+                                Break();
+                            },
+                        );
+
+                        const delta = q.z.negate().sub(f.linearDepth(suv));
+
+                        If(
+                            delta
+                                .greaterThan(bias)
+                                .and(delta.lessThan(thickness)),
+                            () => {
+                                // Fade with distance along the ray so the shadow tapers off.
+                                occlusion.assign(t.div(STEPS).oneMinus());
+                                Break();
+                            },
+                        );
+                    });
+
+                    // Grazing light: fade to avoid acne on surfaces almost parallel to the light.
+                    occlusion.mulAssign(
+                        ndl
+                            .smoothstep(0.02, 0.2)
+                            .mul(z.smoothstep(200, 400).oneMinus()),
+                    );
+                    result.x.assign(occlusion.oneMinus());
+                });
+            });
+
+            return result;
+        })() as Vec4Node;
     }
 
-    get texture(): THREE.Texture {
-        return this.target.texture;
-    }
-
-    setSize(width: number, height: number): void {
-        this.target.setSize(scaledSize(width, 0.5), scaledSize(height, 0.5));
-    }
-
-    render(lightDir: THREE.Vector3, camera: THREE.Camera): void {
-        this.lightDirView
+    setLight(lightDir: THREE.Vector3, camera: THREE.Camera): void {
+        this.lightDirView.value
             .copy(lightDir)
             .transformDirection(camera.matrixWorldInverse);
-        this.blitter.draw(this.material, this.target);
-    }
-
-    dispose(): void {
-        this.target.dispose();
-        this.material.dispose();
     }
 }

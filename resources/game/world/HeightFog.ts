@@ -10,6 +10,7 @@ import {
     positionView,
     positionWorld,
     pow,
+    renderGroup,
     select,
     uniform,
     vec4,
@@ -34,14 +35,18 @@ export const fogSunParams = new THREE.Vector4(0, 1, 0, 0);
 /** Linear colour added to the fog towards the sun. */
 export const fogSunColor = new THREE.Vector3(1, 0.8, 0.6);
 
-const hfParams = uniform(heightFogParams);
-const hfSun = uniform(fogSunParams);
-const hfSunColor = uniform(fogSunColor);
+// Render-group uniforms: shared by all materials and refreshed once per render. Object-group uniforms
+// would go stale on objects three considers static (built-in materials whose object never changes).
+const hfParams = uniform(heightFogParams).setGroup(renderGroup);
+const hfSun = uniform(fogSunParams).setGroup(renderGroup);
+const hfSunColor = uniform(fogSunColor).setGroup(renderGroup);
 
 /** Scene fog node for the given distance fog (colour and density are read from it every frame). */
 export function createHeightFogNode(fog: THREE.FogExp2): THREE.Node {
-    const fogColor = uniform(fog.color);
-    const fogDensity = uniform(fog.density).onRenderUpdate(() => fog.density);
+    const fogColor = uniform(fog.color).setGroup(renderGroup);
+    const fogDensity = uniform(fog.density)
+        .setGroup(renderGroup)
+        .onRenderUpdate(() => fog.density);
 
     return Fn(() => {
         const depth = positionView.z.negate();

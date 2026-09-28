@@ -109,6 +109,11 @@ export type GpuTypeConfig = {
     falloff: { start: number; min: number } | null;
     stiffness: number;
     uniforms: FoliageTypeUniforms;
+    /**
+     * Distance (m) added to every LOD switch: kinds whose LODs used to switch per cell keep their
+     * detail about as far as before (the nearest point of a cell decided).
+     */
+    lodSlack: number;
     /** Distance (m) past the LOD1 switch within which instances still cast (LOD0) shadows. */
     shadowSlack: number;
     /** Bounding sphere of every LOD in instance space (scale 1). */
@@ -673,7 +678,11 @@ export class GpuFoliageType {
 
             for (let l = 1; l < lodCount; l++) {
                 If(
-                    dist.greaterThan(lodScale.mul(config.lodDistances[l])),
+                    dist.greaterThan(
+                        lodScale
+                            .mul(config.lodDistances[l])
+                            .add(config.lodSlack),
+                    ),
                     () => {
                         lod.assign(l);
                     },
@@ -686,7 +695,7 @@ export class GpuFoliageType {
                 lodCount > 1
                     ? lodScale
                           .mul(config.lodDistances[1])
-                          .add(config.shadowSlack)
+                          .add(config.lodSlack + config.shadowSlack)
                     : cullDistance;
 
             If(

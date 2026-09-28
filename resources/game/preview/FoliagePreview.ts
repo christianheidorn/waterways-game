@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
+import { installWebGpuCompat } from '../core/renderer';
 import type { FoliageType } from '../shared/types';
 import { SimplexNoise } from '../util/noise';
 import { Foliage, placementAllowed } from '../world/Foliage';
@@ -204,18 +205,20 @@ export class FoliagePreview {
 
         document.addEventListener('visibilitychange', this.updateLoop);
         this.applyMode();
-        this.ready = this.renderer.init().then(() => {
-            if (this.disposed) {
-                return;
-            }
+        this.ready = installWebGpuCompat()
+            .then(() => this.renderer.init())
+            .then(() => {
+                if (this.disposed) {
+                    return;
+                }
 
-            this.initialized = true;
-            // WebGPU: GPU-driven foliage culling (see frame()).
-            this.foliage.setRenderer(this.renderer);
-            this.buildEnvironment();
-            this.resize();
-            this.updateLoop();
-        });
+                this.initialized = true;
+                // WebGPU: GPU-driven foliage culling (see frame()).
+                this.foliage.setRenderer(this.renderer);
+                this.buildEnvironment();
+                this.resize();
+                this.updateLoop();
+            });
     }
 
     /** Sky image based lighting, same setup as the game's Atmosphere. */

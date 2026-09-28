@@ -1467,10 +1467,13 @@ export class Foliage {
             falloff: renderer.falloff,
             stiffness: windStiffness(renderer.type.kind),
             uniforms: renderer.uniforms,
-            // Split kinds cast LOD0 shadows up to the split; others per cell (as CPU culling did).
+            // Split kinds switch LOD0 → LOD1 per instance (+ shadow slack as the near subset had);
+            // the others switched per cell (nearest point), so their LODs reach about half a cell
+            // further, and so do their LOD0 shadows.
+            lodSlack: renderer.splitRoles ? 0 : renderer.cellSize * 0.5,
             shadowSlack: renderer.splitRoles
                 ? LOD_SPLIT_SLACK
-                : renderer.cellSize,
+                : renderer.cellSize * 0.5,
             center: sphere.center,
             radius: sphere.radius,
         };

@@ -39,7 +39,7 @@ export type HiZNodes = {
  * Built each frame by compute from the scene pass depth of the PREVIOUS frame: level 1 is the depth at
  * half resolution, every further level halves again; each texel keeps the FARTHEST depth of the texels
  * it covers (non-power-of-two sizes round up, so a texel always covers all of its children). The
- * levels live in one float storage buffer; `occluded()` tests a bounding sphere, reprojected with the
+ * levels live in one float storage buffer; `occludedNode()` tests a bounding sphere, reprojected with the
  * previous frame's camera, against 2×2 texels of the level where its screen rectangle spans ≤ 2 texels.
  *
  * Storage is allocated for the largest depth size seen; smaller sizes only change uniforms.
@@ -56,8 +56,9 @@ export class HiZ {
     private texture: THREE.Texture | null = null;
     /** Depth size (pixels) of the source texture. */
     readonly size = uniform(new THREE.Vector2(1, 1));
+    /** Levels in use for the current depth size. */
     readonly levels = uniform(1);
-    /** Proxy test nodes are created against these (rebuilt with the buffers). */
+    /** Bumped whenever the buffers are reallocated: culling passes built on them must be rebuilt. */
     version = 0;
 
     /**

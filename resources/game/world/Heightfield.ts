@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 
 export type GridRect = { x0: number; z0: number; x1: number; z1: number };
 

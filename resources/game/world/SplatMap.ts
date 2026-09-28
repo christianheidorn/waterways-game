@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { SPLAT_CHANNELS } from '../shared/types';
 import type { TerrainLayer } from '../shared/types';
 import type { GridRect, Heightfield } from './Heightfield';

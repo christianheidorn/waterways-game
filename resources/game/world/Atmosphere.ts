@@ -1,8 +1,12 @@
-import * as THREE from 'three';
-import { PMREMGenerator } from 'three/webgpu';
+import * as THREE from 'three/webgpu';
 import type { GameRenderer } from '../core/renderer';
 import type { EnvironmentSettings, ShadowQuality } from '../shared/types';
-import { fogSunColor, fogSunParams, heightFogParams } from './HeightFog';
+import {
+    createHeightFogNode,
+    fogSunColor,
+    fogSunParams,
+    heightFogParams,
+} from './HeightFog';
 import { extinction, SkyDome, skyRadiance } from './SkyDome';
 import type { CloudQuality, SkyParams } from './SkyDome';
 
@@ -92,7 +96,7 @@ export class Atmosphere {
     flash = 0;
     readonly flashDirection = new THREE.Vector3(0, 1, 0);
     private flashLight: THREE.DirectionalLight;
-    private pmrem: PMREMGenerator;
+    private pmrem: THREE.PMREMGenerator;
     private envTarget: THREE.RenderTarget | null = null;
     private envScene = new THREE.Scene();
     private envSky: SkyDome;
@@ -161,8 +165,10 @@ export class Atmosphere {
 
         this.fog = new THREE.FogExp2(0xbfd1e5, 0.0002);
         scene.fog = this.fog;
+        // Distance + height fog with sun in-scattering for every node material (replaces scene.fog).
+        scene.fogNode = createHeightFogNode(this.fog);
 
-        this.pmrem = new PMREMGenerator(renderer);
+        this.pmrem = new THREE.PMREMGenerator(renderer);
     }
 
     apply(input: EnvironmentSettings): void {
@@ -226,10 +232,9 @@ export class Atmosphere {
         this.renderer.shadowMap.enabled = size > 0;
         this.sun.castShadow = size > 0;
 
-        if (size > 0 && this.sun.shadow.mapSize.x !== size) {
+        // The shadow node resizes its map to mapSize on the next shadow update.
+        if (size > 0) {
             this.sun.shadow.mapSize.set(size, size);
-            this.sun.shadow.map?.dispose();
-            this.sun.shadow.map = null;
         }
 
         const cam = this.sun.shadow.camera;
@@ -577,8 +582,10 @@ export class Atmosphere {
 
     private regenerateEnvironment(): void {
         this.envDirty = false;
-        const target = this.pmrem.fromScene(this.envScene, 0, 0.1, 2000);
-        this.envTarget?.dispose();
+        // Re-rendered into the same target: materials keep their environment binding (no rebuilds).
+        const target = this.pmrem.fromScene(this.envScene, 0, 0.1, 2000, {
+            renderTarget: this.envTarget,
+        });
         this.envTarget = target;
         this.scene.environment = target.texture;
     }

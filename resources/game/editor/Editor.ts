@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { Input } from '../core/Input';
 import type { EditorToolGroup } from '../shared/protocol';
 import { NO_WATER } from '../shared/types';

@@ -1,86 +1,113 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import {
+    abs,
+    acos,
+    cameraPosition,
+    cameraProjectionMatrix,
+    clamp,
+    cos,
+    dot,
+    exp,
+    float,
+    floor,
+    Fn,
+    fract,
+    If,
+    length,
+    max,
+    min,
+    mix,
+    modelViewMatrix,
+    normalize,
+    positionLocal,
+    positionWorld,
+    pow,
+    sin,
+    smoothstep,
+    sqrt,
+    uniform,
+    vec2,
+    vec3,
+    vec4,
+} from 'three/tsl';
+
+type Float = THREE.Node<'float'>;
+type Vec2 = THREE.Node<'vec2'>;
+type Vec3 = THREE.Node<'vec3'>;
+type Vec4 = THREE.Node<'vec4'>;
 
 export type CloudQuality = 'off' | 'low' | 'medium' | 'high';
 
 /** Octaves / light-march steps / cirrus layer per cloud quality. */
-const CLOUD_DEFINES: Record<
+const CLOUD_QUALITY: Record<
     CloudQuality,
-    { octaves: number; steps: number; cirrus: number; clouds: number }
+    { octaves: number; steps: number; cirrus: boolean; clouds: boolean }
 > = {
-    off: { octaves: 1, steps: 0, cirrus: 0, clouds: 0 },
-    low: { octaves: 3, steps: 0, cirrus: 0, clouds: 1 },
-    medium: { octaves: 4, steps: 2, cirrus: 1, clouds: 1 },
-    high: { octaves: 6, steps: 4, cirrus: 1, clouds: 1 },
+    off: { octaves: 1, steps: 0, cirrus: false, clouds: false },
+    low: { octaves: 3, steps: 0, cirrus: false, clouds: true },
+    medium: { octaves: 4, steps: 2, cirrus: true, clouds: true },
+    high: { octaves: 6, steps: 4, cirrus: true, clouds: true },
 };
+
+type SkyUniforms = ReturnType<typeof createUniforms>;
+
+function createUniforms(stars: boolean) {
+    return {
+        turbidity: uniform(2),
+        rayleigh: uniform(1),
+        mieCoefficient: uniform(0.005),
+        mieDirectionalG: uniform(0.8),
+        sunPosition: uniform(new THREE.Vector3(0, 1, 0)),
+        moonPosition: uniform(new THREE.Vector3(0, -1, 0)),
+        time: uniform(0),
+        cloudCoverage: uniform(0.3),
+        cloudDensity: uniform(0.5),
+        cloudSoftness: uniform(0.3),
+        cloudDarkness: uniform(0),
+        cloudOffset: uniform(new THREE.Vector2()),
+        overcast: uniform(0),
+        night: uniform(0),
+        horizonFog: uniform(0),
+        horizonColor: uniform(new THREE.Color()),
+        deckColor: uniform(new THREE.Color(1, 1, 1)),
+        flash: uniform(0),
+        flashDirection: uniform(new THREE.Vector3(0, 1, 0)),
+        showSunDisc: uniform(1),
+        showStars: uniform(stars ? 1 : 0),
+    };
+}
 
 /**
  * Physically-inspired sky dome: Preetham scattering (as in three's Sky), a wind-driven fBm cloud layer
  * with self-shadowing towards the sun, storm darkening / overcast desaturation, stars and a moon at
  * night, a horizon band that blends into the scene fog, and lightning flashes lighting the clouds.
+ *
+ * Everything that only depends on the uniforms (scattering coefficients, sun intensity, transmittance
+ * towards the sun) is evaluated once per draw on the CPU instead of per pixel.
  */
 export class SkyDome extends THREE.Mesh<
     THREE.BoxGeometry,
-    THREE.ShaderMaterial
+    THREE.MeshBasicNodeMaterial
 > {
-    readonly uniforms: {
-        turbidity: THREE.IUniform<number>;
-        rayleigh: THREE.IUniform<number>;
-        mieCoefficient: THREE.IUniform<number>;
-        mieDirectionalG: THREE.IUniform<number>;
-        sunPosition: THREE.IUniform<THREE.Vector3>;
-        moonPosition: THREE.IUniform<THREE.Vector3>;
-        time: THREE.IUniform<number>;
-        cloudCoverage: THREE.IUniform<number>;
-        cloudDensity: THREE.IUniform<number>;
-        cloudSoftness: THREE.IUniform<number>;
-        cloudDarkness: THREE.IUniform<number>;
-        cloudOffset: THREE.IUniform<THREE.Vector2>;
-        overcast: THREE.IUniform<number>;
-        night: THREE.IUniform<number>;
-        horizonFog: THREE.IUniform<number>;
-        horizonColor: THREE.IUniform<THREE.Color>;
-        deckColor: THREE.IUniform<THREE.Color>;
-        flash: THREE.IUniform<number>;
-        flashDirection: THREE.IUniform<THREE.Vector3>;
-        showSunDisc: THREE.IUniform<number>;
-        showStars: THREE.IUniform<number>;
-    };
+    readonly uniforms: SkyUniforms;
+    private readonly derived: DerivedUniforms;
     private quality: CloudQuality | null = null;
 
     constructor(quality: CloudQuality = 'medium', stars = true) {
-        const uniforms = {
-            turbidity: { value: 2 },
-            rayleigh: { value: 1 },
-            mieCoefficient: { value: 0.005 },
-            mieDirectionalG: { value: 0.8 },
-            sunPosition: { value: new THREE.Vector3(0, 1, 0) },
-            moonPosition: { value: new THREE.Vector3(0, -1, 0) },
-            time: { value: 0 },
-            cloudCoverage: { value: 0.3 },
-            cloudDensity: { value: 0.5 },
-            cloudSoftness: { value: 0.3 },
-            cloudDarkness: { value: 0 },
-            cloudOffset: { value: new THREE.Vector2() },
-            overcast: { value: 0 },
-            night: { value: 0 },
-            horizonFog: { value: 0 },
-            horizonColor: { value: new THREE.Color() },
-            deckColor: { value: new THREE.Color(1, 1, 1) },
-            flash: { value: 0 },
-            flashDirection: { value: new THREE.Vector3(0, 1, 0) },
-            showSunDisc: { value: 1 },
-            showStars: { value: stars ? 1 : 0 },
-        };
-        const material = new THREE.ShaderMaterial({
+        const material = new THREE.MeshBasicNodeMaterial({
             name: 'SkyDome',
-            uniforms,
-            vertexShader: SKY_VERTEX,
-            fragmentShader: SKY_FRAGMENT,
             side: THREE.BackSide,
             depthWrite: false,
         });
+        material.fog = false;
+        material.lights = false;
+        // Projected onto the far plane: never clipped by the camera far distance.
+        material.vertexNode = cameraProjectionMatrix
+            .mul(modelViewMatrix)
+            .mul(vec4(positionLocal, 1)).xyww;
         super(new THREE.BoxGeometry(1, 1, 1), material);
-        this.uniforms = uniforms;
+        this.uniforms = createUniforms(stars);
+        this.derived = createDerived(this.uniforms);
         this.frustumCulled = false;
         // Drawn after the opaque world so early-z skips every covered pixel.
         this.renderOrder = 1000;
@@ -93,13 +120,11 @@ export class SkyDome extends THREE.Mesh<
         }
 
         this.quality = quality;
-        const d = CLOUD_DEFINES[quality] ?? CLOUD_DEFINES.medium;
-        this.material.defines = {
-            CLOUDS: d.clouds,
-            CLOUD_OCTAVES: d.octaves,
-            CLOUD_LIGHT_STEPS: d.steps,
-            CIRRUS: d.cirrus,
-        };
+        this.material.colorNode = skyColor(
+            this.uniforms,
+            this.derived,
+            CLOUD_QUALITY[quality] ?? CLOUD_QUALITY.medium,
+        );
         this.material.needsUpdate = true;
     }
 
@@ -146,6 +171,17 @@ function prepare(p: SkyParams): void {
     }
 }
 
+/** Inverse optical path length factor for a view direction with the given y (Preetham). */
+function inversePath(dirY: number): number {
+    const zenith = Math.acos(Math.max(0, dirY));
+
+    return (
+        1 /
+        (Math.cos(zenith) +
+            0.15 * Math.pow(93.885 - (zenith * 180) / Math.PI, -1.253))
+    );
+}
+
 /** Atmospheric transmittance (0-1 per channel) looking along a direction with the given y. */
 export function extinction(
     dirY: number,
@@ -153,11 +189,7 @@ export function extinction(
     out: THREE.Color,
 ): THREE.Color {
     prepare(p);
-    const zenith = Math.acos(Math.max(0, dirY));
-    const inv =
-        1 /
-        (Math.cos(zenith) +
-            0.15 * Math.pow(93.885 - (zenith * 180) / Math.PI, -1.253));
+    const inv = inversePath(dirY);
 
     return out.setRGB(
         Math.exp(-(BETA_R[0] * 8.4e3 + BETA_M[0] * 1.25e3) * inv),
@@ -175,11 +207,7 @@ export function skyRadiance(
 ): THREE.Color {
     prepare(p);
     const sunE = sunIntensity(sun.y);
-    const zenith = Math.acos(Math.max(0, dir.y));
-    const inv =
-        1 /
-        (Math.cos(zenith) +
-            0.15 * Math.pow(93.885 - (zenith * 180) / Math.PI, -1.253));
+    const inv = inversePath(dir.y);
     const cosTheta = dir.dot(sun);
     const rc = cosTheta * 0.5 + 0.5;
     const rPhase = 0.05968310365946075 * (1 + rc * rc);
@@ -203,290 +231,507 @@ export function skyRadiance(
     return out.setRGB(rgb[0], rgb[1] + 0.0003, rgb[2] + 0.00075);
 }
 
-// ---------------------------------------------------------------- shaders
+// ---------------------------------------------------------------- per-draw constants
 
-const SKY_VERTEX = /* glsl */ `
-uniform vec3 sunPosition;
-uniform float rayleigh;
-uniform float turbidity;
-uniform float mieCoefficient;
+type DerivedUniforms = ReturnType<typeof createDerived>;
 
-varying vec3 vWorldPosition;
-varying vec3 vSunDirection;
-varying vec3 vBetaR;
-varying vec3 vBetaM;
-varying float vSunE;
-varying vec3 vSunFex;
+/** Uniform-only terms of the sky shader, recomputed on the CPU before each draw. */
+function createDerived(u: SkyUniforms) {
+    const params = (): SkyParams => ({
+        turbidity: u.turbidity.value,
+        rayleigh: u.rayleigh.value,
+        mieCoefficient: u.mieCoefficient.value,
+        mieDirectionalG: u.mieDirectionalG.value,
+    });
+    const sunDir = new THREE.Vector3();
+    const fex = new THREE.Color();
 
-const float e = 2.718281828459045;
-const float pi = 3.141592653589793;
-const vec3 totalRayleigh = vec3( 5.804542996261093E-6, 1.3562911419845635E-5, 3.0265902468824876E-5 );
-const vec3 MieConst = vec3( 1.8399918514433978E14, 2.7798023919660528E14, 4.0790479543861094E14 );
-const float cutoffAngle = 1.6110731556870734;
-const float steepness = 1.5;
-const float EE = 1000.0;
+    return {
+        sunDirection: uniform(new THREE.Vector3(0, 1, 0)).onRenderUpdate(
+            (_, self) => self.value.copy(u.sunPosition.value).normalize(),
+        ),
+        sunE: uniform(0).onRenderUpdate(() =>
+            sunIntensity(sunDir.copy(u.sunPosition.value).normalize().y),
+        ),
+        betaR: uniform(new THREE.Vector3()).onRenderUpdate((_, self) => {
+            prepare(params());
 
-float sunIntensity( float zenithAngleCos ) {
-	zenithAngleCos = clamp( zenithAngleCos, -1.0, 1.0 );
-	return EE * max( 0.0, 1.0 - pow( e, -( ( cutoffAngle - acos( zenithAngleCos ) ) / steepness ) ) );
+            return self.value.fromArray(BETA_R);
+        }),
+        betaM: uniform(new THREE.Vector3()).onRenderUpdate((_, self) => {
+            prepare(params());
+
+            return self.value.fromArray(BETA_M);
+        }),
+        // Transmittance towards the sun (reddens cloud lighting at sunset).
+        sunFex: uniform(new THREE.Vector3()).onRenderUpdate((_, self) => {
+            sunDir.copy(u.sunPosition.value).normalize();
+            extinction(sunDir.y, params(), fex);
+
+            return self.value.set(fex.r, fex.g, fex.b);
+        }),
+    };
 }
 
-vec3 totalMie( float T ) {
-	float c = ( 0.2 * T ) * 10E-18;
-	return 0.434 * c * MieConst;
-}
+// ---------------------------------------------------------------- shader
 
-void main() {
-	vec4 worldPosition = modelMatrix * vec4( position, 1.0 );
-	vWorldPosition = worldPosition.xyz;
-	gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
-	gl_Position.z = gl_Position.w;
-
-	vSunDirection = normalize( sunPosition );
-	vSunE = sunIntensity( vSunDirection.y );
-	vBetaR = totalRayleigh * rayleigh;
-	vBetaM = totalMie( turbidity ) * mieCoefficient;
-
-	// Transmittance towards the sun (reddens cloud lighting at sunset).
-	float zs = acos( max( 0.0, vSunDirection.y ) );
-	float invS = 1.0 / ( cos( zs ) + 0.15 * pow( 93.885 - ( ( zs * 180.0 ) / pi ), -1.253 ) );
-	vSunFex = exp( -( vBetaR * 8.4E3 + vBetaM * 1.25E3 ) * invS );
-}
-`;
-
-const SKY_FRAGMENT = /* glsl */ `
-varying vec3 vWorldPosition;
-varying vec3 vSunDirection;
-varying vec3 vBetaR;
-varying vec3 vBetaM;
-varying float vSunE;
-varying vec3 vSunFex;
-
-uniform float mieDirectionalG;
-uniform vec3 moonPosition;
-uniform float time;
-uniform float cloudCoverage;
-uniform float cloudDensity;
-uniform float cloudSoftness;
-uniform float cloudDarkness;
-uniform vec2 cloudOffset;
-uniform float overcast;
-uniform float night;
-uniform float horizonFog;
-uniform vec3 horizonColor;
-uniform vec3 deckColor;
-uniform float flash;
-uniform vec3 flashDirection;
-uniform float showSunDisc;
-uniform float showStars;
-
-const float pi = 3.141592653589793;
-const float rayleighZenithLength = 8.4E3;
-const float mieZenithLength = 1.25E3;
-const float sunAngularDiameterCos = 0.9999566769464484;
-const float THREE_OVER_SIXTEENPI = 0.05968310365946075;
-const float ONE_OVER_FOURPI = 0.07957747154594767;
-
-float rayleighPhase( float cosTheta ) {
-	return THREE_OVER_SIXTEENPI * ( 1.0 + pow( cosTheta, 2.0 ) );
-}
-
-float hgPhase( float cosTheta, float g ) {
-	float g2 = pow( g, 2.0 );
-	float inverse = 1.0 / pow( 1.0 - 2.0 * g * cosTheta + g2, 1.5 );
-	return ONE_OVER_FOURPI * ( ( 1.0 - g2 ) * inverse );
-}
+const LUMA = vec3(0.2126, 0.7152, 0.0722);
 
 // Sinless hashes (stable across GPUs).
-vec2 hash22( vec2 i ) {
-	vec3 p = fract( i.xyx * vec3( 0.1031, 0.1030, 0.0973 ) );
-	p += dot( p, p.yzx + 33.33 );
-	return fract( ( p.xx + p.yz ) * p.zy ) * 2.0 - 1.0;
+const hash22 = Fn(([i]: [Vec2]) => {
+    const p = fract(
+        vec3(i.x, i.y, i.x).mul(vec3(0.1031, 0.103, 0.0973)),
+    ).toVar();
+    p.addAssign(dot(p, p.yzx.add(33.33)));
+
+    return fract(p.xx.add(p.yz).mul(p.zy)).mul(2).sub(1);
+}).setLayout({
+    name: 'skyHash22',
+    type: 'vec2',
+    inputs: [{ name: 'i', type: 'vec2' }],
+});
+
+const hash13 = Fn(([p]: [Vec3]) => {
+    const p3 = fract(p.mul(0.1031)).toVar();
+    p3.addAssign(dot(p3, p3.zyx.add(31.32)));
+
+    return fract(p3.x.add(p3.y).mul(p3.z));
+}).setLayout({
+    name: 'skyHash13',
+    type: 'float',
+    inputs: [{ name: 'p', type: 'vec3' }],
+});
+
+/** Gradient noise, roughly -1..1. */
+const gnoise = Fn(([p]: [Vec2]) => {
+    const i = floor(p).toVar();
+    const f = fract(p).toVar();
+    const u = f
+        .mul(f)
+        .mul(f)
+        .mul(f.mul(f.mul(6).sub(15)).add(10));
+    const a = dot(hash22(i), f);
+    const b = dot(hash22(i.add(vec2(1, 0))), f.sub(vec2(1, 0)));
+    const c = dot(hash22(i.add(vec2(0, 1))), f.sub(vec2(0, 1)));
+    const d = dot(hash22(i.add(vec2(1, 1))), f.sub(vec2(1, 1)));
+
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y).mul(1.6);
+}).setLayout({
+    name: 'skyNoise',
+    type: 'float',
+    inputs: [{ name: 'p', type: 'vec2' }],
+});
+
+const cloudFields = new Map<number, (p: Vec2, time: Float) => Float>();
+
+/** Cloud density (0-1) at a point of the cloud plane: `octaves` rotated fBm octaves that evolve over time. */
+function cloudField(octaves: number) {
+    let fn = cloudFields.get(octaves);
+
+    if (!fn) {
+        const layout = Fn(([start, time]: [Vec2, Float]) => {
+            const p = vec2(start).toVar();
+            const evolve = time.mul(0.004);
+            // Accumulated in statement order: `p` changes between octaves.
+            const sum = float(0).toVar();
+            let amp = 0.55;
+            let norm = 0;
+
+            for (let i = 0; i < octaves; i++) {
+                sum.addAssign(gnoise(p.add(evolve.mul(i + 1))).mul(amp));
+                norm += amp;
+                amp *= 0.5;
+
+                if (i < octaves - 1) {
+                    // p = mat2(0.8, -0.6, 0.6, 0.8) · p · 2.03 + 7.31
+                    p.assign(
+                        vec2(
+                            p.x.mul(0.8).add(p.y.mul(0.6)),
+                            p.x.mul(-0.6).add(p.y.mul(0.8)),
+                        )
+                            .mul(2.03)
+                            .add(7.31),
+                    );
+                }
+            }
+
+            return sum.div(norm).mul(0.5).add(0.5);
+        }).setLayout({
+            name: `skyCloudField${octaves}`,
+            type: 'float',
+            inputs: [
+                { name: 'start', type: 'vec2' },
+                { name: 'time', type: 'float' },
+            ],
+        });
+        fn = (p, time) => layout(p, time);
+        cloudFields.set(octaves, fn);
+    }
+
+    return fn;
 }
 
-float hash13( vec3 p3 ) {
-	p3 = fract( p3 * 0.1031 );
-	p3 += dot( p3, p3.zyx + 31.32 );
-	return fract( ( p3.x + p3.y ) * p3.z );
+type CloudSettings = (typeof CLOUD_QUALITY)[CloudQuality];
+
+function skyColor(u: SkyUniforms, d: DerivedUniforms, q: CloudSettings): Vec4 {
+    return Fn(() => {
+        const direction = normalize(positionWorld.sub(cameraPosition)).toVar();
+        const sunDirection = d.sunDirection;
+
+        // ---- Preetham sky (three.js Sky)
+        const zenithAngle = acos(max(0, direction.y));
+        const inverse = float(1).div(
+            cos(zenithAngle).add(
+                pow(
+                    float(93.885).sub(zenithAngle.mul(180 / Math.PI)),
+                    -1.253,
+                ).mul(0.15),
+            ),
+        );
+        const fex = exp(
+            d.betaR
+                .mul(inverse.mul(8.4e3))
+                .add(d.betaM.mul(inverse.mul(1.25e3)))
+                .negate(),
+        ).toVar();
+        const cosTheta = dot(direction, sunDirection).toVar();
+        const rc = cosTheta.mul(0.5).add(0.5);
+        const rPhase = rc.mul(rc).add(1).mul(0.05968310365946075);
+        const g = u.mieDirectionalG;
+        const g2 = g.mul(g);
+        const mPhase = float(1)
+            .sub(g2)
+            .mul(0.07957747154594767)
+            .div(pow(float(1).sub(g.mul(2).mul(cosTheta)).add(g2), 1.5));
+        const ratio = d.betaR
+            .mul(rPhase)
+            .add(d.betaM.mul(mPhase))
+            .div(d.betaR.add(d.betaM))
+            .mul(d.sunE)
+            .toVar();
+        const lin = pow(ratio.mul(float(1).sub(fex)), vec3(1.5)).mul(
+            mix(
+                vec3(1),
+                sqrt(ratio.mul(fex)),
+                clamp(pow(float(1).sub(sunDirection.y), 5), 0, 1),
+            ),
+        );
+        const clearSky = lin.add(fex.mul(0.1)).mul(0.04).toVar();
+        const sky = clearSky.add(vec3(0, 0.0003, 0.00075)).toVar();
+
+        // ---- night sky: faint airglow gradient, stars and the moon
+        const up = max(direction.y, 0);
+        const nightSky = mix(
+            vec3(0.014, 0.02, 0.036),
+            vec3(0.004, 0.007, 0.017),
+            sqrt(up),
+        ).toVar();
+        const moon = vec3(0).toVar();
+        const stars = float(0).toVar();
+
+        If(u.night.greaterThan(0), () => {
+            const moonCos = dot(direction, u.moonPosition).toVar();
+            const moonDisc = smoothstep(0.99962, 0.99972, moonCos);
+            // Craters: a little noise on the disc.
+            const maria = gnoise(direction.xz.sub(u.moonPosition.xz).mul(900))
+                .mul(0.25)
+                .add(0.85);
+            const glow = max(moonCos, 0);
+            moon.assign(
+                vec3(0.9, 0.92, 1).mul(
+                    moonDisc
+                        .mul(maria)
+                        .mul(5)
+                        .add(pow(glow, 900).mul(0.25))
+                        .add(pow(glow, 40).mul(0.04)),
+                ),
+            );
+
+            If(
+                u.showStars.greaterThan(0.5).and(direction.y.greaterThan(0)),
+                () => {
+                    const sp = direction.mul(180).toVar();
+                    const cell = floor(sp).toVar();
+                    const h = hash13(cell).toVar();
+
+                    If(h.greaterThan(0.93), () => {
+                        const centre = cell.add(0.5).add(
+                            vec3(
+                                hash13(cell.add(1.7)),
+                                hash13(cell.add(5.3)),
+                                hash13(cell.add(9.1)),
+                            )
+                                .sub(0.5)
+                                .mul(0.6),
+                        );
+                        const dist = length(sp.sub(centre));
+                        const twinkle = sin(
+                            u.time.mul(h.mul(6).add(2)).add(h.mul(40)),
+                        )
+                            .mul(0.3)
+                            .add(0.7);
+                        stars.assign(
+                            smoothstep(0.2, 0, dist)
+                                .mul(pow(h.sub(0.93).div(0.07), 3))
+                                .mul(twinkle),
+                        );
+                    });
+
+                    // Milky-way-ish band of haze.
+                    const band = exp(
+                        pow(
+                            dot(
+                                direction,
+                                vec3(0.3, 0.4, 0.86).normalize(),
+                            ).mul(3.2),
+                            2,
+                        ).negate(),
+                    );
+                    nightSky.addAssign(
+                        vec3(0.006, 0.0065, 0.009)
+                            .mul(band)
+                            .mul(gnoise(direction.xz.mul(9)).mul(0.5).add(0.6)),
+                    );
+                    stars.mulAssign(smoothstep(0, 0.15, direction.y));
+                },
+            );
+        });
+
+        sky.addAssign(
+            nightSky
+                .add(moon)
+                .add(vec3(1.1, 1.15, 1.3).mul(stars))
+                .mul(u.night),
+        );
+
+        // Solar disc.
+        const sundisc = clamp(
+            cosTheta.sub(0.9999566769464484).mul(50000),
+            0,
+            1,
+        ).mul(u.showSunDisc);
+        const sunDiscColor = min(fex.mul(d.sunE), 80).mul(
+            sundisc.mul(760 * 0.04),
+        );
+
+        // ---- overcast: desaturate and dim the clear-sky scattering
+        const lum = dot(sky, LUMA);
+        sky.assign(
+            mix(
+                sky,
+                vec3(lum).mul(vec3(0.93, 0.97, 1.04)),
+                u.overcast.mul(0.85),
+            ).mul(float(1).sub(u.overcast.mul(0.25))),
+        );
+
+        // Sunlight and ambient reaching the cloud layer.
+        const sunLight = d.sunFex.mul(d.sunE.mul(0.0088));
+        const moonUp = smoothstep(-0.05, 0.2, u.moonPosition.y);
+        const moonLight = vec3(0.03, 0.036, 0.05).mul(u.night.mul(moonUp));
+        const skyLum = dot(clearSky, LUMA);
+        // Scattered clouds are lit by the sky around them; a closed deck has a uniform (CPU) brightness.
+        const ambient = mix(
+            vec3(skyLum).mul(vec3(0.75 * 1.3, 0.85 * 1.3, 1.3)),
+            u.deckColor,
+            u.overcast,
+        )
+            .add(nightSky.mul(u.night.mul(2)))
+            .toVar();
+
+        const color = sky.add(sunDiscColor).toVar();
+
+        if (q.clouds) {
+            If(
+                direction.y
+                    .greaterThan(-0.02)
+                    .and(u.cloudCoverage.greaterThan(0.001)),
+                () => {
+                    const dy = max(direction.y, 0).toVar();
+                    // Curved cloud plane: features shrink towards the horizon without exploding.
+                    const uv = direction.xz
+                        .div(dy.add(0.09))
+                        .mul(0.9)
+                        .add(u.cloudOffset)
+                        .toVar();
+                    const n = cloudField(q.octaves)(uv, u.time).toVar();
+                    // Large scale coverage variation: clear gaps next to dense banks (less so when overcast).
+                    const cov = clamp(
+                        u.cloudCoverage.add(
+                            gnoise(uv.mul(0.16).add(2.3))
+                                .mul(0.22)
+                                .mul(float(1).sub(u.overcast)),
+                        ),
+                        0,
+                        1,
+                    ).toVar();
+                    const threshold = float(1).sub(cov).toVar();
+                    const mask = smoothstep(
+                        threshold.sub(u.cloudSoftness.mul(0.2)),
+                        threshold.add(u.cloudSoftness),
+                        n,
+                    ).toVar();
+                    const thickness = max(0, n.sub(threshold)).toVar();
+
+                    // Self shadowing: march a few steps towards the sun through the density field.
+                    let shadow: Float;
+
+                    if (q.steps > 0) {
+                        const stepDir = sunDirection.xz
+                            .mul(0.12)
+                            .div(max(sunDirection.y, 0.05).add(0.4))
+                            .toVar();
+                        const field = cloudField(Math.min(3, q.octaves));
+                        let sum: Float = float(0);
+
+                        for (let i = 1; i <= q.steps; i++) {
+                            sum = sum.add(
+                                max(
+                                    0,
+                                    field(uv.add(stepDir.mul(i)), u.time).sub(
+                                        threshold,
+                                    ),
+                                ),
+                            );
+                        }
+
+                        shadow = sum.div(q.steps);
+                    } else {
+                        shadow = thickness.mul(0.8);
+                    }
+
+                    const density = u.cloudDensity
+                        .mul(u.overcast.mul(1.6).add(0.6))
+                        .toVar();
+                    const beer = exp(
+                        shadow.mul(6).mul(density).negate(),
+                    ).toVar();
+                    const powder = float(1).sub(exp(thickness.mul(-10)));
+                    const silver = clamp(
+                        float(0.51).div(
+                            pow(float(1.49).sub(cosTheta.mul(1.4)), 1.5),
+                        ),
+                        0,
+                        3,
+                    );
+                    const edge = mask.mul(float(1).sub(mask)).mul(4);
+                    const sunVis = smoothstep(-0.06, 0.08, sunDirection.y);
+
+                    // A closed deck lets little direct sun through.
+                    const direct = sunLight
+                        .mul(sunVis)
+                        .mul(
+                            beer
+                                .mul(mix(0.55, 1, powder))
+                                .mul(0.9)
+                                .add(silver.mul(edge).mul(0.35).mul(beer)),
+                        )
+                        .mul(float(1).sub(u.overcast.mul(0.85)));
+                    const amb = ambient
+                        .mul(mix(1, 0.55, clamp(thickness.mul(2.5), 0, 1)))
+                        .mul(dy.mul(0.2).add(0.8));
+                    const cloudColor = direct
+                        .add(amb)
+                        .add(moonLight.mul(beer.add(0.4)))
+                        .toVar();
+                    // Storm clouds: thick, dark bases.
+                    cloudColor.mulAssign(
+                        float(1).sub(
+                            u.cloudDarkness.mul(
+                                mix(0.25, 0.6, clamp(thickness.mul(3), 0, 1)),
+                            ),
+                        ),
+                    );
+
+                    // Lightning lights the clouds from inside, strongest around the strike.
+                    const flashLobe = pow(
+                        max(dot(direction, u.flashDirection), 0),
+                        6,
+                    );
+                    cloudColor.addAssign(
+                        vec3(0.75, 0.8, 1)
+                            .mul(u.flash)
+                            .mul(flashLobe.mul(2.5).add(0.25))
+                            .mul(thickness.mul(2).add(0.4)),
+                    );
+
+                    const alpha = clamp(
+                        mask.mul(
+                            float(1).sub(
+                                exp(thickness.add(0.05).mul(density).mul(-14)),
+                            ),
+                        ),
+                        0,
+                        1,
+                    )
+                        .mul(smoothstep(-0.02, 0.06, direction.y))
+                        .toVar();
+
+                    // Aerial perspective: distant clouds dissolve into the haze.
+                    const haze = exp(dy.mul(-9));
+                    cloudColor.assign(
+                        mix(
+                            cloudColor,
+                            mix(sky, u.horizonColor, u.overcast),
+                            haze.mul(0.55),
+                        ),
+                    );
+
+                    color.assign(mix(color, cloudColor, alpha));
+
+                    if (q.cirrus) {
+                        // Thin high cirrus streaks.
+                        const cuv = direction.xz
+                            .div(dy.add(0.25))
+                            .mul(vec2(0.9, 3.5))
+                            .add(u.cloudOffset.mul(0.6))
+                            .toVar();
+                        const c = gnoise(cuv.mul(1.4))
+                            .mul(0.5)
+                            .add(gnoise(cuv.mul(3.1).add(4)).mul(0.25));
+                        const cirrus = smoothstep(0.1, 0.6, c)
+                            .mul(float(1).sub(alpha))
+                            .mul(smoothstep(0.02, 0.25, dy))
+                            .mul(clamp(u.cloudCoverage.mul(2), 0, 1))
+                            .mul(float(1).sub(u.overcast));
+                        color.addAssign(
+                            sunLight
+                                .mul(sunVis.mul(0.25))
+                                .add(ambient.mul(0.8))
+                                .mul(cirrus.mul(0.5)),
+                        );
+                    }
+                },
+            );
+        } else {
+            // Overcast with clouds disabled: a flat grey deck.
+            color.assign(
+                mix(
+                    color,
+                    vec3(0.75, 0.8, 1).mul(u.flash.mul(0.4)).add(u.deckColor),
+                    u.overcast.mul(smoothstep(-0.02, 0.1, direction.y)),
+                ),
+            );
+        }
+
+        // Lightning brightens the whole sky a little.
+        color.addAssign(
+            vec3(0.55, 0.6, 0.8).mul(u.flash.mul(0.12).mul(u.overcast.add(1))),
+        );
+
+        // Horizon band that matches the scene fog so distant terrain melts into the sky.
+        const band = exp(
+            abs(direction.y)
+                .negate()
+                .mul(mix(14, 3, u.horizonFog.mul(u.horizonFog))),
+        );
+        color.assign(
+            mix(color, u.horizonColor, clamp(u.horizonFog.mul(band), 0, 1)),
+        );
+        // Below the horizon: fog colour (never the black lower hemisphere).
+        color.assign(
+            mix(color, u.horizonColor, smoothstep(0, -0.08, direction.y)),
+        );
+
+        return vec4(color, 1);
+    })();
 }
-
-float gnoise( vec2 p ) {
-	vec2 i = floor( p );
-	vec2 f = fract( p );
-	vec2 u = f * f * f * ( f * ( f * 6.0 - 15.0 ) + 10.0 );
-	float a = dot( hash22( i ), f );
-	float b = dot( hash22( i + vec2( 1.0, 0.0 ) ), f - vec2( 1.0, 0.0 ) );
-	float c = dot( hash22( i + vec2( 0.0, 1.0 ) ), f - vec2( 0.0, 1.0 ) );
-	float d = dot( hash22( i + vec2( 1.0, 1.0 ) ), f - vec2( 1.0, 1.0 ) );
-	return mix( mix( a, b, u.x ), mix( c, d, u.x ), u.y ) * 1.6;
-}
-
-const mat2 octaveRot = mat2( 0.8, -0.6, 0.6, 0.8 );
-
-// Cloud density (0-1) at a point of the cloud plane.
-float cloudField( vec2 p, int octaves ) {
-	float sum = 0.0;
-	float amp = 0.55;
-	float norm = 0.0;
-	float evolve = time * 0.004;
-	for ( int i = 0; i < CLOUD_OCTAVES; i ++ ) {
-		if ( i >= octaves ) break;
-		sum += amp * gnoise( p + evolve * float( i + 1 ) );
-		norm += amp;
-		amp *= 0.5;
-		p = octaveRot * p * 2.03 + 7.31;
-	}
-	return sum / norm * 0.5 + 0.5;
-}
-
-float cloudShape( float n, float coverage, float soft ) {
-	float threshold = 1.0 - coverage;
-	return smoothstep( threshold - soft * 0.2, threshold + soft, n );
-}
-
-void main() {
-	vec3 direction = normalize( vWorldPosition - cameraPosition );
-
-	// ---- Preetham sky (three.js Sky)
-	float zenithAngle = acos( max( 0.0, direction.y ) );
-	float inverse = 1.0 / ( cos( zenithAngle ) + 0.15 * pow( 93.885 - ( ( zenithAngle * 180.0 ) / pi ), -1.253 ) );
-	float sR = rayleighZenithLength * inverse;
-	float sM = mieZenithLength * inverse;
-	vec3 Fex = exp( -( vBetaR * sR + vBetaM * sM ) );
-	float cosTheta = dot( direction, vSunDirection );
-	float rPhase = rayleighPhase( cosTheta * 0.5 + 0.5 );
-	vec3 betaRTheta = vBetaR * rPhase;
-	float mPhase = hgPhase( cosTheta, mieDirectionalG );
-	vec3 betaMTheta = vBetaM * mPhase;
-	vec3 Lin = pow( vSunE * ( ( betaRTheta + betaMTheta ) / ( vBetaR + vBetaM ) ) * ( 1.0 - Fex ), vec3( 1.5 ) );
-	Lin *= mix( vec3( 1.0 ), pow( vSunE * ( ( betaRTheta + betaMTheta ) / ( vBetaR + vBetaM ) ) * Fex, vec3( 1.0 / 2.0 ) ), clamp( pow( 1.0 - vSunDirection.y, 5.0 ), 0.0, 1.0 ) );
-	vec3 L0 = vec3( 0.1 ) * Fex;
-	vec3 sky = ( Lin + L0 ) * 0.04 + vec3( 0.0, 0.0003, 0.00075 );
-
-	// ---- night sky: faint airglow gradient, stars and the moon
-	float up = max( direction.y, 0.0 );
-	vec3 nightSky = mix( vec3( 0.014, 0.02, 0.036 ), vec3( 0.004, 0.007, 0.017 ), sqrt( up ) );
-	float moonCos = dot( direction, moonPosition );
-	float moonDisc = smoothstep( 0.99962, 0.99972, moonCos );
-	vec3 moon = vec3( 0.0 );
-	if ( night > 0.0 ) {
-		// Craters: a little noise on the disc.
-		float maria = gnoise( ( direction.xz - moonPosition.xz ) * 900.0 ) * 0.25 + 0.85;
-		moon = vec3( 0.9, 0.92, 1.0 ) * ( moonDisc * maria * 5.0 + pow( max( moonCos, 0.0 ), 900.0 ) * 0.25 + pow( max( moonCos, 0.0 ), 40.0 ) * 0.04 );
-	}
-	float stars = 0.0;
-	if ( showStars > 0.5 && night > 0.0 && direction.y > 0.0 ) {
-		vec3 sp = direction * 180.0;
-		vec3 cell = floor( sp );
-		float h = hash13( cell );
-		if ( h > 0.93 ) {
-			vec3 centre = cell + 0.5 + ( vec3( hash13( cell + 1.7 ), hash13( cell + 5.3 ), hash13( cell + 9.1 ) ) - 0.5 ) * 0.6;
-			float d = length( sp - centre );
-			float twinkle = 0.7 + 0.3 * sin( time * ( 2.0 + h * 6.0 ) + h * 40.0 );
-			stars = smoothstep( 0.2, 0.0, d ) * pow( ( h - 0.93 ) / 0.07, 3.0 ) * twinkle;
-		}
-		// Milky-way-ish band of haze.
-		float band = exp( -pow( dot( direction, normalize( vec3( 0.3, 0.4, 0.86 ) ) ) * 3.2, 2.0 ) );
-		nightSky += vec3( 0.006, 0.0065, 0.009 ) * band * ( gnoise( direction.xz * 9.0 ) * 0.5 + 0.6 );
-		stars *= smoothstep( 0.0, 0.15, direction.y );
-	}
-	sky += ( nightSky + moon + vec3( 1.1, 1.15, 1.3 ) * stars ) * night;
-
-	// Solar disc.
-	float sundisc = clamp( ( cosTheta - sunAngularDiameterCos ) * 50000.0, 0.0, 1.0 ) * showSunDisc;
-	vec3 sunDiscColor = ( 760.0 * sundisc ) * min( vSunE * Fex, 80.0 ) * 0.04;
-
-	// ---- overcast: desaturate and dim the clear-sky scattering
-	float lum = dot( sky, vec3( 0.2126, 0.7152, 0.0722 ) );
-	sky = mix( sky, vec3( lum ) * vec3( 0.93, 0.97, 1.04 ), overcast * 0.85 ) * ( 1.0 - overcast * 0.25 );
-
-	// Sunlight and ambient reaching the cloud layer.
-	vec3 sunLight = vSunE * vSunFex * 0.0088;
-	float moonUp = smoothstep( -0.05, 0.2, moonPosition.y );
-	vec3 moonLight = vec3( 0.03, 0.036, 0.05 ) * night * moonUp;
-	float skyLum = dot( ( Lin + L0 ) * 0.04, vec3( 0.2126, 0.7152, 0.0722 ) );
-	// Scattered clouds are lit by the sky around them; a closed deck has a uniform (CPU) brightness.
-	vec3 ambient = mix( vec3( skyLum ) * vec3( 0.75, 0.85, 1.0 ) * 1.3, deckColor, overcast ) + nightSky * 2.0 * night;
-
-	vec3 color = sky + sunDiscColor;
-
-	#if CLOUDS == 1
-	if ( direction.y > -0.02 && cloudCoverage > 0.001 ) {
-		float dy = max( direction.y, 0.0 );
-		// Curved cloud plane: features shrink towards the horizon without exploding.
-		vec2 uv = direction.xz / ( dy + 0.09 ) * 0.9 + cloudOffset;
-		float n = cloudField( uv, CLOUD_OCTAVES );
-		// Large scale coverage variation: clear gaps next to dense banks (less so when overcast).
-		float cov = clamp( cloudCoverage + gnoise( uv * 0.16 + 2.3 ) * 0.22 * ( 1.0 - overcast ), 0.0, 1.0 );
-		float mask = cloudShape( n, cov, cloudSoftness );
-		float thickness = max( 0.0, n - ( 1.0 - cov ) );
-
-		// Self shadowing: march a few steps towards the sun through the density field.
-		float shadow = 0.0;
-		#if CLOUD_LIGHT_STEPS > 0
-		vec2 stepDir = vSunDirection.xz * 0.12 / ( max( vSunDirection.y, 0.05 ) + 0.4 );
-		for ( int i = 1; i <= CLOUD_LIGHT_STEPS; i ++ ) {
-			float ns = cloudField( uv + stepDir * float( i ), CLOUD_OCTAVES > 3 ? 3 : CLOUD_OCTAVES );
-			shadow += max( 0.0, ns - ( 1.0 - cov ) );
-		}
-		shadow /= float( CLOUD_LIGHT_STEPS );
-		#else
-		shadow = thickness * 0.8;
-		#endif
-		float density = cloudDensity * ( 0.6 + overcast * 1.6 );
-		float beer = exp( -shadow * 6.0 * density );
-		float powder = 1.0 - exp( -thickness * 10.0 );
-		float silver = clamp( 0.51 / pow( 1.49 - cosTheta * 1.4, 1.5 ), 0.0, 3.0 );
-		float edge = mask * ( 1.0 - mask ) * 4.0;
-		float sunVis = smoothstep( -0.06, 0.08, vSunDirection.y );
-
-		// A closed deck lets little direct sun through.
-		vec3 direct = sunLight * sunVis * ( beer * mix( 0.55, 1.0, powder ) * 0.9 + silver * edge * 0.35 * beer ) * ( 1.0 - overcast * 0.85 );
-		vec3 amb = ambient * mix( 1.0, 0.55, clamp( thickness * 2.5, 0.0, 1.0 ) ) * ( 0.8 + 0.2 * dy );
-		vec3 cloudColor = direct + amb + moonLight * ( 0.4 + beer );
-		// Storm clouds: thick, dark bases.
-		cloudColor *= 1.0 - cloudDarkness * mix( 0.25, 0.6, clamp( thickness * 3.0, 0.0, 1.0 ) );
-
-		// Lightning lights the clouds from inside, strongest around the strike.
-		float flashLobe = pow( max( dot( direction, flashDirection ), 0.0 ), 6.0 );
-		cloudColor += vec3( 0.75, 0.8, 1.0 ) * flash * ( 0.25 + 2.5 * flashLobe ) * ( 0.4 + thickness * 2.0 );
-
-		float alpha = mask * ( 1.0 - exp( -( thickness + 0.05 ) * density * 14.0 ) );
-		alpha = clamp( alpha, 0.0, 1.0 ) * smoothstep( -0.02, 0.06, direction.y );
-
-		// Aerial perspective: distant clouds dissolve into the haze.
-		float haze = exp( -dy * 9.0 );
-		cloudColor = mix( cloudColor, mix( sky, horizonColor, overcast ), haze * 0.55 );
-
-		color = mix( color, cloudColor, alpha );
-
-		#if CIRRUS == 1
-		// Thin high cirrus streaks.
-		vec2 cuv = direction.xz / ( dy + 0.25 ) * vec2( 0.9, 3.5 ) + cloudOffset * 0.6;
-		float c = gnoise( cuv * 1.4 ) * 0.5 + gnoise( cuv * 3.1 + 4.0 ) * 0.25;
-		float cirrus = smoothstep( 0.1, 0.6, c ) * ( 1.0 - alpha ) * smoothstep( 0.02, 0.25, dy ) * clamp( cloudCoverage * 2.0, 0.0, 1.0 ) * ( 1.0 - overcast );
-		color += ( sunLight * sunVis * 0.25 + ambient * 0.8 ) * cirrus * 0.5;
-		#endif
-	}
-	#endif
-
-	// Overcast with clouds disabled: a flat grey deck.
-	#if CLOUDS == 0
-	color = mix( color, deckColor + vec3( 0.75, 0.8, 1.0 ) * flash * 0.4, overcast * smoothstep( -0.02, 0.1, direction.y ) );
-	#endif
-
-	// Lightning brightens the whole sky a little.
-	color += vec3( 0.55, 0.6, 0.8 ) * flash * 0.12 * ( 1.0 + overcast );
-
-	// Horizon band that matches the scene fog so distant terrain melts into the sky.
-	float band = exp( -abs( direction.y ) * mix( 14.0, 3.0, horizonFog * horizonFog ) );
-	color = mix( color, horizonColor, clamp( horizonFog * band, 0.0, 1.0 ) );
-	// Below the horizon: fog colour (never the black lower hemisphere).
-	color = mix( color, horizonColor, smoothstep( 0.0, -0.08, direction.y ) );
-
-	gl_FragColor = vec4( color, 1.0 );
-
-	#include <tonemapping_fragment>
-	#include <colorspace_fragment>
-}
-`;

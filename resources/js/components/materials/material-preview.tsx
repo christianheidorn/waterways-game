@@ -54,7 +54,7 @@ function webglAvailable(): boolean {
 /**
  * Live PBR preview of a terrain material using the game's renderer. three.js and the
  * game code are loaded on demand. Mount at most one or two at a time: browsers cap the
- * number of WebGL contexts per page.
+ * number of WebGL / WebGPU contexts per page.
  */
 export function MaterialPreview({
     material,
@@ -111,13 +111,16 @@ export function MaterialPreview({
         }
 
         import('@game/preview/MaterialPreview')
-            .then(({ MaterialPreview: Engine }) => {
+            .then(({ MaterialPreview: Engine }) => Engine.create(canvas))
+            .then((created) => {
                 if (cancelled) {
+                    created.dispose();
+
                     return;
                 }
 
                 const current = latest.current;
-                engine = new Engine(canvas);
+                engine = created;
                 engine.setShape(current.shape);
                 engine.setLight(current.hour);
                 engine.setMaterial(current.material, current.options);

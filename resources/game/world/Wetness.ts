@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { NO_WATER } from '../shared/types';
 import type { Heightfield } from './Heightfield';
 

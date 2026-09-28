@@ -342,6 +342,8 @@ export class Game {
 
         this.progress(0.9, 'Growing foliage');
         const foliage = new Foliage();
+        // WebGPU: GPU-driven culling + indirect draws (culled in renderFrame).
+        foliage.setRenderer(this.renderer);
         foliage.setTypes(m.foliage_types);
         foliage.load(
             assets.foliage ? await this.api.foliage(assets.foliage) : null,
@@ -796,6 +798,13 @@ export class Game {
         const water = this.world.water;
         const profiler = this.profiler;
         water.setSceneTextures(null);
+        // GPU foliage culling reads last frame's scene depth (Hi-Z), before any pass draws foliage.
+        this.world.foliage.cull(
+            this.renderer,
+            this.camera,
+            this.postFx.depthTexture,
+            profiler,
+        );
 
         if (water.hasWater()) {
             profiler?.mark('Water reflection');

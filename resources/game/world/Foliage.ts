@@ -1,19 +1,35 @@
-import * as THREE from 'three';
-import type { GameRenderer } from '../core/renderer';
+import * as THREE from 'three/webgpu';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import type { GpuProfiler } from '../core/GpuProfiler';
+import { isWebGpu } from '../core/renderer';
+import type { GameRenderer } from '../core/renderer';
 import { FOLIAGE_STRIDE } from '../shared/types';
 import type { FoliageFile, FoliageKind, FoliageType } from '../shared/types';
 import { mulberry32, SimplexNoise } from '../util/noise';
 import type { FoliageTypeStat } from '../shared/protocol';
+import { uniform } from 'three/tsl';
 import { createFoliageGeometry } from './FoliageGeometry';
 import {
     findLodRoots,
     LOD_BUDGETS,
-    renderImpostor,
     simplifyGeometry,
     triangleCount,
 } from './FoliageLod';
+import { GpuCullFrame, GpuFoliageType } from './foliage/FoliageGpu';
+import type { GpuTypeConfig } from './foliage/FoliageGpu';
+import {
+    attributeInstance,
+    createFoliageGlobals,
+    createFoliageMaterial,
+    RANK_FADE,
+    windStiffness,
+} from './foliage/FoliageMaterial';
+import type { FoliageTypeUniforms, LodRole } from './foliage/FoliageMaterial';
+import { HiZ } from './foliage/HiZ';
+import { renderImpostor } from './foliage/Impostor';
+import { InstanceBatch } from './foliage/InstanceBatch';
+import { INSTANCE_FLOATS, writeInstance } from './foliage/instances';
 import type { Heightfield } from './Heightfield';
 
 /**
@@ -47,8 +63,6 @@ const DENSITY_FALLOFF: Partial<
     bush: { start: 0.3, min: 0.35 },
 };
 
-/** Fraction of a cell's instances that are mid-transition in the density fade. */
-const RANK_FADE = 0.12;
 /** Camera movement (m) that triggers re-evaluating cell visibility / LOD / density. */
 const EVAL_MOVE = 2;
 /** Re-evaluate at least this often (s) even when the camera is still. */
@@ -70,12 +84,11 @@ const DEFAULT_SHADOW_DISTANCE = 120;
 const LOD_SPLIT_SLACK = EVAL_MOVE * 2;
 /** Split distance used while a type has no split (keeps the near-role shader test always true). */
 const NO_SPLIT = 1e9;
-
 /**
- * Which side of the per-instance LOD0 / LOD1 split a material draws: 'near' keeps instances closer
- * than the split distance (LOD0), 'far' those beyond it (LOD1), 'none' draws everything.
+ * Camera movement (m) between two frames treated as a cut (teleport, mode switch): the previous
+ * frame's depth says nothing about the new view, so occlusion culling pauses for that frame.
  */
-type LodRole = 'near' | 'far' | 'none';
+const CAMERA_CUT = 25;
 
 type Cell = {
     /** `${size}:${cx},${cz}` — also the undo snapshot id. */
@@ -83,10 +96,10 @@ type Cell = {
     cx: number;
     cz: number;
     data: number[];
-    mesh: THREE.InstancedMesh | null;
-    /** Instances the mesh's buffers can hold (reused while the cell changes). */
-    capacity: number;
-    /** Instances written into the mesh buffers. */
+    mesh: THREE.Mesh | null;
+    /** Instance buffer + per-LOD geometry views of the mesh (reused while the cell changes). */
+    batch: InstanceBatch | null;
+    /** Instances written into the batch. */
     built: number;
     dirty: boolean;
     queued: boolean;
@@ -106,7 +119,8 @@ type Cell = {
      * (instances closer than the split collapse in the shader) and this mesh draws the instances
      * near the split with LOD0 — so LOD0 never reaches past the split just because the cell is large.
      */
-    near: THREE.InstancedMesh | null;
+    near: THREE.Mesh | null;
+    nearBatch: InstanceBatch | null;
 };
 
 /** A far-LOD batch over CHUNK_CELLS² cells; `data` is only filled while building. */
@@ -128,13 +142,13 @@ type TypeRenderer = {
         main: number;
     } | null;
     lodDistances: number[];
-    /** Material(s) per LOD — procedural LODs share one material, baked models have one set per LOD. */
-    lodMaterials: (THREE.Material | THREE.Material[])[];
     /**
-     * Wind-aware depth material for procedural meshes. null for models: three then builds a depth
-     * variant per material that honours map + alphaTest, so leaf cards cast leaf-shaped shadows.
+     * Source material(s) per LOD — procedural LODs share one material, baked models have one set per
+     * LOD. The foliage node materials of both render paths are built from these.
      */
-    depthMaterial: THREE.MeshDepthMaterial | null;
+    sourceMaterials: (THREE.Material | THREE.Material[])[];
+    /** CPU-path node materials per LOD (instance attributes, near / far roles for the LOD split). */
+    lodMaterials: (THREE.Material | THREE.Material[])[];
     /** true once a GLB model replaced the procedural geometry. */
     model: boolean;
     disposed: boolean;
@@ -153,12 +167,11 @@ type TypeRenderer = {
     /** Largest distance of any LOD vertex from the instance origin, at scale 1. */
     radius: number;
     /** Per-type shader uniforms (updated in place, e.g. when the cull distance changes). */
-    uniforms: {
-        uFadeEnd: { value: number };
-        uFalloff: { value: THREE.Vector2 };
-        /** Per-instance LOD0 → LOD1 switch distance (m, 3D), NO_SPLIT when unused. */
-        uLodSplit: { value: number };
-    };
+    uniforms: FoliageTypeUniforms;
+    /** GPU-driven renderer (WebGPU); null on the CPU-culled path. */
+    gpu: GpuFoliageType | null;
+    /** Cells whose instances changed since the last GPU upload. */
+    gpuDirty: Set<Cell>;
     /** Where the LODs came from and what was generated at runtime (stats / F10 readout). */
     lodInfo: {
         source: FoliageTypeStat['source'];
@@ -167,8 +180,10 @@ type TypeRenderer = {
     };
     /** Materials of LOD0 / LOD1 are patched with the 'near' / 'far' roles (per-instance split). */
     splitRoles: boolean;
-    /** Far impostor still to be rendered (needs the WebGL renderer; see Foliage.update()). */
+    /** Far impostor still to be rendered (needs the renderer; see Foliage.update()). */
     pendingImpostor: { distance: number; role: LodRole } | null;
+    /** An impostor capture is in flight (read-back is asynchronous). */
+    capturing: boolean;
 };
 
 export type FoliageStats = {
@@ -180,8 +195,13 @@ export type FoliageStats = {
     drawCalls: number;
     /** Main-pass foliage triangles. */
     triangles: number;
-    /** Cells casting shadows (each costs a draw call per shadow pass when in the shadow frustum). */
+    /**
+     * Cells casting shadows (each costs a draw call per shadow pass when in the shadow frustum); on
+     * the GPU-culled path: instances in the shadow list.
+     */
     shadowCasters: number;
+    /** Instances rejected by Hi-Z occlusion culling (GPU path). */
+    occludedInstances: number;
     /** Cells with a mesh / cells shown / cells total. */
     meshes: number;
     shownCells: number;
@@ -306,15 +326,7 @@ export class Foliage {
     private renderers = new Map<number, TypeRenderer>();
     /** Instances of types that are currently not in the type list (kept for saving / re-adding). */
     private orphaned = new Map<number, number[]>();
-    private uniforms = {
-        uTime: { value: 0 },
-        uWind: { value: 0.4 },
-        /** Horizontal direction the wind blows towards (unit x/z). */
-        uWindDir: { value: new THREE.Vector2(0.84, 0.54) },
-        uCamPos: { value: new THREE.Vector3() },
-        uFadeScale: { value: 1 },
-        uDensity: { value: 1 },
-    };
+    private readonly globals = createFoliageGlobals();
     private gltf = new GLTFLoader();
     private random = mulberry32(Date.now() & 0xffff);
     private density = 1;
@@ -329,21 +341,61 @@ export class Foliage {
     private lastCamera: THREE.Camera | null = null;
     /** Renderer used to render missing impostors (set explicitly or picked up from a draw). */
     private gl: GameRenderer | null = null;
-    private readonly captureRenderer = (renderer: GameRenderer) => {
-        this.gl ??= renderer;
-    };
+    /** Shared inputs of the GPU culling passes; non-null once the GPU-driven path is active. */
+    private gpuFrame: GpuCullFrame | null = null;
+    private readonly previousCamera = new THREE.Vector3();
+    private hasPrevious = false;
+    private lastCull = 0;
 
     constructor() {
         this.group.name = 'Foliage';
     }
 
     /**
-     * WebGL renderer for runtime-generated impostors of models without a far LOD. Optional: the
-     * renderer is otherwise picked up from the first foliage draw.
+     * The renderer foliage is drawn with. On WebGPU this switches to GPU-driven culling and indirect
+     * draws (see cull()); on WebGL 2 cells are culled on the CPU. It also renders the impostors of
+     * models without a far LOD (otherwise picked up from the first foliage draw).
      */
     setRenderer(renderer: GameRenderer | null): void {
         this.gl = renderer;
+
+        if (
+            renderer &&
+            isWebGpu(renderer) &&
+            this.gpuAllowed &&
+            !this.gpuFrame
+        ) {
+            this.enableGpu();
+        }
     }
+
+    /** Whether instances are culled on the GPU (WebGPU) rather than per cell on the CPU. */
+    get gpuDriven(): boolean {
+        return this.gpuFrame !== null;
+    }
+
+    /**
+     * GPU-driven culling on WebGPU (default on). Off keeps the CPU-culled cells on WebGPU too
+     * (comparisons, troubleshooting); switching rebuilds every type's draws.
+     */
+    get gpuCulling(): boolean {
+        return this.gpuAllowed;
+    }
+
+    set gpuCulling(enabled: boolean) {
+        this.gpuAllowed = enabled;
+
+        if (!enabled && this.gpuFrame) {
+            this.disableGpu();
+        } else if (enabled && this.gl && isWebGpu(this.gl) && !this.gpuFrame) {
+            this.enableGpu();
+        }
+    }
+
+    private gpuAllowed = true;
+
+    /** Hi-Z occlusion culling on the GPU path (on by default). */
+    occlusionCulling = true;
 
     /** Fraction of instances drawn (GraphicsSettings.foliage_density). */
     get densityScale(): number {
@@ -352,17 +404,17 @@ export class Foliage {
 
     set densityScale(value: number) {
         this.density = Math.max(0, value);
-        this.uniforms.uDensity.value = this.density;
+        this.globals.density.value = this.density;
         this.needsEval = true;
     }
 
     /** Multiplier on every type's cull distance (GraphicsSettings.foliage_distance). */
     get distanceScale(): number {
-        return this.uniforms.uFadeScale.value;
+        return this.globals.fadeScale.value;
     }
 
     set distanceScale(value: number) {
-        this.uniforms.uFadeScale.value = Math.max(0.01, value);
+        this.globals.fadeScale.value = Math.max(0.01, value);
         this.needsEval = true;
     }
 
@@ -402,7 +454,8 @@ export class Foliage {
             if (existing && sameVisuals(existing.type, type)) {
                 // Cheap in-place update (editor sliders): cull distance, shadows, placement rules.
                 existing.type = type;
-                existing.uniforms.uFadeEnd.value = type.cull_distance;
+                existing.uniforms.fadeEnd.value = type.cull_distance;
+                existing.gpu?.setCastShadows(type.cast_shadows);
                 continue;
             }
 
@@ -442,6 +495,8 @@ export class Foliage {
             renderer.chunks.clear();
             renderer.shown = [];
             renderer.extent.makeEmpty();
+            renderer.gpu?.clear();
+            renderer.gpuDirty.clear();
         }
 
         this.queue.length = 0;
@@ -505,10 +560,10 @@ export class Foliage {
     }
 
     setWind(strength: number, dirX?: number, dirZ?: number): void {
-        this.uniforms.uWind.value = strength;
+        this.globals.wind.value = strength;
 
         if (dirX !== undefined && dirZ !== undefined) {
-            this.uniforms.uWindDir.value.set(dirX, dirZ);
+            this.globals.windDir.value.set(dirX, dirZ);
         }
     }
 
@@ -1053,7 +1108,7 @@ export class Foliage {
         this.insertFlat(renderer, data);
     }
 
-    /** Foliage rendering statistics for the last evaluated camera. */
+    /** Foliage rendering statistics for the last evaluated camera (GPU path: last read-back). */
     stats(): FoliageStats {
         const stats: FoliageStats = {
             instances: 0,
@@ -1061,6 +1116,7 @@ export class Foliage {
             drawCalls: 0,
             triangles: 0,
             shadowCasters: 0,
+            occludedInstances: 0,
             meshes: 0,
             shownCells: 0,
             cells: 0,
@@ -1076,7 +1132,10 @@ export class Foliage {
                 camera.projectionMatrix,
                 camera.matrixWorldInverse,
             );
-            _frustum.setFromProjectionMatrix(_projScreen);
+            _frustum.setFromProjectionMatrix(
+                _projScreen,
+                camera.coordinateSystem,
+            );
         }
 
         for (const renderer of this.renderers.values()) {
@@ -1115,6 +1174,20 @@ export class Foliage {
                 stats.meshes += cell.mesh ? 1 : 0;
             }
 
+            if (renderer.gpu) {
+                this.gpuStats(renderer.gpu, detail);
+                stats.shadowCasters += detail.shadowCasters;
+                stats.occludedInstances += detail.occluded ?? 0;
+                stats.drawnInstances += detail.drawn;
+                stats.drawCalls += detail.drawCalls;
+                stats.triangles += detail.triangles;
+                typeStats.drawCalls += detail.drawCalls;
+                typeStats.triangles += detail.triangles;
+                typeStats.instances += detail.drawn;
+
+                continue;
+            }
+
             for (const cell of renderer.shown) {
                 for (const mesh of [cell.mesh, cell.near]) {
                     if (!mesh?.visible) {
@@ -1132,28 +1205,31 @@ export class Foliage {
 
                     if (
                         camera &&
-                        !_frustum.intersectsSphere(mesh.boundingSphere!)
+                        !_frustum.intersectsSphere(
+                            mesh.geometry.boundingSphere!,
+                        )
                     ) {
                         continue;
                     }
 
                     const geometry = mesh.geometry;
+                    const count = instanceCountOf(mesh);
                     const groups = Array.isArray(mesh.material)
                         ? Math.max(1, geometry.groups.length)
                         : 1;
-                    const triangles = triangleCount(geometry) * mesh.count;
-                    stats.drawnInstances += mesh.count;
+                    const triangles = triangleCount(geometry) * count;
+                    stats.drawnInstances += count;
                     stats.drawCalls += groups;
                     stats.triangles += triangles;
                     typeStats.drawCalls += groups;
                     typeStats.triangles += triangles;
-                    typeStats.instances += mesh.count;
-                    detail.drawn += mesh.count;
+                    typeStats.instances += count;
+                    detail.drawn += count;
                     detail.drawCalls += groups;
                     detail.triangles += triangles;
 
                     if (lod < detail.lodInstances.length) {
-                        detail.lodInstances[lod] += mesh.count;
+                        detail.lodInstances[lod] += count;
                     }
                 }
             }
@@ -1162,25 +1238,52 @@ export class Foliage {
         return stats;
     }
 
-    update(dt: number, camera: THREE.Camera): void {
-        this.uniforms.uTime.value += dt;
-        this.uniforms.uCamPos.value.copy(camera.position);
-        this.lastCamera = camera;
-        this.evalTimer -= dt;
+    /** Per-type numbers of the GPU path from the last counter read-back. */
+    private gpuStats(gpu: GpuFoliageType, detail: FoliageTypeStat): void {
+        const counters = gpu.lastStats;
+        const tris = gpu.lodTriangles();
+        detail.drawCalls = gpu.drawCalls;
+        detail.occluded = counters?.occluded ?? 0;
+        detail.shadowCasters = counters?.shadowInstances ?? 0;
 
-        // Visibility / LOD / density / shadows only change with distance, so cells are re-evaluated
-        // when the camera moved a bit (or something changed), not every frame.
-        if (
-            this.needsEval ||
-            this.evalTimer <= 0 ||
-            camera.position.distanceToSquared(this.lastEvalPos) >
-                EVAL_MOVE * EVAL_MOVE
-        ) {
-            this.evaluate(camera.position);
+        if (!counters) {
+            return;
         }
 
-        if (this.queue.length) {
-            this.processQueue(camera);
+        counters.lodInstances.forEach((count, lod) => {
+            if (lod < detail.lodInstances.length) {
+                detail.lodInstances[lod] = count;
+            }
+
+            detail.drawn += count;
+            detail.triangles += count * (tris[lod] ?? 0);
+        });
+    }
+
+    update(dt: number, camera: THREE.Camera): void {
+        this.globals.time.value += dt;
+        this.globals.camPos.value.copy(camera.position);
+        this.lastCamera = camera;
+
+        if (this.gpuFrame) {
+            this.syncGpu();
+        } else {
+            this.evalTimer -= dt;
+
+            // Visibility / LOD / density / shadows only change with distance, so cells are
+            // re-evaluated when the camera moved a bit (or something changed), not every frame.
+            if (
+                this.needsEval ||
+                this.evalTimer <= 0 ||
+                camera.position.distanceToSquared(this.lastEvalPos) >
+                    EVAL_MOVE * EVAL_MOVE
+            ) {
+                this.evaluate(camera.position);
+            }
+
+            if (this.queue.length) {
+                this.processQueue(camera);
+            }
         }
 
         if (this.gl) {
@@ -1188,68 +1291,277 @@ export class Foliage {
         }
     }
 
-    /** Renders at most one missing impostor per frame (outside the render pass). */
+    /**
+     * GPU-driven culling (WebGPU; no-op on the CPU path): builds the Hi-Z pyramid from the previous
+     * frame's scene depth, then one compute pass per type culls every instance and writes the
+     * indirect draw arguments. Call once per frame after update(), before the scene is rendered.
+     */
+    cull(
+        renderer: GameRenderer,
+        camera: THREE.Camera,
+        depth?: THREE.Texture | null,
+        profiler?: GpuProfiler | null,
+    ): void {
+        if (!isWebGpu(renderer)) {
+            return;
+        }
+
+        if (!this.gpuFrame) {
+            this.setRenderer(renderer);
+        }
+
+        const frame = this.gpuFrame;
+
+        if (!frame) {
+            return;
+        }
+
+        const now = performance.now();
+        const dt = this.lastCull ? (now - this.lastCull) / 1000 : 0;
+        this.lastCull = now;
+        profiler?.mark('Foliage culling');
+        camera.updateMatrixWorld();
+        this.globals.camPos.value.copy(camera.position);
+        frame.setCamera(camera);
+        frame.lodBias.value = this.lodBias;
+        frame.shadowDistance.value = this.shadowDistance;
+
+        // Occlusion needs last frame's depth from (nearly) the same viewpoint and projection.
+        const moved = camera.position.distanceTo(this.previousCamera);
+        const sameLens =
+            this.hasPrevious &&
+            Math.abs(
+                frame.prevProj.value.elements[5] -
+                    camera.projectionMatrix.elements[5],
+            ) <
+                0.01 * Math.abs(camera.projectionMatrix.elements[5]);
+        let occlusion = false;
+
+        if (this.occlusionCulling && depth && sameLens && moved < CAMERA_CUT) {
+            occlusion = frame.hiz.update(renderer, depth);
+        }
+
+        frame.occlusion.value = occlusion ? 1 : 0;
+        // Parallax since the depth was rendered: widen the tested spheres by the camera movement.
+        frame.occlusionMargin.value = moved * 1.5;
+        const nodes: THREE.ComputeNode[] = [];
+
+        for (const type of this.renderers.values()) {
+            if (type.gpu) {
+                nodes.push(...type.gpu.computeNodes());
+                type.gpu.updateStats(renderer, dt);
+            }
+        }
+
+        if (nodes.length) {
+            void renderer.compute(nodes);
+        }
+
+        frame.setPrevious(camera);
+        this.previousCamera.copy(camera.position);
+        this.hasPrevious = true;
+    }
+
+    /** Switches to the GPU-driven path: CPU cell meshes go, every type gets its storage buffers. */
+    private enableGpu(): void {
+        this.gpuFrame = new GpuCullFrame(this.globals, new HiZ());
+        this.queue.length = 0;
+
+        for (const renderer of this.renderers.values()) {
+            for (const cell of [
+                ...renderer.cells.values(),
+                ...renderer.chunks.values(),
+            ]) {
+                this.removeCellMesh(cell);
+                cell.queued = false;
+            }
+
+            renderer.shown = [];
+            this.attachGpu(renderer);
+        }
+    }
+
+    /** Back to CPU-culled cells: GPU draws go, every cell is rebuilt on the next evaluations. */
+    private disableGpu(): void {
+        for (const renderer of this.renderers.values()) {
+            if (renderer.gpu) {
+                this.group.remove(renderer.gpu.group);
+                renderer.gpu.dispose();
+                renderer.gpu = null;
+            }
+
+            renderer.gpuDirty.clear();
+
+            for (const cell of renderer.cells.values()) {
+                this.markDirty(renderer, cell);
+            }
+        }
+
+        this.gpuFrame?.hiz.dispose();
+        this.gpuFrame = null;
+        this.hasPrevious = false;
+        this.needsEval = true;
+    }
+
+    /** Creates a type's GPU renderer and queues all of its cells for upload. */
+    private attachGpu(renderer: TypeRenderer): void {
+        const frame = this.gpuFrame;
+
+        if (!frame || renderer.gpu) {
+            return;
+        }
+
+        const gpu = new GpuFoliageType(frame);
+        gpu.setCastShadows(renderer.type.cast_shadows);
+        gpu.configure(this.gpuConfig(renderer));
+        renderer.gpu = gpu;
+        this.group.add(gpu.group);
+
+        for (const cell of renderer.cells.values()) {
+            renderer.gpuDirty.add(cell);
+        }
+    }
+
+    /** Uploads the cells edited since the last frame (only their slot ranges). */
+    private syncGpu(): void {
+        for (const renderer of this.renderers.values()) {
+            if (!renderer.gpu || !renderer.gpuDirty.size) {
+                continue;
+            }
+
+            for (const cell of renderer.gpuDirty) {
+                if (renderer.cells.get(cell.key) === cell) {
+                    renderer.gpu.writeCell(cell);
+                } else {
+                    renderer.gpu.removeCell(cell);
+                }
+            }
+
+            renderer.gpuDirty.clear();
+        }
+    }
+
+    /** Draw chain of a type for the GPU path (rebuilt whenever its LODs change). */
+    private gpuConfig(renderer: TypeRenderer): GpuTypeConfig {
+        const sphere = lodSphere(renderer.lods);
+
+        return {
+            name: renderer.type.name,
+            lods: renderer.drawLods.map((geometry, lod) => ({
+                geometry,
+                material:
+                    renderer.sourceMaterials[lod] ??
+                    renderer.sourceMaterials[
+                        renderer.sourceMaterials.length - 1
+                    ],
+            })),
+            lodDistances: renderer.lodDistances,
+            shadowProxy: renderer.shadowProxy
+                ? {
+                      start: renderer.shadowProxy.start,
+                      count: renderer.shadowProxy.count,
+                      main: renderer.shadowProxy.main,
+                  }
+                : null,
+            fade: renderer.fade,
+            falloff: renderer.falloff,
+            stiffness: windStiffness(renderer.type.kind),
+            uniforms: renderer.uniforms,
+            // Split kinds cast LOD0 shadows up to the split; others per cell (as CPU culling did).
+            shadowSlack: renderer.splitRoles
+                ? LOD_SPLIT_SLACK
+                : renderer.cellSize,
+            center: sphere.center,
+            radius: sphere.radius,
+        };
+    }
+
+    /** Renders at most one missing impostor at a time (outside the render pass). */
     private renderPendingImpostor(gl: GameRenderer): void {
         for (const renderer of this.renderers.values()) {
             const pending = renderer.pendingImpostor;
 
-            if (!pending || renderer.disposed) {
+            if (!pending || renderer.disposed || renderer.capturing) {
                 continue;
             }
 
-            renderer.pendingImpostor = null;
-            let built: ReturnType<typeof renderImpostor> = null;
+            renderer.capturing = true;
+            void renderImpostor(
+                gl,
+                renderer.lods[0],
+                renderer.sourceMaterials[0],
+            )
+                .catch((error: unknown) => {
+                    console.warn(
+                        `Could not render an impostor for foliage type ${renderer.type.name}`,
+                        error,
+                    );
 
-            try {
-                built = renderImpostor(
-                    gl as never,
-                    renderer.lods[0],
-                    renderer.lodMaterials[0],
-                );
-            } catch (error) {
-                console.warn(
-                    `Could not render an impostor for foliage type ${renderer.type.name}`,
-                    error,
-                );
-            }
+                    return null;
+                })
+                .then((built) => {
+                    renderer.capturing = false;
+                    renderer.pendingImpostor = null;
 
-            if (!built) {
-                renderer.lodInfo.warnings.push(
-                    'no far LOD (impostor capture failed)',
-                );
+                    if (renderer.disposed) {
+                        built?.geometry.dispose();
+                        built?.material.map?.dispose();
+                        built?.material.dispose();
 
-                return;
-            }
+                        return;
+                    }
 
-            renderer.lods[0].computeBoundingBox();
-            addWindAttribute(built.geometry, renderer.lods[0].boundingBox!);
-            this.patchMaterial(built.material, renderer, pending.role);
-            renderer.lods = [...renderer.lods, built.geometry];
-            renderer.drawLods = [...renderer.drawLods, built.geometry];
-            renderer.lodMaterials = [...renderer.lodMaterials, built.material];
-            renderer.lodDistances = [
-                ...renderer.lodDistances,
-                pending.distance,
-            ];
-            renderer.lodInfo.generated.push(
-                `LOD${renderer.lods.length - 1} impostor (rendered)`,
-            );
-            const radius = geometryRadius(renderer.lods);
+                    if (!built) {
+                        renderer.lodInfo.warnings.push(
+                            'no far LOD (impostor capture failed)',
+                        );
 
-            if (radius > renderer.radius * 1.05) {
-                // Wider than the model: refresh the cell bounds (frustum culling).
-                renderer.radius = radius;
+                        return;
+                    }
 
-                for (const cell of renderer.cells.values()) {
-                    this.markDirty(renderer, cell);
-                }
-            }
-
-            // Far chunks (≥ 3 LODs) may start now; cells pick the new LOD on the next evaluation.
-            this.needsEval = true;
+                    this.addImpostor(renderer, built, pending);
+                });
 
             return;
         }
+    }
+
+    /** Appends a rendered impostor as the type's far LOD. */
+    private addImpostor(
+        renderer: TypeRenderer,
+        built: { geometry: THREE.BufferGeometry; material: THREE.Material },
+        pending: { distance: number; role: LodRole },
+    ): void {
+        renderer.lods[0].computeBoundingBox();
+        addWindAttribute(built.geometry, renderer.lods[0].boundingBox!);
+        renderer.lods = [...renderer.lods, built.geometry];
+        renderer.drawLods = [...renderer.drawLods, built.geometry];
+        renderer.sourceMaterials = [
+            ...renderer.sourceMaterials,
+            built.material,
+        ];
+        renderer.lodMaterials = [
+            ...renderer.lodMaterials,
+            this.cpuMaterial(built.material, renderer, pending.role),
+        ];
+        renderer.lodDistances = [...renderer.lodDistances, pending.distance];
+        renderer.lodInfo.generated.push(
+            `LOD${renderer.lods.length - 1} impostor (rendered)`,
+        );
+        const radius = geometryRadius(renderer.lods);
+
+        if (radius > renderer.radius * 1.05) {
+            // Wider than the model: refresh the cell bounds (frustum culling).
+            renderer.radius = radius;
+
+            for (const cell of renderer.cells.values()) {
+                this.markDirty(renderer, cell);
+            }
+        }
+
+        renderer.gpu?.configure(this.gpuConfig(renderer));
+        // Far chunks (≥ 3 LODs) may start now; cells pick the new LOD on the next evaluation.
+        this.needsEval = true;
     }
 
     private evaluate(cam: THREE.Vector3): void {
@@ -1262,7 +1574,7 @@ export class Foliage {
             const cull = renderer.type.cull_distance * this.distanceScale;
             const previous = renderer.shown;
             renderer.shown = [];
-            renderer.uniforms.uLodSplit.value = splitsLod(renderer)
+            renderer.uniforms.lodSplit.value = splitsLod(renderer)
                 ? renderer.lodDistances[1] * cull * this.lodBias
                 : NO_SPLIT;
 
@@ -1497,7 +1809,7 @@ export class Foliage {
         // Per-instance LOD0 → LOD1 switch: a cell the split distance may pass through (before the
         // next evaluation) draws LOD1 plus a LOD0 subset of the instances near the camera.
         if (!isChunk(cell) && splitsLod(renderer)) {
-            const split = renderer.uniforms.uLodSplit.value;
+            const split = renderer.uniforms.lodSplit.value;
 
             if (dist < split + LOD_SPLIT_SLACK) {
                 if (
@@ -1512,8 +1824,10 @@ export class Foliage {
             }
         }
 
-        if (lod !== cell.lod || mesh.geometry !== renderer.drawLods[lod]) {
-            mesh.geometry = renderer.drawLods[lod];
+        const view = cell.batch!.view(renderer.drawLods[lod]);
+
+        if (lod !== cell.lod || mesh.geometry !== view) {
+            mesh.geometry = view;
             mesh.material = lodMaterial(renderer, lod);
             cell.lod = lod;
         }
@@ -1527,8 +1841,8 @@ export class Foliage {
             renderer.type.cast_shadows &&
             sx * sx + sz * sz < this.shadowDistance * this.shadowDistance;
         mesh.castShadow = shadows && lod === 0;
-        mesh.count = this.drawCount(renderer, cell, cam, cull);
-        mesh.visible = mesh.count > 0;
+        view.instanceCount = this.drawCount(renderer, cell, cam, cull);
+        mesh.visible = view.instanceCount > 0;
 
         if (straddles && mesh.visible) {
             this.updateNear(renderer, cell, cam, shadows);
@@ -1552,42 +1866,44 @@ export class Foliage {
         cam: THREE.Vector3,
         shadows: boolean,
     ): void {
-        const mesh = cell.mesh!;
-        let near = cell.near;
+        const batch = cell.batch!;
+        let nearBatch = cell.nearBatch;
 
-        if (!near || near.instanceMatrix.count < cell.capacity) {
+        if (!cell.near || !nearBatch || nearBatch.capacity < batch.capacity) {
             this.removeNear(cell);
-            near = new THREE.InstancedMesh(
-                renderer.drawLods[0],
+            nearBatch = new InstanceBatch(batch.capacity);
+            const near = new THREE.Mesh(
+                nearBatch.view(renderer.drawLods[0]),
                 lodMaterial(renderer, 0),
-                cell.capacity,
             );
             this.setupMesh(renderer, near, `${cell.key}_near`);
             cell.near = near;
+            cell.nearBatch = nearBatch;
             this.group.add(near);
-        } else if (near.geometry !== renderer.drawLods[0]) {
-            near.geometry = renderer.drawLods[0];
+        }
+
+        const near = cell.near!;
+        const view = nearBatch.view(renderer.drawLods[0]);
+
+        if (near.geometry !== view) {
+            near.geometry = view;
             near.material = lodMaterial(renderer, 0);
         }
 
-        const reach = renderer.uniforms.uLodSplit.value + LOD_SPLIT_SLACK;
+        const reach = renderer.uniforms.lodSplit.value + LOD_SPLIT_SLACK;
         const reach2 = reach * reach;
-        const src = mesh.instanceMatrix.array as Float32Array;
-        const dst = near.instanceMatrix.array as Float32Array;
+        const src = batch.array;
+        const dst = nearBatch.array;
+        const count = instanceCountOf(cell.mesh!);
         const r = renderer.radius * Math.max(0.01, renderer.type.max_scale);
         let n = 0;
-        let minX = Infinity;
-        let minY = Infinity;
-        let minZ = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        let maxZ = -Infinity;
+        _box.makeEmpty();
 
-        for (let i = 0; i < mesh.count; i++) {
-            const o = i * 16;
-            const x = src[o + 12];
-            const y = src[o + 13];
-            const z = src[o + 14];
+        for (let i = 0; i < count; i++) {
+            const o = i * INSTANCE_FLOATS;
+            const x = src[o + 3];
+            const y = src[o + 7];
+            const z = src[o + 11];
             const dx = x - cam.x;
             const dy = y - cam.y;
             const dz = z - cam.z;
@@ -1596,30 +1912,19 @@ export class Foliage {
                 continue;
             }
 
-            for (let k = 0; k < 16; k++) {
-                dst[n * 16 + k] = src[o + k];
-            }
-
-            minX = Math.min(minX, x - r);
-            maxX = Math.max(maxX, x + r);
-            minY = Math.min(minY, y - r * 0.25);
-            maxY = Math.max(maxY, y + r);
-            minZ = Math.min(minZ, z - r);
-            maxZ = Math.max(maxZ, z + r);
+            dst.set(src.subarray(o, o + INSTANCE_FLOATS), n * INSTANCE_FLOATS);
+            _box.expandByPoint(_v.set(x - r, y - r * 0.25, z - r));
+            _box.expandByPoint(_v.set(x + r, y + r, z + r));
             n++;
         }
 
-        near.count = n;
+        view.instanceCount = n;
         near.visible = n > 0;
         near.castShadow = shadows;
 
         if (n > 0) {
-            near.instanceMatrix.clearUpdateRanges();
-            near.instanceMatrix.addUpdateRange(0, n * 16);
-            near.instanceMatrix.needsUpdate = true;
-            near.boundingBox!.min.set(minX, minY, minZ);
-            near.boundingBox!.max.set(maxX, maxY, maxZ);
-            near.boundingBox!.getBoundingSphere(near.boundingSphere!);
+            nearBatch.upload(n);
+            nearBatch.setBounds(_box);
         }
     }
 
@@ -1744,6 +2049,7 @@ export class Foliage {
         }
 
         this.renderers.clear();
+        this.gpuFrame?.hiz.dispose();
     }
 
     private tryPlace(
@@ -1973,7 +2279,7 @@ export class Foliage {
             cz: parsed.cz,
             data: [],
             mesh: null,
-            capacity: 0,
+            batch: null,
             built: 0,
             dirty: true,
             queued: false,
@@ -1984,6 +2290,7 @@ export class Foliage {
             prebuild: false,
             chunk: null,
             near: null,
+            nearBatch: null,
         };
         this.resetBounds(renderer, cell);
 
@@ -2033,6 +2340,12 @@ export class Foliage {
         cell.dirty = true;
         this.needsEval = true;
 
+        if (renderer.gpu) {
+            renderer.gpuDirty.add(cell);
+
+            return;
+        }
+
         const chunk = cell.chunk;
 
         if (chunk) {
@@ -2072,7 +2385,7 @@ export class Foliage {
     }
 
     /**
-     * Writes the cell's instances into its InstancedMesh, reusing the existing buffers when they
+     * Writes the cell's instances into its instance batch, reusing the existing buffers when they
      * are large enough (painting grows cells a few instances at a time).
      */
     private buildCellMesh(renderer: TypeRenderer, cell: Cell): void {
@@ -2086,34 +2399,30 @@ export class Foliage {
             return;
         }
 
-        let mesh = cell.mesh;
+        let batch = cell.batch;
 
-        if (!mesh || count > cell.capacity || count < cell.capacity / 4) {
+        if (
+            !cell.mesh ||
+            !batch ||
+            count > batch.capacity ||
+            count < batch.capacity / 4
+        ) {
             this.removeCellMesh(cell);
             // Headroom so painting doesn't reallocate on every dab.
-            const capacity = count + Math.ceil(count * 0.25) + 8;
-            mesh = new THREE.InstancedMesh(
-                renderer.drawLods[cell.lod] ?? renderer.drawLods[0],
-                lodMaterial(renderer, cell.lod),
-                capacity,
+            batch = new InstanceBatch(count + Math.ceil(count * 0.25) + 8);
+            const lod = Math.min(cell.lod, renderer.drawLods.length - 1);
+            const mesh = new THREE.Mesh(
+                batch.view(renderer.drawLods[lod]),
+                lodMaterial(renderer, lod),
             );
-            cell.capacity = capacity;
             this.setupMesh(renderer, mesh, cell.key);
-
-            if (renderer.fade) {
-                // r = rank of the instance within the cell (0..1): drives the density fade.
-                mesh.instanceColor = new THREE.InstancedBufferAttribute(
-                    new Float32Array(capacity * 3),
-                    3,
-                );
-            }
-
+            cell.lod = lod;
+            cell.batch = batch;
             cell.mesh = mesh;
             this.group.add(mesh);
         }
 
-        const matrices = mesh.instanceMatrix.array as Float32Array;
-        const ranks = mesh.instanceColor?.array as Float32Array | undefined;
+        const array = batch.array;
         const d = cell.data;
         const r = renderer.radius;
         let minX = Infinity;
@@ -2124,23 +2433,18 @@ export class Foliage {
         let maxZ = -Infinity;
 
         for (let i = 0; i < count; i++) {
+            // Rank of the instance within the cell (0..1): drives the density fade.
+            const scale = writeInstance(
+                d,
+                i,
+                array,
+                i * INSTANCE_FLOATS,
+                (i + 0.5) / count,
+            );
             const o = i * FOLIAGE_STRIDE;
             const x = d[o];
             const y = d[o + 1];
             const z = d[o + 2];
-            const scale = d[o + 4];
-            _p.set(x, y, z);
-            // Yaw first (Y), then tilt to the terrain normal (Z, X).
-            _e.set(d[o + 5], d[o + 3], d[o + 6], 'XZY');
-            _q.setFromEuler(_e);
-            _s.setScalar(scale);
-            _m.compose(_p, _q, _s);
-            _m.toArray(matrices, i * 16);
-
-            if (ranks) {
-                ranks[i * 3] = (i + 0.5) / count;
-            }
-
             const e = r * scale;
             minX = Math.min(minX, x - e);
             maxX = Math.max(maxX, x + e);
@@ -2150,28 +2454,19 @@ export class Foliage {
             maxY = Math.max(maxY, y + e);
         }
 
-        mesh.instanceMatrix.clearUpdateRanges();
-        mesh.instanceMatrix.addUpdateRange(0, count * 16);
-        mesh.instanceMatrix.needsUpdate = true;
-
-        if (mesh.instanceColor) {
-            mesh.instanceColor.clearUpdateRanges();
-            mesh.instanceColor.addUpdateRange(0, count * 3);
-            mesh.instanceColor.needsUpdate = true;
-        }
-
+        batch.upload(count);
         cell.built = count;
-        mesh.count = count;
+        (cell.mesh!.geometry as THREE.InstancedBufferGeometry).instanceCount =
+            count;
         cell.bounds.min.set(minX, minY, minZ);
         cell.bounds.max.set(maxX, maxY, maxZ);
-        mesh.boundingBox!.copy(cell.bounds);
-        cell.bounds.getBoundingSphere(mesh.boundingSphere!);
+        batch.setBounds(cell.bounds);
     }
 
     /** Shared setup of cell / chunk / near-subset meshes. */
     private setupMesh(
         renderer: TypeRenderer,
-        mesh: THREE.InstancedMesh,
+        mesh: THREE.Mesh,
         key: string,
     ): void {
         mesh.receiveShadow = true;
@@ -2179,37 +2474,34 @@ export class Foliage {
         mesh.matrixAutoUpdate = false;
         // The reflection pass hides small foliage by this prefix (see Game.renderReflection).
         mesh.name = `Foliage_${renderer.type.name}_${key}`;
-
-        if (renderer.depthMaterial) {
-            mesh.customDepthMaterial = renderer.depthMaterial;
-        }
-
-        mesh.onBeforeShadow = () => {
+        mesh.onBeforeRender = (gl, scene) => {
+            this.gl ??= gl as unknown as GameRenderer;
             const proxy = renderer.shadowProxy;
+            const geometry = mesh.geometry;
 
-            if (proxy && mesh.geometry === proxy.geometry) {
-                proxy.geometry.setDrawRange(proxy.start, proxy.count);
+            // The shadow pass of LOD0 draws the cheap proxy range appended to it.
+            if (proxy && geometry.index === proxy.geometry.index) {
+                const shadow = (
+                    scene.overrideMaterial as {
+                        isShadowPassMaterial?: boolean;
+                    } | null
+                )?.isShadowPassMaterial;
+                geometry.setDrawRange(
+                    shadow ? proxy.start : 0,
+                    shadow ? proxy.count : proxy.main,
+                );
             }
         };
-        mesh.onAfterShadow = () => {
-            const proxy = renderer.shadowProxy;
-
-            if (proxy && mesh.geometry === proxy.geometry) {
-                proxy.geometry.setDrawRange(0, proxy.main);
-            }
-        };
-        mesh.onBeforeRender = this.captureRenderer as never;
-        // Set explicitly (never null): three would otherwise compute them from every instance.
-        mesh.boundingSphere = new THREE.Sphere();
-        mesh.boundingBox = new THREE.Box3();
     }
 
     private removeNear(cell: Cell): void {
         if (cell.near) {
             this.group.remove(cell.near);
-            cell.near.dispose();
             cell.near = null;
         }
+
+        cell.nearBatch?.dispose();
+        cell.nearBatch = null;
     }
 
     private removeCellMesh(cell: Cell): void {
@@ -2217,11 +2509,12 @@ export class Foliage {
 
         if (cell.mesh) {
             this.group.remove(cell.mesh);
-            cell.mesh.dispose();
             cell.mesh = null;
-            cell.capacity = 0;
             cell.built = 0;
         }
+
+        cell.batch?.dispose();
+        cell.batch = null;
     }
 
     private createRenderer(type: FoliageType): TypeRenderer {
@@ -2231,7 +2524,7 @@ export class Foliage {
             new THREE.Color(type.color_secondary),
             type.id * 7919,
         );
-        const material = new THREE.MeshStandardMaterial({
+        const material = new THREE.MeshStandardNodeMaterial({
             vertexColors: true,
             roughness: type.kind === 'rock' ? 0.85 : 0.75,
             metalness: 0,
@@ -2240,8 +2533,6 @@ export class Foliage {
         const falloff = DENSITY_FALLOFF[type.kind] ?? null;
         // Kinds without the density fade (trees, rocks) switch LOD0 → LOD1 per instance.
         const splitRoles = falloff === null && set.lods.length >= 2;
-        const nearMaterial = splitRoles ? material.clone() : material;
-        const farMaterial = splitRoles ? material.clone() : material;
         const renderer: TypeRenderer = {
             type,
             cellSize: CELL_SIZES[type.kind] ?? 64,
@@ -2249,10 +2540,8 @@ export class Foliage {
             drawLods: set.lods,
             shadowProxy: null,
             lodDistances: set.lodDistances,
-            lodMaterials: set.lods.map((_g, lod) =>
-                lod === 0 ? nearMaterial : lod === 1 ? farMaterial : material,
-            ),
-            depthMaterial: null,
+            sourceMaterials: set.lods.map(() => material),
+            lodMaterials: [],
             model: false,
             disposed: false,
             cells: new Map(),
@@ -2264,15 +2553,14 @@ export class Foliage {
             falloff,
             radius: geometryRadius(set.lods),
             uniforms: {
-                uFadeEnd: { value: type.cull_distance },
-                uFalloff: {
-                    value: new THREE.Vector2(
-                        falloff?.start ?? 1,
-                        falloff?.min ?? 1,
-                    ),
-                },
-                uLodSplit: { value: NO_SPLIT },
+                fadeEnd: uniform(type.cull_distance),
+                falloff: uniform(
+                    new THREE.Vector2(falloff?.start ?? 1, falloff?.min ?? 1),
+                ),
+                lodSplit: uniform(NO_SPLIT),
             },
+            gpu: null,
+            gpuDirty: new Set(),
             lodInfo: {
                 source: type.model_url ? 'loading' : 'procedural',
                 generated: [],
@@ -2280,19 +2568,18 @@ export class Foliage {
             },
             splitRoles,
             pendingImpostor: null,
+            capturing: false,
         };
-        this.patchMaterial(material, renderer, 'none');
-
-        if (splitRoles) {
-            this.patchMaterial(nearMaterial, renderer, 'near');
-            this.patchMaterial(farMaterial, renderer, 'far');
-        }
-
-        const depthMaterial = new THREE.MeshDepthMaterial({
-            depthPacking: THREE.RGBADepthPacking,
-        });
-        this.patchMaterial(depthMaterial, renderer, 'none');
-        renderer.depthMaterial = depthMaterial;
+        const none = this.cpuMaterial(material, renderer, 'none');
+        const near = splitRoles
+            ? this.cpuMaterial(material, renderer, 'near')
+            : none;
+        const far = splitRoles
+            ? this.cpuMaterial(material, renderer, 'far')
+            : none;
+        renderer.lodMaterials = set.lods.map((_g, lod) =>
+            lod === 0 ? near : lod === 1 ? far : none,
+        );
 
         // Shadow proxy: the shadow pass of LOD0 draws a slightly shrunk LOD1 instead.
         if (set.lods.length > 1 && !set.doubleSided) {
@@ -2306,6 +2593,8 @@ export class Foliage {
             }
         }
 
+        this.attachGpu(renderer);
+
         if (type.model_url) {
             void this.loadModel(renderer, type.model_url);
         }
@@ -2313,130 +2602,23 @@ export class Foliage {
         return renderer;
     }
 
-    /** Wind sway, distance fade and density falloff injected into a standard / depth material. */
-    private patchMaterial(
-        material: THREE.Material,
+    /**
+     * CPU-path node material (per-cell instance attributes) with wind sway, distance fade, density
+     * falloff and the given side of the per-instance LOD split.
+     */
+    private cpuMaterial(
+        source: THREE.Material,
         renderer: TypeRenderer,
         role: LodRole,
-    ): void {
-        const type = renderer.type;
-        const fade = renderer.fade;
-        const stiffness =
-            type.kind === 'rock'
-                ? 0
-                : type.kind === 'conifer' ||
-                    type.kind === 'broadleaf' ||
-                    type.kind === 'palm'
-                  ? 0.35
-                  : 1;
-
-        material.onBeforeCompile = (shader) => {
-            shader.uniforms.uTime = this.uniforms.uTime;
-            shader.uniforms.uWind = this.uniforms.uWind;
-            shader.uniforms.uWindDir = this.uniforms.uWindDir;
-            shader.uniforms.uCamPos = this.uniforms.uCamPos;
-            shader.uniforms.uFadeScale = this.uniforms.uFadeScale;
-            shader.uniforms.uDensity = this.uniforms.uDensity;
-            shader.uniforms.uFadeEnd = renderer.uniforms.uFadeEnd;
-            shader.uniforms.uFalloff = renderer.uniforms.uFalloff;
-            shader.uniforms.uLodSplit = renderer.uniforms.uLodSplit;
-            shader.vertexShader = shader.vertexShader
-                .replace(
-                    '#include <common>',
-                    `#include <common>
-attribute float wind;
-uniform float uTime;
-uniform float uWind;
-uniform vec2 uWindDir;
-uniform vec3 uCamPos;
-uniform float uFadeEnd;
-uniform float uFadeScale;
-uniform float uDensity;
-uniform vec2 uFalloff;
-uniform float uLodSplit;`,
-                )
-                // instanceColor carries the per-instance rank (density fade), not a colour.
-                .replace(
-                    '#include <color_vertex>',
-                    THREE.ShaderChunk.color_vertex.replace(
-                        'vColor.rgb *= instanceColor.rgb;',
-                        '',
-                    ),
-                )
-                .replace(
-                    '#include <begin_vertex>',
-                    `#include <begin_vertex>
-#ifdef USE_INSTANCING
-vec3 instPos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
-#else
-vec3 instPos = vec3(0.0);
-#endif
-float phase = dot(instPos.xz, vec2(0.071, 0.113));
-float gust = sin(uTime * 0.7 + instPos.x * 0.01) * 0.5 + 0.5;
-float sway = (sin(uTime * 1.9 + phase) * 0.6 + sin(uTime * 3.7 + phase * 1.7) * 0.25) * (0.4 + gust * 0.6);
-float bend = wind * wind * uWind * ${stiffness.toFixed(2)};
-// Sway along the wind plus a steady lean downwind. Instances are randomly yawed, so the
-// world-space wind direction is brought into instance space first.
-#ifdef USE_INSTANCING
-vec3 windLocal = transpose(mat3(instanceMatrix)) * vec3(uWindDir.x, 0.0, uWindDir.y);
-vec2 windDir = normalize(windLocal.xz + vec2(1e-5));
-#else
-vec2 windDir = uWindDir;
-#endif
-float lean = bend * 0.22 * (0.5 + gust * 0.5);
-transformed.xz += windDir * (sway * bend * 0.35 + lean)
-    + vec2(-windDir.y, windDir.x) * sway * bend * 0.1;
-float camDist = distance(instPos.xz, uCamPos.xz);
-float fadeEnd = uFadeEnd * uFadeScale;
-float fadeK = 1.0 - smoothstep(fadeEnd * ${fade ? '0.7' : '0.92'}, fadeEnd, camDist);
-${
-    fade
-        ? `#ifdef USE_INSTANCING_COLOR
-float densityT = uDensity * (1.0 - (1.0 - uFalloff.y) * smoothstep(uFalloff.x * fadeEnd, fadeEnd, camDist)) * ${(1 + RANK_FADE).toFixed(3)};
-fadeK *= 1.0 - smoothstep(densityT - ${RANK_FADE.toFixed(3)}, densityT, instanceColor.r);
-#endif`
-        : ''
-}${
-                        role === 'none'
-                            ? ''
-                            : `
-#ifdef USE_INSTANCING
-// Per-instance LOD0 / LOD1 split (Foliage.applyCell): each side keeps its own instances.
-fadeK *= ${role === 'near' ? 'step(distance(instPos, uCamPos), uLodSplit)' : 'step(uLodSplit, distance(instPos, uCamPos))'};
-#endif`
-                    }
-transformed *= fadeK;`,
-                );
-
-            // Blade normals are bent upwards; flipping them on back faces would render grass dark.
-            if (material.side === THREE.DoubleSide) {
-                shader.fragmentShader = shader.fragmentShader.replace(
-                    '#include <normal_fragment_begin>',
-                    THREE.ShaderChunk.normal_fragment_begin.replace(
-                        'normal *= faceDirection;',
-                        '',
-                    ),
-                );
-            }
-
-            // Alpha-tested leaf textures lose coverage in smaller mips (averaged alpha drops below
-            // the cutoff and distant canopies turn bare); scale alpha up with the mip level.
-            shader.fragmentShader = shader.fragmentShader.replace(
-                '#include <alphatest_fragment>',
-                `#if defined( USE_ALPHATEST ) && defined( USE_MAP )
-{
-    vec2 texel = vMapUv * vec2(textureSize(map, 0));
-    vec2 dx = dFdx(texel);
-    vec2 dy = dFdy(texel);
-    float mipLevel = max(0.0, 0.5 * log2(max(dot(dx, dx), dot(dy, dy))));
-    diffuseColor.a *= 1.0 + mipLevel * 0.25;
-}
-#endif
-#include <alphatest_fragment>`,
-            );
-        };
-        material.customProgramCacheKey = () =>
-            `foliage2-${stiffness}-${fade}-${material.side}-${role}`;
+    ): THREE.Material {
+        return createFoliageMaterial(source, {
+            globals: this.globals,
+            uniforms: renderer.uniforms,
+            stiffness: windStiffness(renderer.type.kind),
+            fade: renderer.fade,
+            role,
+            instance: attributeInstance,
+        });
     }
 
     /**
@@ -2534,27 +2716,11 @@ transformed *= fadeK;`,
                 addWindAttribute(geometry, box);
             }
 
-            // LOD0 / LOD1 get their own material copies for the per-instance split (the density
-            // fade kinds keep cell-granular LODs).
+            // LOD0 / LOD1 get their own near / far node materials for the per-instance split (the
+            // density fade kinds keep cell-granular LODs).
             const chainLength =
                 lods.length + (completed.impostorDistance !== null ? 1 : 0);
             const splitRoles = !renderer.fade && chainLength >= 2;
-            const roleCopies = new Map<string, THREE.Material>();
-            const withRole = (m: THREE.Material, role: LodRole) => {
-                if (role === 'none') {
-                    return m;
-                }
-
-                const key = `${m.uuid}:${role}`;
-                let copy = roleCopies.get(key);
-
-                if (!copy) {
-                    copy = m.clone();
-                    roleCopies.set(key, copy);
-                }
-
-                return copy;
-            };
             const roleOf = (lod: number): LodRole =>
                 !splitRoles
                     ? 'none'
@@ -2563,44 +2729,37 @@ transformed *= fadeK;`,
                       : lod === 1
                         ? 'far'
                         : 'none';
+            const cpuMaterials = new Map<string, THREE.Material>();
+            const withRole = (m: THREE.Material, role: LodRole) => {
+                const key = `${m.uuid}:${role}`;
+                let material = cpuMaterials.get(key);
 
-            lodMaterials = lodMaterials.map((m, lod) =>
-                Array.isArray(m)
-                    ? m.map((x) => withRole(x, roleOf(lod)))
-                    : withRole(m, roleOf(lod)),
-            );
-
-            const used = new Set(lodMaterials.flat());
-
-            for (const [lod, m] of lodMaterials.entries()) {
-                for (const mat of Array.isArray(m) ? m : [m]) {
-                    if (!mat.userData.foliagePatched) {
-                        mat.userData.foliagePatched = true;
-                        this.patchMaterial(mat, renderer, roleOf(lod));
-                    }
+                if (!material) {
+                    material = this.cpuMaterial(m, renderer, role);
+                    cpuMaterials.set(key, material);
                 }
-            }
 
-            // Originals only referenced through their role copies (textures stay shared).
-            for (const m of originals) {
-                if (!used.has(m)) {
-                    m.dispose();
-                }
-            }
-
+                return material;
+            };
             const previous = {
                 lods: renderer.lods,
                 proxy: renderer.shadowProxy?.geometry ?? null,
-                materials: renderer.lodMaterials,
-                depth: renderer.depthMaterial,
+                materials: [
+                    ...renderer.lodMaterials.flat(),
+                    ...renderer.sourceMaterials.flat(),
+                ],
             };
             renderer.lods = lods;
             renderer.drawLods = lods;
             renderer.shadowProxy = null;
             renderer.radius = geometryRadius(lods);
-            renderer.lodMaterials = lodMaterials;
+            renderer.sourceMaterials = lodMaterials;
+            renderer.lodMaterials = lodMaterials.map((m, lod) =>
+                Array.isArray(m)
+                    ? m.map((x) => withRole(x, roleOf(lod)))
+                    : withRole(m, roleOf(lod)),
+            );
             renderer.lodDistances = completed.distances;
-            renderer.depthMaterial = null;
             renderer.model = true;
             renderer.splitRoles = splitRoles;
             renderer.pendingImpostor =
@@ -2621,11 +2780,10 @@ transformed *= fadeK;`,
             for (const cell of renderer.cells.values()) {
                 this.removeNear(cell);
 
-                if (cell.mesh) {
+                if (cell.mesh && cell.batch) {
                     cell.lod = Math.min(cell.lod, lods.length - 1);
-                    cell.mesh.geometry = lods[cell.lod];
+                    cell.mesh.geometry = cell.batch.view(lods[cell.lod]);
                     cell.mesh.material = lodMaterial(renderer, cell.lod);
-                    cell.mesh.customDepthMaterial = undefined;
                 }
 
                 this.markDirty(renderer, cell);
@@ -2636,17 +2794,26 @@ transformed *= fadeK;`,
                 chunk.dirty = true;
             }
 
+            renderer.gpu?.configure(this.gpuConfig(renderer));
+
             for (const g of new Set(previous.lods)) {
                 g.dispose();
             }
 
             previous.proxy?.dispose();
 
-            for (const m of new Set(previous.materials.flat())) {
+            for (const m of new Set(previous.materials)) {
                 m.dispose();
             }
 
-            previous.depth?.dispose();
+            const used = new Set(lodMaterials.flat());
+
+            // Originals dropped from the LOD chain while completing it (textures stay shared).
+            for (const m of originals) {
+                if (!used.has(m)) {
+                    m.dispose();
+                }
+            }
         } catch (error) {
             renderer.lodInfo.source = 'procedural';
             renderer.lodInfo.warnings.push('model failed to load');
@@ -2670,15 +2837,23 @@ transformed *= fadeK;`,
 
         renderer.shown = [];
 
+        if (renderer.gpu) {
+            this.group.remove(renderer.gpu.group);
+            renderer.gpu.dispose();
+            renderer.gpu = null;
+        }
+
         for (const m of new Set(renderer.lodMaterials.flat())) {
+            m.dispose();
+        }
+
+        for (const m of new Set(renderer.sourceMaterials.flat())) {
             if (renderer.model) {
                 disposeMaterialTextures(m);
             }
 
             m.dispose();
         }
-
-        renderer.depthMaterial?.dispose();
     }
 }
 
@@ -3379,12 +3554,35 @@ function disposeObject(root: THREE.Object3D): void {
     });
 }
 
+/** Instances a cell / near mesh draws (its instanced geometry view). */
+function instanceCountOf(mesh: THREE.Mesh): number {
+    return (mesh.geometry as THREE.InstancedBufferGeometry).instanceCount;
+}
+
+/** Bounding sphere around every LOD (instance space, scale 1): the GPU culling bound. */
+function lodSphere(lods: THREE.BufferGeometry[]): THREE.Sphere {
+    for (const geometry of lods) {
+        if (!geometry.boundingSphere) {
+            geometry.computeBoundingSphere();
+        }
+    }
+
+    const center = lods[0].boundingSphere!.center.clone();
+    let radius = 0.5;
+
+    for (const geometry of lods) {
+        const sphere = geometry.boundingSphere!;
+        radius = Math.max(
+            radius,
+            center.distanceTo(sphere.center) + sphere.radius,
+        );
+    }
+
+    return new THREE.Sphere(center, radius);
+}
+
 const _normal = new THREE.Vector3();
 const _v = new THREE.Vector3();
-const _p = new THREE.Vector3();
-const _s = new THREE.Vector3();
-const _q = new THREE.Quaternion();
-const _e = new THREE.Euler();
-const _m = new THREE.Matrix4();
+const _box = new THREE.Box3();
 const _frustum = new THREE.Frustum();
 const _projScreen = new THREE.Matrix4();

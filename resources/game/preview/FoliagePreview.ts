@@ -1,6 +1,6 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { Sky } from 'three/addons/objects/Sky.js';
+import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
 import type { FoliageType } from '../shared/types';
 import { SimplexNoise } from '../util/noise';
 import { Foliage, placementAllowed } from '../world/Foliage';
@@ -53,7 +53,10 @@ const RESCATTER_DELAY = 150;
 export class FoliagePreview {
     onStats?: (stats: FoliagePreviewStats) => void;
 
-    private readonly renderer: THREE.WebGLRenderer;
+    /** Resolves once the renderer (WebGPU, or its WebGL 2 fallback) is initialised. */
+    readonly ready: Promise<void>;
+    private readonly renderer: THREE.WebGPURenderer;
+    private initialized = false;
     private readonly scene = new THREE.Scene();
     private readonly camera: THREE.PerspectiveCamera;
     private readonly controls: OrbitControls;
@@ -61,8 +64,8 @@ export class FoliagePreview {
     private readonly sun: THREE.DirectionalLight;
     private readonly sunDirection = new THREE.Vector3();
     private readonly pmrem: THREE.PMREMGenerator;
-    private envTarget: THREE.WebGLRenderTarget | null = null;
-    private readonly sky: Sky;
+    private envTarget: THREE.RenderTarget | null = null;
+    private readonly sky: SkyMesh;
 
     private readonly heights: Heightfield;
     private readonly ctx: FoliagePlacementContext;
@@ -103,7 +106,7 @@ export class FoliagePreview {
     private disposed = false;
 
     constructor(private readonly canvas: HTMLCanvasElement) {
-        this.renderer = new THREE.WebGLRenderer({
+        this.renderer = new THREE.WebGPURenderer({
             canvas,
             antialias: true,
             alpha: false,
@@ -134,23 +137,11 @@ export class FoliagePreview {
             THREE.MathUtils.degToRad(90 - elevation),
             THREE.MathUtils.degToRad(azimuth),
         );
-        this.sky = new Sky();
+        this.sky = new SkyMesh();
         this.sky.scale.setScalar(4000);
         configureSky(this.sky, this.sunDirection);
         this.scene.add(this.sky);
-
         this.pmrem = new THREE.PMREMGenerator(this.renderer);
-        const envScene = new THREE.Scene();
-        const envSky = new Sky();
-        envSky.scale.setScalar(1000);
-        configureSky(envSky, this.sunDirection);
-        // The direct sun already comes from the directional light; keep it out of the IBL.
-        envSky.material.uniforms.showSunDisc.value = 0;
-        envScene.add(envSky);
-        this.envTarget = this.pmrem.fromScene(envScene, 0, 0.1, 2000);
-        envSky.geometry.dispose();
-        envSky.material.dispose();
-        this.scene.environment = this.envTarget.texture;
         this.scene.environmentIntensity = 0.55;
 
         this.sun = new THREE.DirectionalLight(0xfff6e8, 3);
@@ -213,8 +204,33 @@ export class FoliagePreview {
 
         document.addEventListener('visibilitychange', this.updateLoop);
         this.applyMode();
-        this.resize();
-        this.updateLoop();
+        this.ready = this.renderer.init().then(() => {
+            if (this.disposed) {
+                return;
+            }
+
+            this.initialized = true;
+            // WebGPU: GPU-driven foliage culling (see frame()).
+            this.foliage.setRenderer(this.renderer);
+            this.buildEnvironment();
+            this.resize();
+            this.updateLoop();
+        });
+    }
+
+    /** Sky image based lighting, same setup as the game's Atmosphere. */
+    private buildEnvironment(): void {
+        const envScene = new THREE.Scene();
+        const envSky = new SkyMesh();
+        envSky.scale.setScalar(1000);
+        configureSky(envSky, this.sunDirection);
+        // The direct sun already comes from the directional light; keep it out of the IBL.
+        envSky.showSunDisc.value = 0;
+        envScene.add(envSky);
+        this.envTarget = this.pmrem.fromScene(envScene, 0, 0.1, 2000);
+        envSky.geometry.dispose();
+        envSky.material.dispose();
+        this.scene.environment = this.envTarget.texture;
     }
 
     setType(type: FoliageType): void {
@@ -339,7 +355,7 @@ export class FoliagePreview {
         }
 
         this.disposed = true;
-        this.renderer.setAnimationLoop(null);
+        void this.renderer.setAnimationLoop(null);
         this.running = false;
         this.clearTimers();
         this.resizeObserver.disconnect();
@@ -368,8 +384,7 @@ export class FoliagePreview {
         this.envTarget?.dispose();
         this.pmrem.dispose();
         this.sun.shadow.map?.dispose();
-        this.renderer.dispose();
-        this.renderer.forceContextLoss();
+        void this.renderer.dispose();
         this.onStats = undefined;
     }
 
@@ -722,7 +737,11 @@ export class FoliagePreview {
     // ------------------------------------------------------------------ loop
 
     private readonly updateLoop = (): void => {
-        const shouldRun = !this.disposed && this.onScreen && !document.hidden;
+        const shouldRun =
+            this.initialized &&
+            !this.disposed &&
+            this.onScreen &&
+            !document.hidden;
 
         if (shouldRun === this.running) {
             return;
@@ -730,7 +749,7 @@ export class FoliagePreview {
 
         this.running = shouldRun;
         this.lastTime = performance.now();
-        this.renderer.setAnimationLoop(shouldRun ? this.frame : null);
+        void this.renderer.setAnimationLoop(shouldRun ? this.frame : null);
     };
 
     private readonly frame = (): void => {
@@ -756,7 +775,7 @@ export class FoliagePreview {
         }
 
         this.foliage.update(dt, this.camera);
-        this.sky.material.uniforms.time.value += dt;
+        this.foliage.cull(this.renderer, this.camera);
         this.renderer.render(this.scene, this.camera);
 
         if (++this.statsFrame % 20 === 0) {
@@ -821,7 +840,7 @@ export class FoliagePreview {
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
 
-        if (!this.running) {
+        if (!this.running && this.initialized) {
             this.renderer.render(this.scene, this.camera);
         }
     }
@@ -862,17 +881,13 @@ export class FoliagePreview {
     }
 }
 
-function configureSky(sky: Sky, sunDirection: THREE.Vector3): void {
-    const u = sky.material.uniforms;
-    u.turbidity.value = 4;
-    u.rayleigh.value = 1.3;
-    u.mieCoefficient.value = 0.006;
-    u.mieDirectionalG.value = 0.8;
-    u.sunPosition.value.copy(sunDirection);
-
-    if (u.cloudCoverage) {
-        u.cloudCoverage.value = 0.25;
-    }
+function configureSky(sky: SkyMesh, sunDirection: THREE.Vector3): void {
+    sky.turbidity.value = 4;
+    sky.rayleigh.value = 1.3;
+    sky.mieCoefficient.value = 0.006;
+    sky.mieDirectionalG.value = 0.8;
+    sky.sunPosition.value.copy(sunDirection);
+    sky.cloudCoverage.value = 0.25;
 }
 
 function triangleCount(geometry: THREE.BufferGeometry): number {

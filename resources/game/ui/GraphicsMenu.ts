@@ -422,7 +422,9 @@ export class GraphicsMenu {
                             (tris, i) =>
                                 `L${i} ${count(tris)}/${count(t.lodInstances[i] ?? 0)}/${t.lodDistances[i] ?? 0}`,
                         )
-                        .join(' · ') + ` · cull ${t.cullDistance} m`,
+                        .join(' · ') +
+                        ` · cull ${t.cullDistance} m` +
+                        (t.occluded ? ` · ${count(t.occluded)} occluded` : ''),
                 ),
                 ...[
                     ...t.generated.map((g) => `+ ${g}`),

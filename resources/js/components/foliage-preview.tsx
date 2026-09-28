@@ -99,7 +99,13 @@ export function FoliagePreview({ type, className }: Props) {
                 engine.setMode(settings.mode);
                 engine.setType(typeRef.current);
                 engineRef.current = engine;
-                setStatus('ready');
+
+                // WebGPU (or its WebGL 2 fallback) initialises asynchronously.
+                return engine.ready.then(() => {
+                    if (!cancelled) {
+                        setStatus('ready');
+                    }
+                });
             })
             .catch((error: unknown) => {
                 console.error('Foliage preview failed to start', error);

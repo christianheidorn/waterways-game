@@ -40,8 +40,10 @@ export type FoliageTypeStat = {
     lodDistances: number[];
     /** Cull distance (m) after the foliage distance scale. */
     cullDistance: number;
-    /** Cells casting shadows. */
+    /** Cells casting shadows (GPU-culled foliage: instances in the shadow list). */
     shadowCasters: number;
+    /** Instances rejected by GPU occlusion culling (WebGPU only). */
+    occluded?: number;
     /** LODs generated at runtime (simplified mid LOD, impostor, …). */
     generated: string[];
     /** Missing / over-budget LODs worth fixing (e.g. rebake the asset). */

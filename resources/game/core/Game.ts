@@ -17,13 +17,18 @@ import type {
     GameSettings,
     GraphicsSettings,
 } from '../shared/types';
-import { normalizeGraphics, syncLegacy } from '../shared/graphicsPresets';
+import {
+    applyPreset,
+    normalizeGraphics,
+    syncLegacy,
+} from '../shared/graphicsPresets';
 import {
     diffGraphics,
     GraphicsMenu,
     loadGraphicsOverrides,
     saveGraphicsOverrides,
 } from '../ui/GraphicsMenu';
+import { PhotoMode } from '../ui/PhotoMode';
 import { Hud, LoadingScreen } from '../ui/Hud';
 import { Atmosphere } from '../world/Atmosphere';
 import { Foliage } from '../world/Foliage';
@@ -70,6 +75,9 @@ export class Game {
     /** Project graphics settings from the studio (before per-device overrides). */
     private graphicsDefaults!: GraphicsSettings;
     private graphicsMenu: GraphicsMenu | null = null;
+    private photoMode: PhotoMode | null = null;
+    /** Graphics in effect before photo mode switched to cinematic quality. */
+    private graphicsBeforePhoto: GraphicsSettings | null = null;
     private anisotropyTimer = 0;
     private lastFrameAt = 0;
     private frameIntervalMs = 16.7;
@@ -436,6 +444,32 @@ export class Game {
             },
             this.config.embedded,
         );
+        this.photoMode = new PhotoMode(this.hud.el, {
+            environment: () => this.manifest.environment,
+            previewEnvironment: (patch) =>
+                this.applyEnvironment({
+                    ...this.manifest.environment,
+                    ...patch,
+                }),
+            restoreEnvironment: (snapshot) => this.applyEnvironment(snapshot),
+            setCinematic: (on) => this.setPhotoCinematic(on),
+            focusAt: (x, y) => this.focusAt(x, y),
+            capture: (scale) => this.capturePhoto(scale),
+            setUiHidden: (hidden) =>
+                this.hud.el.classList.toggle('is-photo', hidden),
+            fov: () => this.camera.fov,
+            setFov: (fov) => {
+                this.camera.fov = fov;
+                this.camera.updateProjectionMatrix();
+            },
+            canvas: this.renderer.domElement,
+            mapName: () => this.manifest.map.name,
+            onOpen: () => {
+                if (document.pointerLockElement) {
+                    document.exitPointerLock();
+                }
+            },
+        });
         this.hud.setStatus(this.panel.hintElement);
         this.hud.setHistory(false, false);
         this.hud.setSaveState(this.dirty.size ? 'dirty' : 'idle');
@@ -1250,6 +1284,66 @@ export class Game {
         } finally {
             this.saving = false;
         }
+    }
+
+    /** Photo mode: cinematic quality while it is open (not saved), the previous graphics afterwards. */
+    private setPhotoCinematic(on: boolean): void {
+        if (on && !this.graphicsBeforePhoto) {
+            this.graphicsBeforePhoto = this.manifest.settings.graphics;
+            this.applyGraphics({
+                ...applyPreset('cinematic', this.graphicsBeforePhoto),
+                dynamic_resolution: false,
+                max_fps: 0,
+            });
+        } else if (!on && this.graphicsBeforePhoto) {
+            const previous = this.graphicsBeforePhoto;
+            this.graphicsBeforePhoto = null;
+            this.applyGraphics(previous);
+        }
+    }
+
+    /**
+     * Photo mode capture: renders a few still frames (so TAA converges) at `scale` × the current
+     * resolution, without editor overlays, and returns a PNG.
+     */
+    private async capturePhoto(scale: number): Promise<Blob> {
+        this.world.material.hideBrush();
+        const renderer = this.renderer;
+        const base = renderer.getPixelRatio();
+        const w = this.container.clientWidth || window.innerWidth;
+        const h = this.container.clientHeight || window.innerHeight;
+        const canvas = document.createElement('canvas');
+
+        try {
+            if (scale !== 1) {
+                renderer.setPixelRatio(base * scale);
+                renderer.setSize(w, h, false);
+                this.postFx.setSize(w, h, base * scale);
+            }
+
+            for (let i = 0; i < 16; i++) {
+                this.renderFrame(0);
+            }
+
+            const src = renderer.domElement;
+            canvas.width = src.width;
+            canvas.height = src.height;
+            // Copy right after rendering: the WebGL back buffer is not preserved.
+            canvas.getContext('2d')!.drawImage(src, 0, 0);
+        } finally {
+            if (scale !== 1) {
+                renderer.setPixelRatio(base);
+                this.resize();
+            }
+        }
+
+        return new Promise((resolve, reject) =>
+            canvas.toBlob(
+                (blob) =>
+                    blob ? resolve(blob) : reject(new Error('Empty image')),
+                'image/png',
+            ),
+        );
     }
 
     /** Renders the current view without editor overlays and posts it to the studio (AI review). */

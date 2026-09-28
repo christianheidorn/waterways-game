@@ -1,7 +1,7 @@
 import * as THREE from 'three/webgpu';
 import {
-    colorToDirection,
-    directionToColor,
+    unpackRGBToNormal,
+    packNormalToRGB,
     Fn,
     metalness,
     mix,
@@ -154,7 +154,7 @@ export class PostFx {
     /** Output (canvas drawing buffer) resolution in pixels. */
     readonly outputSize = new THREE.Vector2(1, 1);
     private readonly pipeline: THREE.RenderPipeline;
-    private readonly scenePass: THREE.PassNode;
+    private scenePass: THREE.PassNode;
     private readonly output = new OutputStage();
     private readonly black = solidTexture(0, 0, 0);
     private readonly white = solidTexture(1, 1, 1);
@@ -567,14 +567,13 @@ export class PostFx {
         this.disposeEffects();
         this.structure = s;
         const camera = this.camera;
-        const sp = this.scenePass;
         const taa = s.aa === 'taa';
         const samples = s.aa === 'msaa' ? 4 : 0;
-
-        if ((sp.options.samples ?? 0) !== samples) {
-            sp.options.samples = samples;
-            sp.renderTarget.dispose();
-        }
+        // A new scene pass per structure: its render target's attachments follow the MRT layout.
+        this.scenePass.dispose();
+        const sp = (this.scenePass = pass(this.scene, camera, { samples }));
+        sp.name = 'Scene';
+        sp.setResolutionScale(this.inputScale);
 
         // ---- scene pass attachments
         const needsVelocity = taa || s.motionBlur !== 'off';
@@ -586,7 +585,7 @@ export class PostFx {
         }
 
         if (needsNormal) {
-            outputs.normal = directionToColor(normalView);
+            outputs.normal = packNormalToRGB(normalView);
         }
 
         if (s.ssr !== 'off') {
@@ -613,7 +612,7 @@ export class PostFx {
             : null;
         const normal = normalTex
             ? (sample((uv: THREE.Node) =>
-                  colorToDirection(normalTex.sample(uv)),
+                  unpackRGBToNormal(normalTex.sample(uv)),
               ) as unknown as TextureNode)
             : null;
         const frame = new FrameContext(camera, depth);

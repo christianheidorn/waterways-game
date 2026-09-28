@@ -156,9 +156,7 @@ type ScreenPassOptions = {
     feedback?: boolean;
 };
 
-const quad = new THREE.QuadMesh(new THREE.NodeMaterial());
 const drawingSize = new THREE.Vector2();
-let rendererState: ReturnType<typeof THREE.RendererUtils.resetRendererState>;
 
 /**
  * One full-screen draw into its own render target, as a node: consumers sample `getTextureNode()` and
@@ -180,6 +178,11 @@ export class ScreenPass extends THREE.TempNode {
     private readonly targets: THREE.RenderTarget[];
     private index = 0;
     private readonly material = new THREE.NodeMaterial();
+    private readonly quad = new THREE.QuadMesh(this.material);
+    /** Per pass: passes render nested (a pass renders its inputs on demand while it draws). */
+    private rendererState: ReturnType<
+        typeof THREE.RendererUtils.resetRendererState
+    > = {} as never;
     private readonly output: TextureNode;
     private readonly fixedSize: [number, number] | null;
     private replacement: THREE.Texture | null = null;
@@ -208,6 +211,7 @@ export class ScreenPass extends THREE.TempNode {
             return target;
         });
         this.material.name = passName;
+        this.quad.name = passName;
         this.previous = texture(this.targets[count - 1].texture);
         this.output = passTexture(
             this as unknown as THREE.PassNode,
@@ -283,15 +287,13 @@ export class ScreenPass extends THREE.TempNode {
         }
 
         this.resolution.value.set(width, height);
-        rendererState = THREE.RendererUtils.resetRendererState(
+        const state = THREE.RendererUtils.resetRendererState(
             renderer,
-            rendererState,
+            this.rendererState,
         );
         renderer.setRenderTarget(write);
-        quad.material = this.material;
-        quad.name = this.passName;
-        quad.render(renderer);
-        THREE.RendererUtils.restoreRendererState(renderer, rendererState);
+        this.quad.render(renderer);
+        THREE.RendererUtils.restoreRendererState(renderer, state);
 
         if (feedback) {
             this.index = 1 - this.index;

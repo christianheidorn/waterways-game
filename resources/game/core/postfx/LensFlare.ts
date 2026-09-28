@@ -163,6 +163,9 @@ export class LensFlare extends THREE.TempNode {
     /** Post chain scale relative to the drawing buffer. */
     scale = 1;
     private hidden: THREE.Texture | null = null;
+    private rendererState: ReturnType<
+        typeof THREE.RendererUtils.resetRendererState
+    > = {} as never;
 
     constructor(f: FrameContext, sceneColor: TextureNode) {
         super('vec4');
@@ -337,7 +340,10 @@ export class LensFlare extends THREE.TempNode {
             this.target.setSize(w, h);
         }
 
-        state = THREE.RendererUtils.resetRendererState(renderer, state);
+        const state = THREE.RendererUtils.resetRendererState(
+            renderer,
+            this.rendererState,
+        );
         renderer.getClearColor(this.clearColor);
         renderer.setRenderTarget(this.target);
         renderer.setClearColor(0x000000, 0);
@@ -364,4 +370,3 @@ export class LensFlare extends THREE.TempNode {
 }
 
 const size = new THREE.Vector2();
-let state: ReturnType<typeof THREE.RendererUtils.resetRendererState>;

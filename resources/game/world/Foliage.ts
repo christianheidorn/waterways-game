@@ -4,7 +4,15 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FOLIAGE_STRIDE } from '../shared/types';
 import type { FoliageFile, FoliageKind, FoliageType } from '../shared/types';
 import { mulberry32, SimplexNoise } from '../util/noise';
+import type { FoliageTypeStat } from '../shared/protocol';
 import { createFoliageGeometry } from './FoliageGeometry';
+import {
+    findLodRoots,
+    LOD_BUDGETS,
+    renderImpostor,
+    simplifyGeometry,
+    triangleCount,
+} from './FoliageLod';
 import type { Heightfield } from './Heightfield';
 
 /**
@@ -53,6 +61,20 @@ const BUILD_BUDGET_MS = 4;
 const CHUNK_CELLS = 4;
 /** Default distance (m) within which foliage casts shadows (GraphicsSettings.foliage_shadow_distance). */
 const DEFAULT_SHADOW_DISTANCE = 120;
+/**
+ * Slack (m) around the per-instance LOD0 → LOD1 split. Cells are only re-evaluated every EVAL_MOVE
+ * metres, while the shader switches instances at the exact distance, so a cell is drawn as "near +
+ * far" whenever the split might pass through it before the next evaluation.
+ */
+const LOD_SPLIT_SLACK = EVAL_MOVE * 2;
+/** Split distance used while a type has no split (keeps the near-role shader test always true). */
+const NO_SPLIT = 1e9;
+
+/**
+ * Which side of the per-instance LOD0 / LOD1 split a material draws: 'near' keeps instances closer
+ * than the split distance (LOD0), 'far' those beyond it (LOD1), 'none' draws everything.
+ */
+type LodRole = 'near' | 'far' | 'none';
 
 type Cell = {
     /** `${size}:${cx},${cz}` — also the undo snapshot id. */
@@ -78,6 +100,12 @@ type Cell = {
     prebuild: boolean;
     /** Far chunk this cell belongs to (null for kinds without a far LOD, and for chunks). */
     chunk: Chunk | null;
+    /**
+     * LOD0 subset of a cell the LOD0 → LOD1 split passes through: the cell mesh then draws LOD1
+     * (instances closer than the split collapse in the shader) and this mesh draws the instances
+     * near the split with LOD0 — so LOD0 never reaches past the split just because the cell is large.
+     */
+    near: THREE.InstancedMesh | null;
 };
 
 /** A far-LOD batch over CHUNK_CELLS² cells; `data` is only filled while building. */
@@ -127,7 +155,19 @@ type TypeRenderer = {
     uniforms: {
         uFadeEnd: { value: number };
         uFalloff: { value: THREE.Vector2 };
+        /** Per-instance LOD0 → LOD1 switch distance (m, 3D), NO_SPLIT when unused. */
+        uLodSplit: { value: number };
     };
+    /** Where the LODs came from and what was generated at runtime (stats / F10 readout). */
+    lodInfo: {
+        source: FoliageTypeStat['source'];
+        generated: string[];
+        warnings: string[];
+    };
+    /** Materials of LOD0 / LOD1 are patched with the 'near' / 'far' roles (per-instance split). */
+    splitRoles: boolean;
+    /** Far impostor still to be rendered (needs the WebGL renderer; see Foliage.update()). */
+    pendingImpostor: { distance: number; role: LodRole } | null;
 };
 
 export type FoliageStats = {
@@ -152,6 +192,8 @@ export type FoliageStats = {
         string,
         { drawCalls: number; triangles: number; instances: number }
     >;
+    /** Per-type detail: LOD chain, triangles per LOD, drawn instances per LOD, missing-LOD warnings. */
+    types: FoliageTypeStat[];
 };
 
 export type FoliagePlacementContext = {
@@ -284,9 +326,22 @@ export class Foliage {
     private readonly lastEvalPos = new THREE.Vector3(Infinity, 0, 0);
     private readonly queue: { renderer: TypeRenderer; cell: Cell }[] = [];
     private lastCamera: THREE.Camera | null = null;
+    /** Renderer used to render missing impostors (set explicitly or picked up from a draw). */
+    private gl: THREE.WebGLRenderer | null = null;
+    private readonly captureRenderer = (renderer: THREE.WebGLRenderer) => {
+        this.gl ??= renderer;
+    };
 
     constructor() {
         this.group.name = 'Foliage';
+    }
+
+    /**
+     * WebGL renderer for runtime-generated impostors of models without a far LOD. Optional: the
+     * renderer is otherwise picked up from the first foliage draw.
+     */
+    setRenderer(renderer: THREE.WebGLRenderer | null): void {
+        this.gl = renderer;
     }
 
     /** Fraction of instances drawn (GraphicsSettings.foliage_density). */
@@ -1010,6 +1065,7 @@ export class Foliage {
             cells: 0,
             pendingBuilds: this.queue.length,
             byType: {},
+            types: [],
         };
         const camera = this.lastCamera;
 
@@ -1029,43 +1085,76 @@ export class Foliage {
                 triangles: 0,
                 instances: 0,
             });
+            const cull = renderer.type.cull_distance * this.distanceScale;
+            const lodTriangles = renderer.lods.map(triangleCount);
+            const detail: FoliageTypeStat = {
+                name: renderer.type.name,
+                kind: renderer.type.kind,
+                source: renderer.lodInfo.source,
+                instances: 0,
+                drawn: 0,
+                drawCalls: 0,
+                triangles: 0,
+                lodTriangles,
+                lodInstances: lodTriangles.map(() => 0),
+                lodDistances: renderer.lodDistances.map((d) =>
+                    Math.round(d * cull * this.lodBias),
+                ),
+                cullDistance: Math.round(cull),
+                shadowCasters: 0,
+                generated: renderer.lodInfo.generated.slice(),
+                warnings: lodWarnings(renderer, lodTriangles),
+            };
+            stats.types.push(detail);
 
             for (const cell of renderer.cells.values()) {
-                stats.instances += cell.data.length / FOLIAGE_STRIDE;
+                const n = cell.data.length / FOLIAGE_STRIDE;
+                stats.instances += n;
+                detail.instances += n;
                 stats.meshes += cell.mesh ? 1 : 0;
             }
 
             for (const cell of renderer.shown) {
-                const mesh = cell.mesh;
+                for (const mesh of [cell.mesh, cell.near]) {
+                    if (!mesh?.visible) {
+                        continue;
+                    }
 
-                if (!mesh?.visible) {
-                    continue;
+                    const lod = mesh === cell.near ? 0 : cell.lod;
+
+                    if (mesh === cell.mesh) {
+                        stats.shownCells++;
+                    }
+
+                    stats.shadowCasters += mesh.castShadow ? 1 : 0;
+                    detail.shadowCasters += mesh.castShadow ? 1 : 0;
+
+                    if (
+                        camera &&
+                        !_frustum.intersectsSphere(mesh.boundingSphere!)
+                    ) {
+                        continue;
+                    }
+
+                    const geometry = mesh.geometry;
+                    const groups = Array.isArray(mesh.material)
+                        ? Math.max(1, geometry.groups.length)
+                        : 1;
+                    const triangles = triangleCount(geometry) * mesh.count;
+                    stats.drawnInstances += mesh.count;
+                    stats.drawCalls += groups;
+                    stats.triangles += triangles;
+                    typeStats.drawCalls += groups;
+                    typeStats.triangles += triangles;
+                    typeStats.instances += mesh.count;
+                    detail.drawn += mesh.count;
+                    detail.drawCalls += groups;
+                    detail.triangles += triangles;
+
+                    if (lod < detail.lodInstances.length) {
+                        detail.lodInstances[lod] += mesh.count;
+                    }
                 }
-
-                stats.shownCells++;
-                stats.shadowCasters += mesh.castShadow ? 1 : 0;
-
-                if (
-                    camera &&
-                    !_frustum.intersectsSphere(mesh.boundingSphere!)
-                ) {
-                    continue;
-                }
-
-                const geometry = mesh.geometry;
-                const groups = Array.isArray(mesh.material)
-                    ? Math.max(1, geometry.groups.length)
-                    : 1;
-                const indexCount = geometry.index
-                    ? Math.min(geometry.drawRange.count, geometry.index.count)
-                    : geometry.getAttribute('position').count;
-                const triangles = (indexCount / 3) * mesh.count;
-                stats.drawnInstances += mesh.count;
-                stats.drawCalls += groups;
-                stats.triangles += triangles;
-                typeStats.drawCalls += groups;
-                typeStats.triangles += triangles;
-                typeStats.instances += mesh.count;
             }
         }
 
@@ -1092,6 +1181,74 @@ export class Foliage {
         if (this.queue.length) {
             this.processQueue(camera);
         }
+
+        if (this.gl) {
+            this.renderPendingImpostor(this.gl);
+        }
+    }
+
+    /** Renders at most one missing impostor per frame (outside the render pass). */
+    private renderPendingImpostor(gl: THREE.WebGLRenderer): void {
+        for (const renderer of this.renderers.values()) {
+            const pending = renderer.pendingImpostor;
+
+            if (!pending || renderer.disposed) {
+                continue;
+            }
+
+            renderer.pendingImpostor = null;
+            let built: ReturnType<typeof renderImpostor> = null;
+
+            try {
+                built = renderImpostor(
+                    gl,
+                    renderer.lods[0],
+                    renderer.lodMaterials[0],
+                );
+            } catch (error) {
+                console.warn(
+                    `Could not render an impostor for foliage type ${renderer.type.name}`,
+                    error,
+                );
+            }
+
+            if (!built) {
+                renderer.lodInfo.warnings.push(
+                    'no far LOD (impostor capture failed)',
+                );
+
+                return;
+            }
+
+            renderer.lods[0].computeBoundingBox();
+            addWindAttribute(built.geometry, renderer.lods[0].boundingBox!);
+            this.patchMaterial(built.material, renderer, pending.role);
+            renderer.lods = [...renderer.lods, built.geometry];
+            renderer.drawLods = [...renderer.drawLods, built.geometry];
+            renderer.lodMaterials = [...renderer.lodMaterials, built.material];
+            renderer.lodDistances = [
+                ...renderer.lodDistances,
+                pending.distance,
+            ];
+            renderer.lodInfo.generated.push(
+                `LOD${renderer.lods.length - 1} impostor (rendered)`,
+            );
+            const radius = geometryRadius(renderer.lods);
+
+            if (radius > renderer.radius * 1.05) {
+                // Wider than the model: refresh the cell bounds (frustum culling).
+                renderer.radius = radius;
+
+                for (const cell of renderer.cells.values()) {
+                    this.markDirty(renderer, cell);
+                }
+            }
+
+            // Far chunks (≥ 3 LODs) may start now; cells pick the new LOD on the next evaluation.
+            this.needsEval = true;
+
+            return;
+        }
     }
 
     private evaluate(cam: THREE.Vector3): void {
@@ -1104,6 +1261,9 @@ export class Foliage {
             const cull = renderer.type.cull_distance * this.distanceScale;
             const previous = renderer.shown;
             renderer.shown = [];
+            renderer.uniforms.uLodSplit.value = splitsLod(renderer)
+                ? renderer.lodDistances[1] * cull * this.lodBias
+                : NO_SPLIT;
 
             // Whole type out of range (e.g. grass while flying high): skip its cells entirely.
             if (
@@ -1111,8 +1271,41 @@ export class Foliage {
                 renderer.extent.distanceToPoint(cam) < cull
             ) {
                 if (renderer.lodDistances.length >= 3) {
-                    for (const chunk of renderer.chunks.values()) {
-                        this.evaluateChunk(renderer, chunk, cam, cull, stamp);
+                    // Only chunks that can be in range (maps can hold thousands of chunks).
+                    const chunkSize = renderer.cellSize * CHUNK_CELLS;
+                    const g0 = Math.floor((cam.x - cull) / chunkSize);
+                    const g1 = Math.floor((cam.x + cull) / chunkSize);
+                    const h0 = Math.floor((cam.z - cull) / chunkSize);
+                    const h1 = Math.floor((cam.z + cull) / chunkSize);
+
+                    if ((g1 - g0 + 1) * (h1 - h0 + 1) < renderer.chunks.size) {
+                        for (let gz = h0; gz <= h1; gz++) {
+                            for (let gx = g0; gx <= g1; gx++) {
+                                const chunk = renderer.chunks.get(
+                                    gridIndex(gx, gz),
+                                );
+
+                                if (chunk) {
+                                    this.evaluateChunk(
+                                        renderer,
+                                        chunk,
+                                        cam,
+                                        cull,
+                                        stamp,
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        for (const chunk of renderer.chunks.values()) {
+                            this.evaluateChunk(
+                                renderer,
+                                chunk,
+                                cam,
+                                cull,
+                                stamp,
+                            );
+                        }
                     }
                 }
 
@@ -1146,8 +1339,8 @@ export class Foliage {
             }
 
             for (const cell of previous) {
-                if (cell.shownStamp !== stamp && cell.mesh) {
-                    cell.mesh.visible = false;
+                if (cell.shownStamp !== stamp) {
+                    hideCell(cell);
                 }
             }
         }
@@ -1297,7 +1490,26 @@ export class Foliage {
         stamp: number,
     ): void {
         const mesh = cell.mesh!;
-        const lod = this.lodFor(renderer, dist, cull);
+        let lod = this.lodFor(renderer, dist, cull);
+        let straddles = false;
+
+        // Per-instance LOD0 → LOD1 switch: a cell the split distance may pass through (before the
+        // next evaluation) draws LOD1 plus a LOD0 subset of the instances near the camera.
+        if (!isChunk(cell) && splitsLod(renderer)) {
+            const split = renderer.uniforms.uLodSplit.value;
+
+            if (dist < split + LOD_SPLIT_SLACK) {
+                if (
+                    farthestDistance(cell.bounds, cam) + LOD_SPLIT_SLACK <
+                    split
+                ) {
+                    lod = 0;
+                } else {
+                    lod = 1;
+                    straddles = true;
+                }
+            }
+        }
 
         if (lod !== cell.lod || mesh.geometry !== renderer.drawLods[lod]) {
             mesh.geometry = renderer.drawLods[lod];
@@ -1310,16 +1522,103 @@ export class Foliage {
         const b = cell.bounds;
         const sx = Math.max(b.min.x - cam.x, 0, cam.x - b.max.x);
         const sz = Math.max(b.min.z - cam.z, 0, cam.z - b.max.z);
-        mesh.castShadow =
+        const shadows =
             renderer.type.cast_shadows &&
-            lod === 0 &&
             sx * sx + sz * sz < this.shadowDistance * this.shadowDistance;
+        mesh.castShadow = shadows && lod === 0;
         mesh.count = this.drawCount(renderer, cell, cam, cull);
         mesh.visible = mesh.count > 0;
+
+        if (straddles && mesh.visible) {
+            this.updateNear(renderer, cell, cam, shadows);
+        } else if (cell.near) {
+            cell.near.visible = false;
+        }
 
         if (cell.shownStamp !== stamp) {
             cell.shownStamp = stamp;
             renderer.shown.push(cell);
+        }
+    }
+
+    /**
+     * Fills the cell's LOD0 subset with the drawn instances within the split distance (+ slack; the
+     * shader trims the rest), reusing the cell's instance matrices.
+     */
+    private updateNear(
+        renderer: TypeRenderer,
+        cell: Cell,
+        cam: THREE.Vector3,
+        shadows: boolean,
+    ): void {
+        const mesh = cell.mesh!;
+        let near = cell.near;
+
+        if (!near || near.instanceMatrix.count < cell.capacity) {
+            this.removeNear(cell);
+            near = new THREE.InstancedMesh(
+                renderer.drawLods[0],
+                lodMaterial(renderer, 0),
+                cell.capacity,
+            );
+            this.setupMesh(renderer, near, `${cell.key}_near`);
+            cell.near = near;
+            this.group.add(near);
+        } else if (near.geometry !== renderer.drawLods[0]) {
+            near.geometry = renderer.drawLods[0];
+            near.material = lodMaterial(renderer, 0);
+        }
+
+        const reach = renderer.uniforms.uLodSplit.value + LOD_SPLIT_SLACK;
+        const reach2 = reach * reach;
+        const src = mesh.instanceMatrix.array as Float32Array;
+        const dst = near.instanceMatrix.array as Float32Array;
+        const r = renderer.radius * Math.max(0.01, renderer.type.max_scale);
+        let n = 0;
+        let minX = Infinity;
+        let minY = Infinity;
+        let minZ = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        let maxZ = -Infinity;
+
+        for (let i = 0; i < mesh.count; i++) {
+            const o = i * 16;
+            const x = src[o + 12];
+            const y = src[o + 13];
+            const z = src[o + 14];
+            const dx = x - cam.x;
+            const dy = y - cam.y;
+            const dz = z - cam.z;
+
+            if (dx * dx + dy * dy + dz * dz > reach2) {
+                continue;
+            }
+
+            for (let k = 0; k < 16; k++) {
+                dst[n * 16 + k] = src[o + k];
+            }
+
+            minX = Math.min(minX, x - r);
+            maxX = Math.max(maxX, x + r);
+            minY = Math.min(minY, y - r * 0.25);
+            maxY = Math.max(maxY, y + r);
+            minZ = Math.min(minZ, z - r);
+            maxZ = Math.max(maxZ, z + r);
+            n++;
+        }
+
+        near.count = n;
+        near.visible = n > 0;
+        near.castShadow = shadows;
+
+        if (n > 0) {
+            near.instanceMatrix.clearUpdateRanges();
+            near.instanceMatrix.addUpdateRange(0, n * 16);
+            near.instanceMatrix.needsUpdate = true;
+            near.boundingBox!.min.set(minX, minY, minZ);
+            near.boundingBox!.max.set(maxX, maxY, maxZ);
+            near.boundingBox!.getBoundingSphere(near.boundingSphere!);
         }
     }
 
@@ -1413,9 +1712,7 @@ export class Foliage {
             built++;
 
             if (!cell.mesh || cell.coveredStamp === this.evalStamp) {
-                if (cell.mesh && cell.coveredStamp === this.evalStamp) {
-                    cell.mesh.visible = false;
-                }
+                hideCell(cell);
 
                 continue;
             }
@@ -1427,7 +1724,7 @@ export class Foliage {
             if (dist < cull) {
                 this.applyCell(renderer, cell, cam, cull, dist, this.evalStamp);
             } else {
-                cell.mesh.visible = false;
+                hideCell(cell);
             }
         }
 
@@ -1685,6 +1982,7 @@ export class Foliage {
             coveredStamp: -1,
             prebuild: false,
             chunk: null,
+            near: null,
         };
         this.resetBounds(renderer, cell);
 
@@ -1799,14 +2097,7 @@ export class Foliage {
                 capacity,
             );
             cell.capacity = capacity;
-            mesh.receiveShadow = true;
-            mesh.frustumCulled = true;
-            mesh.matrixAutoUpdate = false;
-            mesh.name = `Foliage_${renderer.type.name}_${cell.key}`;
-
-            if (renderer.depthMaterial) {
-                mesh.customDepthMaterial = renderer.depthMaterial;
-            }
+            this.setupMesh(renderer, mesh, cell.key);
 
             if (renderer.fade) {
                 // r = rank of the instance within the cell (0..1): drives the density fade.
@@ -1816,22 +2107,6 @@ export class Foliage {
                 );
             }
 
-            mesh.onBeforeShadow = () => {
-                const proxy = renderer.shadowProxy;
-
-                if (proxy && mesh!.geometry === proxy.geometry) {
-                    proxy.geometry.setDrawRange(proxy.start, proxy.count);
-                }
-            };
-            mesh.onAfterShadow = () => {
-                const proxy = renderer.shadowProxy;
-
-                if (proxy && mesh!.geometry === proxy.geometry) {
-                    proxy.geometry.setDrawRange(0, proxy.main);
-                }
-            };
-            mesh.boundingSphere = new THREE.Sphere();
-            mesh.boundingBox = new THREE.Box3();
             cell.mesh = mesh;
             this.group.add(mesh);
         }
@@ -1892,7 +2167,53 @@ export class Foliage {
         cell.bounds.getBoundingSphere(mesh.boundingSphere!);
     }
 
+    /** Shared setup of cell / chunk / near-subset meshes. */
+    private setupMesh(
+        renderer: TypeRenderer,
+        mesh: THREE.InstancedMesh,
+        key: string,
+    ): void {
+        mesh.receiveShadow = true;
+        mesh.frustumCulled = true;
+        mesh.matrixAutoUpdate = false;
+        // The reflection pass hides small foliage by this prefix (see Game.renderReflection).
+        mesh.name = `Foliage_${renderer.type.name}_${key}`;
+
+        if (renderer.depthMaterial) {
+            mesh.customDepthMaterial = renderer.depthMaterial;
+        }
+
+        mesh.onBeforeShadow = () => {
+            const proxy = renderer.shadowProxy;
+
+            if (proxy && mesh.geometry === proxy.geometry) {
+                proxy.geometry.setDrawRange(proxy.start, proxy.count);
+            }
+        };
+        mesh.onAfterShadow = () => {
+            const proxy = renderer.shadowProxy;
+
+            if (proxy && mesh.geometry === proxy.geometry) {
+                proxy.geometry.setDrawRange(0, proxy.main);
+            }
+        };
+        mesh.onBeforeRender = this.captureRenderer;
+        // Set explicitly (never null): three would otherwise compute them from every instance.
+        mesh.boundingSphere = new THREE.Sphere();
+        mesh.boundingBox = new THREE.Box3();
+    }
+
+    private removeNear(cell: Cell): void {
+        if (cell.near) {
+            this.group.remove(cell.near);
+            cell.near.dispose();
+            cell.near = null;
+        }
+    }
+
     private removeCellMesh(cell: Cell): void {
+        this.removeNear(cell);
+
         if (cell.mesh) {
             this.group.remove(cell.mesh);
             cell.mesh.dispose();
@@ -1916,6 +2237,10 @@ export class Foliage {
             side: set.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
         });
         const falloff = DENSITY_FALLOFF[type.kind] ?? null;
+        // Kinds without the density fade (trees, rocks) switch LOD0 → LOD1 per instance.
+        const splitRoles = falloff === null && set.lods.length >= 2;
+        const nearMaterial = splitRoles ? material.clone() : material;
+        const farMaterial = splitRoles ? material.clone() : material;
         const renderer: TypeRenderer = {
             type,
             cellSize: CELL_SIZES[type.kind] ?? 64,
@@ -1923,7 +2248,9 @@ export class Foliage {
             drawLods: set.lods,
             shadowProxy: null,
             lodDistances: set.lodDistances,
-            lodMaterials: set.lods.map(() => material),
+            lodMaterials: set.lods.map((_g, lod) =>
+                lod === 0 ? nearMaterial : lod === 1 ? farMaterial : material,
+            ),
             depthMaterial: null,
             model: false,
             disposed: false,
@@ -1943,13 +2270,27 @@ export class Foliage {
                         falloff?.min ?? 1,
                     ),
                 },
+                uLodSplit: { value: NO_SPLIT },
             },
+            lodInfo: {
+                source: type.model_url ? 'loading' : 'procedural',
+                generated: [],
+                warnings: [],
+            },
+            splitRoles,
+            pendingImpostor: null,
         };
-        this.patchMaterial(material, renderer);
+        this.patchMaterial(material, renderer, 'none');
+
+        if (splitRoles) {
+            this.patchMaterial(nearMaterial, renderer, 'near');
+            this.patchMaterial(farMaterial, renderer, 'far');
+        }
+
         const depthMaterial = new THREE.MeshDepthMaterial({
             depthPacking: THREE.RGBADepthPacking,
         });
-        this.patchMaterial(depthMaterial, renderer);
+        this.patchMaterial(depthMaterial, renderer, 'none');
         renderer.depthMaterial = depthMaterial;
 
         // Shadow proxy: the shadow pass of LOD0 draws a slightly shrunk LOD1 instead.
@@ -1975,6 +2316,7 @@ export class Foliage {
     private patchMaterial(
         material: THREE.Material,
         renderer: TypeRenderer,
+        role: LodRole,
     ): void {
         const type = renderer.type;
         const fade = renderer.fade;
@@ -1996,6 +2338,7 @@ export class Foliage {
             shader.uniforms.uDensity = this.uniforms.uDensity;
             shader.uniforms.uFadeEnd = renderer.uniforms.uFadeEnd;
             shader.uniforms.uFalloff = renderer.uniforms.uFalloff;
+            shader.uniforms.uLodSplit = renderer.uniforms.uLodSplit;
             shader.vertexShader = shader.vertexShader
                 .replace(
                     '#include <common>',
@@ -2008,7 +2351,8 @@ uniform vec3 uCamPos;
 uniform float uFadeEnd;
 uniform float uFadeScale;
 uniform float uDensity;
-uniform vec2 uFalloff;`,
+uniform vec2 uFalloff;
+uniform float uLodSplit;`,
                 )
                 // instanceColor carries the per-instance rank (density fade), not a colour.
                 .replace(
@@ -2051,7 +2395,15 @@ float densityT = uDensity * (1.0 - (1.0 - uFalloff.y) * smoothstep(uFalloff.x * 
 fadeK *= 1.0 - smoothstep(densityT - ${RANK_FADE.toFixed(3)}, densityT, instanceColor.r);
 #endif`
         : ''
-}
+}${
+                        role === 'none'
+                            ? ''
+                            : `
+#ifdef USE_INSTANCING
+// Per-instance LOD0 / LOD1 split (Foliage.applyCell): each side keeps its own instances.
+fadeK *= ${role === 'near' ? 'step(distance(instPos, uCamPos), uLodSplit)' : 'step(uLodSplit, distance(instPos, uCamPos))'};
+#endif`
+                    }
 transformed *= fadeK;`,
                 );
 
@@ -2083,12 +2435,14 @@ transformed *= fadeK;`,
             );
         };
         material.customProgramCacheKey = () =>
-            `foliage2-${stiffness}-${fade}-${material.side}`;
+            `foliage2-${stiffness}-${fade}-${material.side}-${role}`;
     }
 
     /**
      * Loads a GLB model. Baked assets (resources/game/tools/FoliageBaker.ts) contain top-level
-     * nodes "LOD0".."LODn" which become the type's LODs; any other GLB is a single LOD.
+     * nodes "LOD0".."LODn" which become the type's LODs; other GLBs may name their LODs anywhere in
+     * the hierarchy ("Tree_LOD1", nested "LOD0" groups, …) or be a single LOD. Missing reduced / far
+     * LODs are generated (see completeModelLods).
      */
     private async loadModel(
         renderer: TypeRenderer,
@@ -2104,17 +2458,15 @@ transformed *= fadeK;`,
             }
 
             gltf.scene.updateMatrixWorld(true);
-            const lodNodes = gltf.scene.children
-                .filter((child) => /^LOD\d+$/.test(child.name))
-                .sort(
-                    (a, b) => Number(a.name.slice(3)) - Number(b.name.slice(3)),
-                );
-            const roots = lodNodes.length ? lodNodes : [gltf.scene];
-            const lods: THREE.BufferGeometry[] = [];
-            const lodMaterials: (THREE.Material | THREE.Material[])[] = [];
+            // Without LOD naming the whole scene is LOD0. (Merging every node of a model that
+            // carries LODs deeper in its hierarchy would draw all of them on top of each other.)
+            const levels = findLodRoots(gltf.scene);
+            const roots = levels.length ? levels : [[gltf.scene]];
+            let lods: THREE.BufferGeometry[] = [];
+            let lodMaterials: (THREE.Material | THREE.Material[])[] = [];
 
-            for (const root of roots) {
-                const built = buildModelLod(root);
+            for (const level of roots) {
+                const built = buildModelLod(level);
 
                 if (built) {
                     lods.push(built.geometry);
@@ -2139,40 +2491,100 @@ transformed *= fadeK;`,
                 return;
             }
 
-            // Wind weight: 0 at the base → 1 at the top of LOD0, shared by all LODs so they sway alike.
-            lods[0].computeBoundingBox();
-            const box = lods[0].boundingBox!;
-            const height = Math.max(0.001, box.max.y - box.min.y);
-
-            for (const geometry of lods) {
-                const pos = geometry.getAttribute('position');
-                const windAttr = new Float32Array(pos.count);
-
-                for (let i = 0; i < pos.count; i++) {
-                    windAttr[i] = Math.min(
-                        1.2,
-                        Math.max(0, (pos.getY(i) - box.min.y) / height),
-                    );
-                }
-
-                geometry.setAttribute(
-                    'wind',
-                    new THREE.BufferAttribute(windAttr, 1),
-                );
-            }
-
             const type = renderer.type;
             const tint = new THREE.Color(type.tint || '#ffffff');
-            const unique = new Set(lodMaterials.flat());
 
-            for (const mat of unique) {
+            // Tint before any impostor capture so the far LOD matches.
+            for (const mat of new Set(lodMaterials.flat())) {
                 const colored = mat as THREE.MeshStandardMaterial;
 
                 if (colored.color?.isColor) {
                     colored.color.multiply(tint);
                 }
+            }
 
-                this.patchMaterial(mat, renderer);
+            const originals = new Set(lodMaterials.flat());
+            const completed = await completeModelLods(
+                type.kind,
+                lods,
+                lodMaterials,
+                pickLodDistances(type, gltf.scene.userData, lods.length),
+            );
+
+            if (renderer.disposed) {
+                for (const g of completed.lods) {
+                    g.dispose();
+                }
+
+                for (const m of originals) {
+                    disposeMaterialTextures(m);
+                    m.dispose();
+                }
+
+                return;
+            }
+
+            lods = completed.lods;
+            lodMaterials = completed.materials;
+            lods[0].computeBoundingBox();
+            const box = lods[0].boundingBox!.clone();
+
+            for (const geometry of lods) {
+                addWindAttribute(geometry, box);
+            }
+
+            // LOD0 / LOD1 get their own material copies for the per-instance split (the density
+            // fade kinds keep cell-granular LODs).
+            const chainLength =
+                lods.length + (completed.impostorDistance !== null ? 1 : 0);
+            const splitRoles = !renderer.fade && chainLength >= 2;
+            const roleCopies = new Map<string, THREE.Material>();
+            const withRole = (m: THREE.Material, role: LodRole) => {
+                if (role === 'none') {
+                    return m;
+                }
+
+                const key = `${m.uuid}:${role}`;
+                let copy = roleCopies.get(key);
+
+                if (!copy) {
+                    copy = m.clone();
+                    roleCopies.set(key, copy);
+                }
+
+                return copy;
+            };
+            const roleOf = (lod: number): LodRole =>
+                !splitRoles
+                    ? 'none'
+                    : lod === 0
+                      ? 'near'
+                      : lod === 1
+                        ? 'far'
+                        : 'none';
+
+            lodMaterials = lodMaterials.map((m, lod) =>
+                Array.isArray(m)
+                    ? m.map((x) => withRole(x, roleOf(lod)))
+                    : withRole(m, roleOf(lod)),
+            );
+
+            const used = new Set(lodMaterials.flat());
+
+            for (const [lod, m] of lodMaterials.entries()) {
+                for (const mat of Array.isArray(m) ? m : [m]) {
+                    if (!mat.userData.foliagePatched) {
+                        mat.userData.foliagePatched = true;
+                        this.patchMaterial(mat, renderer, roleOf(lod));
+                    }
+                }
+            }
+
+            // Originals only referenced through their role copies (textures stay shared).
+            for (const m of originals) {
+                if (!used.has(m)) {
+                    m.dispose();
+                }
             }
 
             const previous = {
@@ -2186,17 +2598,28 @@ transformed *= fadeK;`,
             renderer.shadowProxy = null;
             renderer.radius = geometryRadius(lods);
             renderer.lodMaterials = lodMaterials;
-            renderer.lodDistances = pickLodDistances(
-                type,
-                gltf.scene.userData,
-                lods.length,
-            );
+            renderer.lodDistances = completed.distances;
             renderer.depthMaterial = null;
             renderer.model = true;
+            renderer.splitRoles = splitRoles;
+            renderer.pendingImpostor =
+                completed.impostorDistance !== null
+                    ? {
+                          distance: completed.impostorDistance,
+                          role: roleOf(lods.length),
+                      }
+                    : null;
+            renderer.lodInfo = {
+                source: type.asset ? 'baked' : 'model',
+                generated: completed.generated,
+                warnings: completed.warnings,
+            };
 
             // Swap existing meshes over right away (the stand-in geometry is disposed below);
             // the rebuild then refreshes their bounds for the model's size.
             for (const cell of renderer.cells.values()) {
+                this.removeNear(cell);
+
                 if (cell.mesh) {
                     cell.lod = Math.min(cell.lod, lods.length - 1);
                     cell.mesh.geometry = lods[cell.lod];
@@ -2212,7 +2635,7 @@ transformed *= fadeK;`,
                 chunk.dirty = true;
             }
 
-            for (const g of previous.lods) {
+            for (const g of new Set(previous.lods)) {
                 g.dispose();
             }
 
@@ -2224,6 +2647,8 @@ transformed *= fadeK;`,
 
             previous.depth?.dispose();
         } catch (error) {
+            renderer.lodInfo.source = 'procedural';
+            renderer.lodInfo.warnings.push('model failed to load');
             console.warn(`Failed to load foliage model ${url}`, error);
         }
     }
@@ -2368,6 +2793,49 @@ function isChunk(cell: Cell): cell is Chunk {
     return (cell as Chunk).members !== undefined;
 }
 
+function hideCell(cell: Cell): void {
+    if (cell.mesh) {
+        cell.mesh.visible = false;
+    }
+
+    if (cell.near) {
+        cell.near.visible = false;
+    }
+}
+
+/** Whether a type switches LOD0 → LOD1 per instance (materials patched with near / far roles). */
+function splitsLod(renderer: TypeRenderer): boolean {
+    return renderer.splitRoles && renderer.drawLods.length >= 2;
+}
+
+/** Distance from a point to the farthest corner of a box. */
+function farthestDistance(box: THREE.Box3, p: THREE.Vector3): number {
+    const dx = Math.max(p.x - box.min.x, box.max.x - p.x);
+    const dy = Math.max(p.y - box.min.y, box.max.y - p.y);
+    const dz = Math.max(p.z - box.min.z, box.max.z - p.z);
+
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/** Wind weight: 0 at the base → 1 at the top of `box` (LOD0), so every LOD sways alike. */
+function addWindAttribute(
+    geometry: THREE.BufferGeometry,
+    box: THREE.Box3,
+): void {
+    const pos = geometry.getAttribute('position');
+    const height = Math.max(0.001, box.max.y - box.min.y);
+    const wind = new Float32Array(pos.count);
+
+    for (let i = 0; i < pos.count; i++) {
+        wind[i] = Math.min(
+            1.2,
+            Math.max(0, (pos.getY(i) - box.min.y) / height),
+        );
+    }
+
+    geometry.setAttribute('wind', new THREE.BufferAttribute(wind, 1));
+}
+
 /** All instances of a renderer as one flat list. */
 function flatten(renderer: TypeRenderer): number[] {
     const out: number[] = [];
@@ -2379,6 +2847,30 @@ function flatten(renderer: TypeRenderer): number[] {
     }
 
     return out;
+}
+
+/** Missing / over-budget LODs of a type (F10 readout), plus problems recorded while loading. */
+function lodWarnings(renderer: TypeRenderer, tris: number[]): string[] {
+    const budget = LOD_BUDGETS[renderer.type.kind] ?? LOD_BUDGETS.bush;
+    const warnings = renderer.lodInfo.warnings.slice();
+
+    if (renderer.pendingImpostor) {
+        warnings.push('impostor pending (rendered after the first frame)');
+    } else if (tris.length === 1) {
+        warnings.push('single LOD: full detail at every distance');
+    } else if (tris[tris.length - 1] > budget.far) {
+        warnings.push(
+            `no far LOD / impostor (last LOD ${formatTris(tris[tris.length - 1])})`,
+        );
+    }
+
+    if (tris[0] > budget.lod0 * 1.5) {
+        warnings.push(
+            `LOD0 ${formatTris(tris[0])} over the ${formatTris(budget.lod0)} budget`,
+        );
+    }
+
+    return warnings;
 }
 
 /** Largest distance of any vertex from the model origin across all LODs (scale 1). */
@@ -2471,10 +2963,168 @@ function lodMaterial(
 }
 
 /**
- * Merges every mesh under a LOD node into one indexed geometry (one group per material) with
- * float position / normal / uv (+ colour when a material uses vertex colours).
+ * Fills in the LODs a model lacks (see LOD_BUDGETS in FoliageLod.ts):
+ *
+ * - LOD0 far beyond its budget (raw, unbaked sources) is simplified,
+ * - a simplified mid LOD is inserted when the cheapest mesh LOD is still heavy,
+ * - rocks get a coarse far mesh; vegetation without a far LOD gets an impostor, rendered later
+ *   (`impostorDistance` != null) because that needs the WebGL renderer.
+ *
+ * `lods` / `materials` are updated in place and returned with the matching LOD distances.
  */
-function buildModelLod(root: THREE.Object3D): {
+async function completeModelLods(
+    kind: FoliageKind,
+    lods: THREE.BufferGeometry[],
+    materials: (THREE.Material | THREE.Material[])[],
+    distances: number[],
+): Promise<{
+    lods: THREE.BufferGeometry[];
+    materials: (THREE.Material | THREE.Material[])[];
+    distances: number[];
+    impostorDistance: number | null;
+    generated: string[];
+    warnings: string[];
+}> {
+    const budget = LOD_BUDGETS[kind] ?? LOD_BUDGETS.bush;
+    const generated: string[] = [];
+    const warnings: string[] = [];
+    const lod0 = triangleCount(lods[0]);
+
+    if (lod0 > budget.lod0 * 3) {
+        const reduced = await simplifyGeometry(lods[0], budget.lod0);
+
+        if (reduced) {
+            lods[0].dispose();
+            lods[0] = reduced;
+            const tris = triangleCount(reduced);
+            generated.push(
+                `LOD0 simplified ${formatTris(lod0)} → ${formatTris(tris)}`,
+            );
+
+            // Source LODs now heavier than LOD0 would make the chain more expensive with distance.
+            for (let i = lods.length - 1; i > 0; i--) {
+                if (triangleCount(lods[i]) >= tris) {
+                    lods[i].dispose();
+                    lods.splice(i, 1);
+                    materials.splice(i, 1);
+                    distances.splice(i, 1);
+                }
+            }
+        } else {
+            warnings.push(`LOD0 ${formatTris(lod0)} could not be simplified`);
+        }
+
+        await nextTick();
+    }
+
+    const originalCount = lods.length;
+    // Mesh LODs end where the far LOD (impostor / coarse mesh) starts.
+    let meshEnd = lods.length;
+
+    while (meshEnd > 1 && triangleCount(lods[meshEnd - 1]) <= budget.far) {
+        meshEnd--;
+    }
+
+    const hasFar = meshEnd < lods.length;
+    const cheapest = triangleCount(lods[meshEnd - 1]);
+    let midIndex = -1;
+
+    if (cheapest > budget.mid * 1.5) {
+        const mid = await simplifyGeometry(lods[meshEnd - 1], budget.mid);
+
+        if (mid) {
+            midIndex = meshEnd;
+            lods.splice(midIndex, 0, mid);
+            materials.splice(midIndex, 0, materials[midIndex - 1]);
+            meshEnd++;
+            generated.push(
+                `LOD${midIndex} simplified (${formatTris(triangleCount(mid))})`,
+            );
+        } else {
+            warnings.push(`no reduced LOD (cheapest ${formatTris(cheapest)})`);
+        }
+
+        await nextTick();
+    }
+
+    let farIndex = -1;
+    let impostor = false;
+
+    if (!hasFar) {
+        if (budget.impostor) {
+            impostor = true;
+        } else {
+            const far = await simplifyGeometry(lods[meshEnd - 1], budget.far);
+
+            if (far) {
+                farIndex = lods.length;
+                lods.push(far);
+                materials.push(materials[meshEnd - 1]);
+                generated.push(
+                    `LOD${farIndex} far mesh (${formatTris(triangleCount(far))})`,
+                );
+            } else {
+                warnings.push('no far LOD');
+            }
+        }
+    }
+
+    // Distances: kind defaults for single-LOD sources, otherwise the source's distances with the
+    // generated LODs slotted in between / after them.
+    let d: number[];
+
+    if (originalCount <= 1) {
+        d = [0];
+
+        if (midIndex >= 0) {
+            d.push(budget.midAt);
+        }
+
+        if (farIndex >= 0 || impostor) {
+            d.push(budget.farAt);
+        }
+    } else {
+        d = distances.slice(0, originalCount);
+        const farAt = (prev: number) =>
+            Math.min(0.95, Math.max(budget.farAt, prev + 0.1));
+
+        if (midIndex >= 0) {
+            const prev = d[midIndex - 1];
+            const next = midIndex < d.length ? d[midIndex] : farAt(prev);
+            d.splice(midIndex, 0, (prev + next) / 2);
+        }
+
+        if (farIndex >= 0 || impostor) {
+            d.push(farAt(d[d.length - 1]));
+        }
+    }
+
+    return {
+        lods,
+        materials,
+        distances: d.slice(0, lods.length),
+        impostorDistance: impostor ? d[lods.length] : null,
+        generated,
+        warnings,
+    };
+}
+
+function formatTris(tris: number): string {
+    return tris >= 10000
+        ? `${Math.round(tris / 1000)}k tris`
+        : `${tris.toLocaleString()} tris`;
+}
+
+/** Yields to the event loop between expensive steps (model LOD generation). */
+function nextTick(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Merges every mesh under the given LOD roots into one indexed geometry (one group per material)
+ * with float position / normal / uv (+ colour when a material uses vertex colours).
+ */
+function buildModelLod(roots: THREE.Object3D[]): {
     geometry: THREE.BufferGeometry;
     materials: THREE.Material[];
 } | null {
@@ -2482,9 +3132,12 @@ function buildModelLod(root: THREE.Object3D): {
         geometry: THREE.BufferGeometry;
         material: THREE.Material;
     }[] = [];
-    root.updateWorldMatrix(true, true);
 
-    root.traverse((obj) => {
+    for (const root of roots) {
+        root.updateWorldMatrix(true, true);
+    }
+
+    const visit = (obj: THREE.Object3D) => {
         const mesh = obj as THREE.Mesh;
 
         if (!mesh.isMesh || !mesh.geometry.getAttribute('position')) {
@@ -2559,7 +3212,11 @@ function buildModelLod(root: THREE.Object3D): {
 
             pieces.push({ geometry: g, material });
         }
-    });
+    };
+
+    for (const root of roots) {
+        root.traverse(visit);
+    }
 
     if (!pieces.length) {
         return null;

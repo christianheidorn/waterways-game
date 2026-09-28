@@ -198,8 +198,12 @@ export function AiReviewSheet({
     const busy = phase === 'capturing' || phase === 'reviewing';
 
     return (
-        <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent className="dark w-full gap-0 overflow-y-auto border-white/10 bg-neutral-900 text-neutral-100 sm:max-w-lg">
+        <Sheet modal={false} open={open} onOpenChange={onOpenChange}>
+            <SheetContent
+                overlay={false}
+                onInteractOutside={(e) => e.preventDefault()}
+                className="dark w-full gap-0 overflow-y-auto border-white/10 bg-neutral-900 text-neutral-100 sm:max-w-lg"
+            >
                 <SheetHeader className="border-b border-white/10">
                     <SheetTitle className="flex items-center gap-2">
                         <Sparkles className="size-4 text-violet-400" />

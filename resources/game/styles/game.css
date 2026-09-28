@@ -1009,6 +1009,36 @@ body.ww-body {
     color: var(--ww-muted);
 }
 
+.ww-gfx-profile {
+    margin-top: 8px;
+    font:
+        11px/1.5 ui-monospace,
+        'SF Mono',
+        Menlo,
+        monospace;
+    color: oklch(0.85 0.01 250);
+}
+
+.ww-gfx-profile-row {
+    display: grid;
+    grid-template-columns: 1fr 56px 56px;
+    gap: 6px;
+}
+
+.ww-gfx-profile-row > span:not(:first-child) {
+    text-align: right;
+}
+
+.ww-gfx-profile-row.is-head {
+    color: oklch(0.65 0.01 250);
+    border-bottom: 1px solid oklch(1 0 0 / 0.1);
+    margin-bottom: 2px;
+}
+
+.ww-gfx-profile-row.is-heaviest {
+    color: oklch(0.82 0.14 70);
+}
+
 .ww-gfx-readout {
     white-space: pre-line;
     font:

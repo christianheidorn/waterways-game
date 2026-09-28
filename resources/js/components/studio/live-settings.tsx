@@ -20,6 +20,10 @@ import type { SettingField, SettingGroup, SettingValues } from '@/types';
 type Props = {
     group: SettingGroup;
     initial: SettingValues;
+    /** Adjusts every edited value set before preview (e.g. recompute a derived field). */
+    transform?: (values: SettingValues) => SettingValues;
+    /** Field keys not rendered as inputs. */
+    hidden?: string[];
     /** Called on every change so the game can preview it immediately. */
     onPreview: (values: SettingValues) => void;
     /** Wayfinder route used to persist the values. */
@@ -46,6 +50,8 @@ export function LiveSettings({
     formatters = {},
     only,
     addon,
+    transform = (v) => v,
+    hidden = [],
 }: Props) {
     const [values, setValues] = useState<SettingValues>(initial);
     const [saved, setSaved] = useState<SettingValues>(initial);
@@ -55,16 +61,16 @@ export function LiveSettings({
         ? only
               .map((k) => group.fields.find((f) => f.key === k))
               .filter((f): f is SettingField => !!f)
-        : group.fields;
+        : group.fields.filter((f) => !hidden.includes(f.key));
 
     const update = (key: string, value: SettingValues[string]) => {
-        const next = { ...values, [key]: value };
+        const next = transform({ ...values, [key]: value });
         setValues(next);
         onPreview(next);
     };
 
     const updateMany = (patch: SettingValues) => {
-        const next = { ...values, ...patch };
+        const next = transform({ ...values, ...patch });
         setValues(next);
         onPreview(next);
     };

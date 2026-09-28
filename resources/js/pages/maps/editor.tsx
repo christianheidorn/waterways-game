@@ -1,5 +1,10 @@
 import type { EditorToolGroup, GameMode } from '@game/shared/protocol';
-import type { EnvironmentSettings, GameSettings } from '@game/shared/types';
+import { withDetectedPreset } from '@game/shared/graphicsPresets';
+import type {
+    EnvironmentSettings,
+    GameSettings,
+    GraphicsSettings,
+} from '@game/shared/types';
 import { Head, Link, router } from '@inertiajs/react';
 import {
     Droplets,
@@ -25,6 +30,7 @@ import { useEffect, useMemo, useState } from 'react';
 import AppLogoIcon from '@/components/app-logo-icon';
 import { AiReviewSheet } from '@/components/studio/ai-review-sheet';
 import { LiveSettings } from '@/components/studio/live-settings';
+import { QualityPresetPicker } from '@/components/studio/quality-preset-picker';
 import { useGameBridge } from '@/components/studio/use-game-bridge';
 import { LookPresets } from '@/components/look-presets';
 import { WeatherPresets } from '@/components/weather-presets';
@@ -373,11 +379,17 @@ export default function MapEditor({
                 </main>
             </div>
 
+            {/* Non-modal and without a backdrop: the live game preview stays fully visible. */}
             <Sheet
+                modal={false}
                 open={panel !== null}
                 onOpenChange={(open) => !open && setPanel(null)}
             >
-                <SheetContent className="dark w-full overflow-y-auto border-white/10 bg-neutral-900 text-neutral-100 sm:max-w-md">
+                <SheetContent
+                    overlay={false}
+                    onInteractOutside={(e) => e.preventDefault()}
+                    className="dark w-full overflow-y-auto border-white/10 bg-neutral-900 text-neutral-100 sm:max-w-md"
+                >
                     {panel === 'environment' && (
                         <>
                             <SheetHeader>
@@ -470,6 +482,29 @@ export default function MapEditor({
                                                 })
                                             }
                                             action={gameSettings.update(g.key)}
+                                            {...(g.key === 'graphics'
+                                                ? {
+                                                      hidden: [
+                                                          'quality_preset',
+                                                          'antialias',
+                                                      ],
+                                                      transform: (v) =>
+                                                          withDetectedPreset(
+                                                              v as unknown as GraphicsSettings,
+                                                          ) as unknown as SettingValues,
+                                                      addon: ({
+                                                          values,
+                                                          setValues,
+                                                      }) => (
+                                                          <QualityPresetPicker
+                                                              values={values}
+                                                              onApply={
+                                                                  setValues
+                                                              }
+                                                          />
+                                                      ),
+                                                  }
+                                                : {})}
                                         />
                                     </TabsContent>
                                 ))}

@@ -138,6 +138,7 @@ const SECTIONS: Section[] = [
         groups: ['resolution'],
         fields: [
             'render_scale',
+            'max_pixel_ratio',
             'sharpen',
             'dynamic_resolution',
             'target_fps',

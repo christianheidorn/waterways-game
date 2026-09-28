@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { FoliageType } from '../shared/types';
 import { createFoliageGeometry } from '../world/FoliageGeometry';
+import { findLodRoots } from '../world/FoliageLod';
 
 /** Output size in CSS px is ~80; render at 2× for sharp tiles on high-DPI screens. */
 const SIZE = 160;
@@ -99,14 +100,10 @@ export class FoliageThumbnails {
         if (type.model_url) {
             try {
                 const gltf = await new GLTFLoader().loadAsync(type.model_url);
-                const lod0 =
-                    gltf.scene.getObjectByName('LOD0') ??
-                    gltf.scene.children.find((c) =>
-                        c.name.startsWith('LOD0'),
-                    ) ??
-                    gltf.scene;
                 const tint = new THREE.Color(type.tint || '#ffffff');
-                lod0.traverse((obj) => {
+                const tinted = new Set<THREE.Material>();
+                // Every node is disposed after the render, including the LODs left out below.
+                gltf.scene.traverse((obj) => {
                     const mesh = obj as THREE.Mesh;
 
                     if (!mesh.isMesh) {
@@ -119,6 +116,11 @@ export class FoliageThumbnails {
                         : [mesh.material];
 
                     for (const m of materials) {
+                        if (tinted.has(m)) {
+                            continue;
+                        }
+
+                        tinted.add(m);
                         const standard = m as THREE.MeshStandardMaterial;
                         standard.color?.multiply(tint);
                         disposables.push(m);
@@ -130,8 +132,16 @@ export class FoliageThumbnails {
                         }
                     }
                 });
-                lod0.removeFromParent();
-                root.add(lod0);
+
+                // Only the most detailed LOD ("LOD0", "Tree_LOD0", nested LOD groups…), not all
+                // of them on top of each other; models without LOD naming render whole.
+                for (const level of findLodRoots(gltf.scene).slice(1)) {
+                    for (const node of level) {
+                        node.removeFromParent();
+                    }
+                }
+
+                root.add(gltf.scene);
                 rendered = true;
             } catch {
                 // Fall back to the procedural mesh below.

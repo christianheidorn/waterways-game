@@ -160,6 +160,8 @@ export type GraphicsSettings = {
     shadow_quality: ShadowQuality;
     shadow_distance: number;
     render_scale: number;
+    /** Highest device pixel ratio rendered at (Retina / HiDPI); render_scale applies on top. */
+    max_pixel_ratio: number;
     draw_distance: number;
     terrain_lod_bias: number;
     foliage_density: number;

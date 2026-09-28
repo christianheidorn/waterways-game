@@ -6,6 +6,7 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { antiAliasingMode } from '../shared/graphicsPresets';
 import type { EnvironmentSettings, GraphicsSettings } from '../shared/types';
+import type { GpuProfiler } from './GpuProfiler';
 import { AutoExposure } from './postfx/AutoExposure';
 import {
     colorGradeLut,
@@ -481,7 +482,8 @@ export class PostFx {
 
     // ---------------------------------------------------------------- frame
 
-    render(dt: number): void {
+    render(dt: number, profiler?: GpuProfiler | null): void {
+        const p = profiler ?? null;
         const renderer = this.renderer;
         const camera = this.camera as THREE.PerspectiveCamera;
         const s = this.structure;
@@ -550,6 +552,7 @@ export class PostFx {
         u.uProjInv.value.copy(this.jitteredInverse);
 
         // ---- 1. scene
+        p?.mark('Scene + shadows');
         renderer.setRenderTarget(this.sceneTarget);
         renderer.clear();
         renderer.render(this.scene, camera);
@@ -557,9 +560,16 @@ export class PostFx {
 
         const velocity =
             this.velocity && this.velocity.active ? this.velocity : null;
-        velocity?.render(renderer, camera);
+        if (velocity) {
+            p?.mark('Velocity');
+            velocity.render(renderer, camera);
+        }
 
         // ---- 2. AO (still jittered, consistent with the depth it reconstructs from)
+        if (this.ao) {
+            p?.mark('Ambient occlusion');
+        }
+
         this.ao?.render(
             renderer,
             this.sceneTarget,
@@ -595,7 +605,12 @@ export class PostFx {
                 const i = light.sun.intensity;
                 contactStrength =
                     0.6 * (i / (i + 0.6)) * (1 - light.darkness * 0.8);
+                p?.mark('Contact shadows');
                 this.contact.render(this.lightDir, camera);
+            }
+
+            if (this.ssr) {
+                p?.mark('Screen-space reflections');
             }
 
             this.ssr?.render(this.sceneTarget.texture, this.waterDepth);
@@ -616,6 +631,7 @@ export class PostFx {
                 );
 
                 if (vis * horizon > 0.001) {
+                    p?.mark('Light shafts');
                     this.godRays.render(this.sceneTarget.texture, baseExposure);
                     const c = light.sun.color;
                     const k =
@@ -641,6 +657,7 @@ export class PostFx {
             terms.contactStrength = contactStrength;
             terms.ssr = this.ssr ? this.ssr.texture : null;
             terms.rays = this.godRays ? this.godRays.texture : null;
+            p?.mark('Composite');
             this.composite.set(current.texture, terms);
             const next = this.other(current);
             this.blitter.draw(this.composite.material, next);
@@ -654,6 +671,7 @@ export class PostFx {
 
         // ---- 4. TAA
         if (this.taa) {
+            p?.mark('TAA');
             current = this.taa.render(
                 current.texture,
                 baseExposure,
@@ -664,6 +682,7 @@ export class PostFx {
 
         // ---- 5. depth of field
         if (this.dof) {
+            p?.mark('Depth of field');
             const next = this.other(current);
             this.dof.render(current.texture, next, camera, {
                 focusDistance: this.focusPoint ? 0 : look.dofFocusDistance,
@@ -682,6 +701,7 @@ export class PostFx {
             dt > 0 &&
             (this.cameraMoved || velocity)
         ) {
+            p?.mark('Motion blur');
             const next = this.other(current);
             this.motionBlur.render(current.texture, next, {
                 strength: look.motionBlurStrength,
@@ -693,6 +713,10 @@ export class PostFx {
         }
 
         // ---- 7. eye adaptation
+        if (this.autoExposure) {
+            p?.mark('Eye adaptation');
+        }
+
         this.autoExposure?.update(
             current.texture,
             dt,
@@ -704,11 +728,13 @@ export class PostFx {
 
         // ---- 8. bloom, lens flare
         if (this.bloom) {
+            p?.mark('Bloom');
             this.bloom.pass.threshold = look.bloomThreshold / baseExposure;
             this.bloom.render(this.blitter, current.texture);
         }
 
         if (this.flare) {
+            p?.mark('Lens flare');
             let scale = 0;
 
             if (light && !night && this.locateFlare()) {
@@ -733,6 +759,7 @@ export class PostFx {
         }
 
         // ---- 9. output (+ 10. AA)
+        p?.mark('Output + AA');
         this.updateOutput(current.texture, baseExposure);
 
         if (this.aaPass && this.ldrTarget) {

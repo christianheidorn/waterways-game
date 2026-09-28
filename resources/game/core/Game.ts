@@ -43,7 +43,8 @@ import { Wetness } from '../world/Wetness';
 import { Api } from './Api';
 import { Bridge } from './Bridge';
 import type { BootConfig } from './config';
-import { DynamicResolution, GpuTimer } from './DynamicResolution';
+import { DynamicResolution } from './DynamicResolution';
+import { GpuProfiler } from './GpuProfiler';
 import { Input } from './Input';
 import { PostFx } from './PostFx';
 
@@ -70,7 +71,7 @@ export class Game {
     private readonly container: HTMLElement;
     private renderer!: THREE.WebGLRenderer;
     private postFx!: PostFx;
-    private gpuTimer: GpuTimer | null = null;
+    private profiler: GpuProfiler | null = null;
     private dynamicResolution = new DynamicResolution();
     /** Project graphics settings from the studio (before per-device overrides). */
     private graphicsDefaults!: GraphicsSettings;
@@ -236,7 +237,7 @@ export class Game {
         this.atmosphere = new Atmosphere(renderer, this.scene);
         this.postFx = new PostFx(renderer, this.scene, this.camera);
         this.postFx.setLightSource(this.atmosphere);
-        this.gpuTimer = new GpuTimer(renderer.getContext());
+        this.profiler = new GpuProfiler(renderer.getContext());
 
         this.resizeObserver = new ResizeObserver(() => this.resize());
         this.resizeObserver.observe(this.container);
@@ -621,6 +622,13 @@ export class Game {
         const dt = Math.min(this.timer.getDelta(), 0.1);
         this.renderer.info.reset();
         const start = performance.now();
+        // Per-pass timings only while the F10 menu shows them.
+        const profiler = this.profiler;
+
+        if (profiler) {
+            profiler.detailed = !!this.graphicsMenu?.isOpen;
+            profiler.begin('Update (CPU)');
+        }
 
         if (this.mode === 'play') {
             this.updatePlay(dt);
@@ -651,10 +659,7 @@ export class Game {
         );
         this.weather?.update(dt, this.camera);
 
-        this.gpuTimer?.poll();
-        this.gpuTimer?.begin();
         this.renderFrame(dt);
-        this.gpuTimer?.end();
         this.updateDynamicResolution(dt);
         this.input.endFrame();
         this.trackStats(dt, performance.now() - start);
@@ -731,11 +736,14 @@ export class Game {
             renderScale: this.manifest.settings.graphics.dynamic_resolution
                 ? this.effectiveRenderScale()
                 : undefined,
-            gpuMs: this.gpuTimer?.lastMs ?? undefined,
+            gpuMs: this.profiler?.lastMs ?? undefined,
         };
         this.graphicsMenu?.setStats(stats, {
             renderScale: this.effectiveRenderScale(),
             passes: this.postFx.passNames,
+            renderSize: this.postFx.renderSize,
+            profile: this.profiler?.sections(),
+            gpuTimers: this.profiler?.supported,
         });
         this.hud.setStats(
             this.manifest.settings.editor.show_stats ? stats : null,
@@ -766,15 +774,22 @@ export class Game {
      */
     private renderFrame(dt: number): void {
         const renderer = this.renderer;
-        renderer.shadowMap.needsUpdate = true;
         const water = this.world.water;
+        const profiler = this.profiler;
 
         if (this.waterTarget && water.hasWater()) {
+            profiler?.mark('Water refraction');
+            // Only what can be seen *through* the water matters here: terrain, the player and shore plants
+            // (reeds). Grass, bushes and trees would double the vertex work of the frame for nothing.
+            // Shadows are not re-rendered: this pass and the reflection reuse last frame's shadow map.
+            renderer.shadowMap.needsUpdate = false;
             water.group.visible = false;
+            const hidden = this.hideFoliage(this.refractionFoliagePrefixes());
             renderer.setRenderTarget(this.waterTarget);
             renderer.clear();
             renderer.render(this.scene, this.camera);
             renderer.setRenderTarget(null);
+            this.restoreFoliage(hidden);
             water.group.visible = true;
             // Water maps gl_FragCoord of the composer render (dynamic resolution aware) to scene UVs.
             const size = this.postFx.renderSize;
@@ -787,16 +802,59 @@ export class Game {
                 size.y,
             );
             this.postFx.setWaterDepth(this.waterTarget.depthTexture);
-            // The composer render must not redraw the shadow map a second time.
-            renderer.shadowMap.needsUpdate = false;
-            // Reflection after the prepass: the shadow map exists (and is current) by now.
+            profiler?.mark('Water reflection');
             this.renderReflection(dt);
         } else {
             water.setSceneTextures(null);
             this.postFx.setWaterDepth(null);
         }
 
-        this.postFx.render(dt);
+        // The shadow map is drawn once per frame, by the main scene render.
+        renderer.shadowMap.needsUpdate = true;
+        this.postFx.render(dt, profiler);
+        profiler?.end();
+    }
+
+    /** Hides visible foliage meshes whose name starts with none of `keep`; returns them for restoring. */
+    private hideFoliage(keep: string[]): THREE.Object3D[] {
+        const hidden = this.hiddenFoliage;
+        hidden.length = 0;
+
+        for (const child of this.world.foliage.group.children) {
+            if (
+                child.visible &&
+                !keep.some((prefix) => child.name.startsWith(prefix))
+            ) {
+                child.visible = false;
+                hidden.push(child);
+            }
+        }
+
+        return hidden;
+    }
+
+    private restoreFoliage(hidden: THREE.Object3D[]): void {
+        for (const child of hidden) {
+            child.visible = true;
+        }
+
+        hidden.length = 0;
+    }
+
+    private readonly hiddenFoliage: THREE.Object3D[] = [];
+    private refractionTypes: FoliageType[] | null = null;
+    private refractionPrefixes: string[] = [];
+
+    /** Mesh name prefixes of the foliage kept in the water refraction pass (plants that stand in water). */
+    private refractionFoliagePrefixes(): string[] {
+        if (this.refractionTypes !== this.manifest.foliage_types) {
+            this.refractionTypes = this.manifest.foliage_types;
+            this.refractionPrefixes = this.manifest.foliage_types
+                .filter((t) => t.kind === 'reed')
+                .map((t) => `Foliage_${t.name}_`);
+        }
+
+        return this.refractionPrefixes;
     }
 
     /**
@@ -932,11 +990,21 @@ export class Game {
         }
     }
 
-    /** Canvas pixel ratio: device pixel ratio × render_scale (the upper bound for dynamic resolution). */
+    /**
+     * Device pixel ratio capped by `max_pixel_ratio`: a 2× Retina screen at 1.5 renders 56 % of the native
+     * pixels (like UE's screen percentage on high-DPI displays); the browser upsamples the canvas.
+     */
+    private displayPixelRatio(): number {
+        const cap = this.manifest?.settings.graphics.max_pixel_ratio ?? 1.5;
+
+        return Math.min(window.devicePixelRatio || 1, Math.max(1, cap));
+    }
+
+    /** Canvas pixel ratio: capped device pixel ratio × render_scale (the upper bound for dynamic resolution). */
     private basePixelRatio(): number {
         const scale = this.manifest?.settings.graphics.render_scale ?? 1;
 
-        return Math.min(window.devicePixelRatio * scale, 3);
+        return Math.min(this.displayPixelRatio() * scale, 3);
     }
 
     /** Render scale (× device pixel ratio) the scene is currently rendered at. */
@@ -971,7 +1039,7 @@ export class Game {
         // The composer renders at the effective (possibly dynamic) scale; its last pass upscales to the canvas.
         const effective = Math.min(
             base,
-            window.devicePixelRatio * this.effectiveRenderScale(),
+            this.displayPixelRatio() * this.effectiveRenderScale(),
         );
         this.postFx.setSize(w, h, effective);
         this.resizeWaterTarget();
@@ -995,7 +1063,7 @@ export class Game {
             this.dynamicResolution.update(
                 dt,
                 this.frameIntervalMs,
-                this.gpuTimer?.lastMs ?? null,
+                this.profiler?.lastMs ?? null,
                 target,
             )
         ) {
@@ -1452,9 +1520,35 @@ export class Game {
             case 'updateSettings': {
                 const s = this.manifest.settings;
                 const next = message.settings;
+
+                if (next.graphics) {
+                    // What the studio just changed wins over this device's F10 overrides for those keys.
+                    const overrides = loadGraphicsOverrides();
+                    const incoming = next.graphics as Record<string, unknown>;
+                    const defaults = this.graphicsDefaults as unknown as Record<
+                        string,
+                        unknown
+                    >;
+                    let touched = false;
+
+                    for (const key of Object.keys(incoming)) {
+                        if (
+                            key in overrides &&
+                            incoming[key] !== defaults[key]
+                        ) {
+                            delete (overrides as Record<string, unknown>)[key];
+                            touched = true;
+                        }
+                    }
+
+                    if (touched) {
+                        saveGraphicsOverrides(overrides);
+                    }
+                }
+
                 this.applySettings({
                     player: { ...s.player, ...next.player },
-                    graphics: { ...s.graphics, ...next.graphics },
+                    graphics: { ...this.graphicsDefaults, ...next.graphics },
                     editor: { ...s.editor, ...next.editor },
                 });
                 break;
@@ -1489,5 +1583,6 @@ function foliageStats(foliage: Foliage): Partial<GameStats> & {
         foliageDrawn: f.drawnInstances,
         foliageDrawCalls: f.drawCalls,
         foliageTriangles: f.triangles,
+        foliageTypes: f.types,
     };
 }

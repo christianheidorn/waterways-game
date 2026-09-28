@@ -156,6 +156,15 @@ _Re-scatter_ regenerates a type.
 Sizes are planned as real heights in metres. You approve every row and can switch its model (Meshy, card,
 procedural, keep current) before anything changes.
 
+**LODs and culling.** Every foliage type ends up with a full LOD chain, whatever its source. Procedural
+kinds have 2–3 mesh LODs. Baked assets have LOD0, LOD1 and an impostor, and bakes cap LOD0 at a budget per
+kind (`world/FoliageLod.ts`, e.g. trees 10k triangles). Older bakes and single-LOD uploads are completed
+when they load: over-budget meshes are simplified with meshoptimizer, and a mid LOD and a camera-facing
+impostor are generated. LOD nodes nested anywhere in an uploaded glTF are recognised. For trees and rocks,
+the switch from LOD0 to LOD1 happens per instance, not per 128 m cell, so full-detail meshes stop at their
+LOD distance. The F10 menu lists per-type instances drawn, triangles per LOD and LOD distances, and warns
+about missing or over-budget LODs.
+
 ## Player characters
 
 **Characters** (Studio → Characters) are playable, rigged and animated models:
@@ -181,13 +190,20 @@ leave these values alone:
 - artistic values: bloom intensity, saturation, contrast, vignette
 - frame-rate values: dynamic resolution, target FPS, FPS limit
 
-| Preset    | Draw dist. | Shadows (dist.) | AA   | AO          | Terrain tex. / aniso | Foliage density / dist. / shadow | Render scale        |
-| --------- | ---------- | --------------- | ---- | ----------- | -------------------- | -------------------------------- | ------------------- |
-| Low       | 4 km       | low (90 m)      | FXAA | off         | 512 / 2×             | 0.4 / 0.5× / off                 | 0.7 + sharpen       |
-| Medium    | 7 km       | medium (150 m)  | FXAA | off         | 1K / 4×              | 0.7 / 0.75× / 60 m               | 0.85 + sharpen      |
-| High      | 12 km      | high (220 m)    | SMAA | off         | 1K / 8×              | 1 / 1× / 120 m                   | 1                   |
-| Epic      | 20 km      | ultra (400 m)   | SMAA | GTAO medium | 2K / 16×             | 1 / 1.5× / 250 m                 | 1                   |
-| Cinematic | 30 km      | ultra (700 m)   | MSAA | GTAO high   | 2K / 16×             | 1 / 2× / 350 m                   | 1.25 (supersampled) |
+| Preset    | Draw dist. | Shadows (dist.) | AA   | AO          | Terrain tex. / aniso | Foliage density / dist. / shadow | Render scale / Retina cap |
+| --------- | ---------- | --------------- | ---- | ----------- | -------------------- | -------------------------------- | ------------------------- |
+| Low       | 4 km       | low (90 m)      | FXAA | off         | 512 / 2×             | 0.4 / 0.5× / off                 | 0.7 + sharpen / 1×        |
+| Medium    | 7 km       | medium (150 m)  | FXAA | off         | 1K / 4×              | 0.7 / 0.75× / 60 m               | 0.85 + sharpen / 1.25×    |
+| High      | 12 km      | high (220 m)    | TAA  | off         | 1K / 8×              | 1 / 1× / 120 m                   | 1 / 1.5×                  |
+| Epic      | 20 km      | ultra (400 m)   | TAA  | GTAO medium | 2K / 16×             | 1 / 1.5× / 250 m                 | 1 / 2×                    |
+| Cinematic | 30 km      | ultra (700 m)   | TAA  | GTAO high   | 2K / 16×             | 1 / 2× / 350 m                   | 1.25 (supersampled) / 3×  |
+
+**Retina / HiDPI resolution cap.** `max_pixel_ratio` caps the device pixel ratio the game renders at; the
+render scale applies on top. A MacBook's 2× Retina screen at native resolution has four times the pixels of
+the same window on a 1× screen, and every full-screen pass (TAA, light shafts, bloom, grading …) pays for
+each of them. At High, the cap of 1.5× renders 56 % of the native pixels and the browser upsamples the
+canvas, which is what Unreal's screen percentage / TSR does on high-DPI displays. Epic renders native Retina
+(2×). 1× screens are not affected.
 
 **Scalability groups.** Like UE's `sg.*` groups, you can set each group to Low, Medium, High or Epic on its
 own:
@@ -234,10 +250,14 @@ uniforms. Every change applies live, without a reload.
 
 **In-game menu:** press **F10** or click the monitor button.
 
-- Choose a preset, set each scalability group, or change render scale, dynamic resolution, target FPS and
-  the FPS limit.
-- A live readout shows FPS, frame time, draw calls, triangles, the current resolution and the active pass
-  chain.
+- Choose a preset, set each scalability group, or change render scale, the Retina resolution cap, dynamic
+  resolution, target FPS and the FPS limit.
+- A live readout shows FPS, frame time (CPU and GPU), draw calls, triangles, the internal render resolution
+  in pixels and the active pass chain.
+- **Per-pass profiler** (like UE's `stat gpu`): while the menu is open, every pass is timed on the GPU with
+  timer queries and on the CPU. The table shows the update, water refraction and reflection, scene and
+  shadows, and each post-processing pass. The heaviest GPU pass is highlighted. GPU times need
+  `EXT_disjoint_timer_query_webgl2` (Chrome and Edge on desktop).
 - Your changes are stored in `localStorage` (`waterways.graphics.overrides.v1`) and applied on top of the
   project settings.
 - **Reset to project defaults** removes your changes.

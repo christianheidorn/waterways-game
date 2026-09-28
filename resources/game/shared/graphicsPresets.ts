@@ -47,25 +47,25 @@ export const PRESET_INFO: Record<
     low: {
         label: 'Low',
         description:
-            'Integrated GPUs and laptops on battery. Short view distance, sparse foliage, 70% resolution with sharpening.',
+            'Integrated GPUs and laptops on battery. Short view distance, sparse foliage, 70% resolution (1× pixel density on Retina) with sharpening.',
         performance: '≈ 2.5× faster than High',
     },
     medium: {
         label: 'Medium',
         description:
-            'Older discrete GPUs. Reduced shadows and foliage, FXAA, 85% resolution.',
+            'Older discrete GPUs. Reduced shadows and foliage, FXAA, 85% resolution (up to 1.25× pixel density).',
         performance: '≈ 1.6× faster than High',
     },
     high: {
         label: 'High',
         description:
-            'The project default. Full resolution, TAA, eye adaptation, light shafts, colour grading, bloom, 1K terrain textures.',
+            'The project default. Full resolution up to 1.5× pixel density (Retina screens are capped there), TAA, eye adaptation, light shafts, colour grading, bloom, 1K terrain textures.',
         performance: 'Baseline',
     },
     epic: {
         label: 'Epic',
         description:
-            'Fast desktop GPUs. Ambient occlusion, contact shadows, wet-ground reflections, subtle depth of field and motion blur, lens effects, 2K textures, long view, shadow and foliage distances.',
+            'Fast desktop GPUs. Native Retina resolution, ambient occlusion, contact shadows, wet-ground reflections, subtle depth of field and motion blur, lens effects, 2K textures, long view, shadow and foliage distances.',
         performance: '≈ 1.8× slower than High',
     },
     cinematic: {
@@ -97,6 +97,7 @@ export const PRESETS: Record<PresetName, PresetValues> = {
         foliage_shadow_distance: 0,
         foliage_lod_bias: 0.5,
         render_scale: 0.7,
+        max_pixel_ratio: 1,
         sharpen: 0.4,
         auto_exposure: false,
         color_grading_lut: true,
@@ -126,6 +127,7 @@ export const PRESETS: Record<PresetName, PresetValues> = {
         foliage_shadow_distance: 60,
         foliage_lod_bias: 0.75,
         render_scale: 0.85,
+        max_pixel_ratio: 1.25,
         sharpen: 0.25,
         auto_exposure: true,
         color_grading_lut: true,
@@ -155,6 +157,7 @@ export const PRESETS: Record<PresetName, PresetValues> = {
         foliage_shadow_distance: 120,
         foliage_lod_bias: 1,
         render_scale: 1,
+        max_pixel_ratio: 1.5,
         sharpen: 0,
         auto_exposure: true,
         color_grading_lut: true,
@@ -184,6 +187,7 @@ export const PRESETS: Record<PresetName, PresetValues> = {
         foliage_shadow_distance: 250,
         foliage_lod_bias: 1.5,
         render_scale: 1,
+        max_pixel_ratio: 2,
         sharpen: 0,
         auto_exposure: true,
         color_grading_lut: true,
@@ -213,6 +217,7 @@ export const PRESETS: Record<PresetName, PresetValues> = {
         foliage_shadow_distance: 350,
         foliage_lod_bias: 1.8,
         render_scale: 1.25,
+        max_pixel_ratio: 3,
         sharpen: 0,
         auto_exposure: true,
         color_grading_lut: true,
@@ -327,8 +332,9 @@ export const SCALABILITY_GROUPS: ScalabilityGroup[] = [
         key: 'resolution',
         label: 'Resolution',
         ue: 'sg.ResolutionQuality',
-        description: 'Render scale and sharpening.',
-        keys: ['render_scale', 'sharpen'],
+        description:
+            'Render scale, the Retina / HiDPI resolution cap and sharpening.',
+        keys: ['render_scale', 'max_pixel_ratio', 'sharpen'],
     },
 ];
 

@@ -11,7 +11,8 @@ import {
     withDetectedPreset,
 } from '../shared/graphicsPresets';
 import type { PresetName } from '../shared/graphicsPresets';
-import type { GameStats } from '../shared/protocol';
+import type { ProfileSection } from '../core/GpuProfiler';
+import type { FoliageTypeStat, GameStats } from '../shared/protocol';
 import type { GraphicsSettings, QualityLevel } from '../shared/types';
 import { button, h, icon, segmented, slider, toggle } from './dom';
 import type { SegmentHandle, SliderHandle } from './dom';
@@ -98,10 +99,13 @@ export class GraphicsMenu {
         handle: SegmentHandle<QualityLevel | 'custom'>;
     }> = [];
     private renderScale: SliderHandle;
+    private pixelRatioCap: SliderHandle;
     private targetFps: SliderHandle;
     private maxFps: SliderHandle;
     private dynRes: { el: HTMLElement; set: (v: boolean) => void };
     private readout: HTMLElement;
+    private profileEl: HTMLElement;
+    private foliageEl: HTMLElement;
 
     constructor(
         parent: HTMLElement,
@@ -179,6 +183,18 @@ export class GraphicsMenu {
             format: (v) => `${Math.round(v * 100)}%`,
             onInput: (v) => patch({ render_scale: v }),
         });
+        this.pixelRatioCap = slider({
+            label: 'Resolution cap (Retina)',
+            min: 1,
+            max: 3,
+            step: 0.25,
+            value: 1.5,
+            format: (v) => `${v.toFixed(2)}×`,
+            onInput: (v) => patch({ max_pixel_ratio: v }),
+        });
+        this.pixelRatioCap.el.title =
+            'Highest pixel density rendered on Retina / HiDPI screens. Your screen: ' +
+            `${(window.devicePixelRatio || 1).toFixed(2)}×. Render scale applies on top.`;
         this.dynRes = toggle('Dynamic resolution', false, (v) =>
             patch({ dynamic_resolution: v }),
         );
@@ -201,6 +217,8 @@ export class GraphicsMenu {
             onInput: (v) => patch({ max_fps: v }),
         });
         this.readout = h('div', { class: 'ww-gfx-readout' }, '…');
+        this.profileEl = h('div', { class: 'ww-gfx-profile' });
+        this.foliageEl = h('div', { class: 'ww-gfx-profile' });
         this.overrideNote = h('span', { class: 'ww-muted' });
 
         this.el = h(
@@ -243,6 +261,7 @@ export class GraphicsMenu {
                         'Resolution & frame rate',
                     ),
                     this.renderScale.el,
+                    this.pixelRatioCap.el,
                     this.dynRes.el,
                     this.targetFps.el,
                     this.maxFps.el,
@@ -252,6 +271,8 @@ export class GraphicsMenu {
                     { class: 'ww-section' },
                     h('h3', { class: 'ww-section-title' }, 'Performance'),
                     this.readout,
+                    this.profileEl,
+                    this.foliageEl,
                 ),
             ),
             h(
@@ -310,6 +331,7 @@ export class GraphicsMenu {
         }
 
         this.renderScale.set(g.render_scale);
+        this.pixelRatioCap.set(g.max_pixel_ratio);
         this.dynRes.set(g.dynamic_resolution);
         this.targetFps.set(g.target_fps);
         this.maxFps.set(g.max_fps);
@@ -324,16 +346,142 @@ export class GraphicsMenu {
     /** Live readout; call with fresh stats (e.g. every 0.5 s). */
     setStats(
         stats: GameStats,
-        extra: { renderScale: number; passes: string[] },
+        extra: {
+            renderScale: number;
+            passes: string[];
+            /** Internal render resolution in pixels. */
+            renderSize?: { x: number; y: number };
+            profile?: ProfileSection[];
+            gpuTimers?: boolean;
+        },
     ): void {
         if (!this.open) {
             return;
         }
 
+        const size = extra.renderSize;
+        const resolution = size
+            ? `${size.x}×${size.y} (${((size.x * size.y) / 1e6).toFixed(1)} MP)`
+            : `${Math.round(extra.renderScale * 100)}%`;
         this.readout.textContent =
-            `${stats.fps.toFixed(0)} fps · ${(1000 / Math.max(1, stats.fps)).toFixed(1)} ms frame · ${stats.frameMs.toFixed(1)} ms CPU\n` +
+            `${stats.fps.toFixed(0)} fps · ${(1000 / Math.max(1, stats.fps)).toFixed(1)} ms frame · ${stats.frameMs.toFixed(1)} ms CPU` +
+            (stats.gpuMs !== undefined
+                ? ` · ${stats.gpuMs.toFixed(1)} ms GPU`
+                : '') +
+            '\n' +
             `${stats.drawCalls.toLocaleString()} draw calls · ${(stats.triangles / 1e6).toFixed(2)}M triangles\n` +
-            `Resolution ${Math.round(extra.renderScale * 100)}% · ${extra.passes.join(' → ')}`;
+            `Render ${resolution} · ${extra.passes.join(' → ')}`;
+        this.renderProfile(extra.profile ?? [], !!extra.gpuTimers);
+        this.renderFoliage(stats.foliageTypes ?? []);
+    }
+
+    /**
+     * Per foliage type: instances drawn / stored, main-pass triangles, the LOD chain (triangles per
+     * instance, instances drawn per LOD, switch distances) and missing / over-budget LODs.
+     */
+    private renderFoliage(types: FoliageTypeStat[]): void {
+        const el = this.foliageEl;
+        el.replaceChildren();
+        const listed = types.filter((t) => t.instances > 0);
+
+        if (!listed.length) {
+            return;
+        }
+
+        const count = (v: number) =>
+            v >= 10000 ? `${Math.round(v / 1000)}k` : v.toLocaleString();
+        el.append(
+            h(
+                'div',
+                { class: 'ww-gfx-profile-row is-head' },
+                h('span', {}, 'Foliage (LOD tris / drawn / from m)'),
+                h('span', {}, 'Drawn'),
+                h('span', {}, 'M tris'),
+            ),
+        );
+
+        for (const t of listed) {
+            el.append(
+                h(
+                    'div',
+                    {
+                        class:
+                            'ww-gfx-profile-row' +
+                            (t.warnings.length ? ' is-heaviest' : ''),
+                        title: [...t.generated, ...t.warnings].join('\n'),
+                    },
+                    h('span', {}, `${t.name} · ${t.source}`),
+                    h('span', {}, `${count(t.drawn)}/${count(t.instances)}`),
+                    h('span', {}, (t.triangles / 1e6).toFixed(2)),
+                ),
+                h(
+                    'div',
+                    { class: 'ww-muted' },
+                    t.lodTriangles
+                        .map(
+                            (tris, i) =>
+                                `L${i} ${count(tris)}/${count(t.lodInstances[i] ?? 0)}/${t.lodDistances[i] ?? 0}`,
+                        )
+                        .join(' · ') + ` · cull ${t.cullDistance} m`,
+                ),
+                ...[
+                    ...t.generated.map((g) => `+ ${g}`),
+                    ...t.warnings.map((w) => `! ${w}`),
+                ].map((line) => h('div', { class: 'ww-muted' }, line)),
+            );
+        }
+    }
+
+    /** Per-pass GPU / CPU times (like UE's `stat gpu`), heaviest GPU pass highlighted. */
+    private renderProfile(
+        sections: ProfileSection[],
+        gpuTimers: boolean,
+    ): void {
+        const el = this.profileEl;
+        el.replaceChildren();
+
+        if (!sections.length) {
+            return;
+        }
+
+        const heaviest = Math.max(...sections.map((x) => x.gpuMs ?? 0));
+        const fmt = (v: number | null) => (v === null ? '–' : v.toFixed(2));
+        el.append(
+            h(
+                'div',
+                { class: 'ww-gfx-profile-row is-head' },
+                h('span', {}, 'Pass'),
+                h('span', {}, 'GPU ms'),
+                h('span', {}, 'CPU ms'),
+            ),
+            ...sections.map((x) =>
+                h(
+                    'div',
+                    {
+                        class:
+                            'ww-gfx-profile-row' +
+                            (x.gpuMs !== null &&
+                            x.gpuMs === heaviest &&
+                            heaviest > 0
+                                ? ' is-heaviest'
+                                : ''),
+                    },
+                    h('span', {}, x.name),
+                    h('span', {}, fmt(x.gpuMs)),
+                    h('span', {}, x.cpuMs.toFixed(2)),
+                ),
+            ),
+        );
+
+        if (!gpuTimers) {
+            el.append(
+                h(
+                    'p',
+                    { class: 'ww-muted' },
+                    'GPU timings are not available in this browser (EXT_disjoint_timer_query_webgl2).',
+                ),
+            );
+        }
     }
 
     dispose(): void {

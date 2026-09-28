@@ -6,8 +6,8 @@
  *
  *   scene
  *   ├── LOD0   (Group of meshes, one per material — full detail within a per-kind triangle budget)
- *   ├── LOD1   (≈ 25 % of LOD0, or 2 crossed cards for image assets)
- *   └── LOD2   (crossed-card impostor rendered from the model; trees and bushes)
+ *   ├── LOD1   (≈ 20 % of LOD0, or 2 crossed cards for image assets)
+ *   └── LOD2   (crossed-card impostor rendered from the model; a ≈ 4 % mesh for rocks)
  *
  * Units are metres, the pivot sits at the base (min Y = 0) and bake metadata lives in the scene extras
  * (`scene.userData.waterways`). See resources/game/world/Foliage.ts for the runtime side.
@@ -18,6 +18,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import type { FoliageKind } from '../shared/types';
+import { LOD_BUDGETS, lodIndexOf } from '../world/FoliageLod';
 
 export type BakeSource =
     /** .gltf (external .bin / textures resolved relative to url) or .glb */
@@ -61,16 +62,22 @@ export type BakeProgress = (stage: string, fraction: number) => void;
 
 // ------------------------------------------------------------------ tuning
 
+/**
+ * LOD0 triangle budget per kind — shared with the runtime (world/FoliageLod.ts), which fills in a
+ * mid / far LOD for models that exceed these budgets. Every further mesh LOD gets 20 % of the one
+ * before it.
+ */
 const LOD0_BUDGET: Record<FoliageKind, number> = {
-    conifer: 24000,
-    broadleaf: 24000,
-    palm: 24000,
-    bush: 8000,
-    rock: 4000,
-    grass: 2000,
-    flower: 2000,
-    reed: 2000,
+    conifer: LOD_BUDGETS.conifer.lod0,
+    broadleaf: LOD_BUDGETS.broadleaf.lod0,
+    palm: LOD_BUDGETS.palm.lod0,
+    bush: LOD_BUDGETS.bush.lod0,
+    rock: LOD_BUDGETS.rock.lod0,
+    grass: LOD_BUDGETS.grass.lod0,
+    flower: LOD_BUDGETS.flower.lod0,
+    reed: LOD_BUDGETS.reed.lod0,
 };
+const LOD_REDUCTION = 0.2;
 
 /** Fraction of the cull distance where each LOD starts (last entry = impostor, except rocks). */
 const MODEL_LOD_DISTANCES: Record<FoliageKind, number[]> = {
@@ -78,10 +85,10 @@ const MODEL_LOD_DISTANCES: Record<FoliageKind, number[]> = {
     broadleaf: [0, 0.18, 0.45],
     palm: [0, 0.18, 0.45],
     bush: [0, 0.25, 0.55],
-    grass: [0, 0.4],
-    flower: [0, 0.4],
-    reed: [0, 0.4],
-    rock: [0, 0.35],
+    grass: [0, 0.2, 0.4],
+    flower: [0, 0.2, 0.4],
+    reed: [0, 0.2, 0.4],
+    rock: [0, 0.3, 0.6],
 };
 
 const CARD_LOD_DISTANCES = [0, 0.4];
@@ -364,7 +371,8 @@ async function bakeModel(
                     : Math.max(
                           64,
                           Math.round(
-                              Math.min(previousTris, budget0) * 0.25 ** level,
+                              Math.min(previousTris, budget0) *
+                                  LOD_REDUCTION ** level,
                           ),
                       );
             const results = await buildMeshLod(
@@ -1148,14 +1156,6 @@ function flattenScene(
     }
 
     return parts;
-}
-
-function lodIndexOf(name: string): number | null {
-    const match =
-        /(?:^|[_\-\s.])lod[_\-\s]?(\d+)$/i.exec(name) ??
-        /^lod(\d+)$/i.exec(name);
-
-    return match ? Number(match[1]) : null;
 }
 
 /** Pivot at the base (min Y = 0), metres, optional target height. Returns the final bounds. */

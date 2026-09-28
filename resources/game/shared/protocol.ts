@@ -20,6 +20,34 @@ export type EditorToolGroup =
 
 export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
+/** One foliage type's LOD chain and what it currently costs (Foliage.stats()). */
+export type FoliageTypeStat = {
+    name: string;
+    kind: string;
+    /** procedural = built-in mesh, baked = FoliageAsset GLB, model = other GLB, loading = model pending. */
+    source: 'procedural' | 'baked' | 'model' | 'loading';
+    /** Stored instances. */
+    instances: number;
+    /** Instances submitted in the main pass (frustum-culled cells excluded). */
+    drawn: number;
+    drawCalls: number;
+    triangles: number;
+    /** Triangles per instance of each LOD (LOD0 first). */
+    lodTriangles: number[];
+    /** Instances drawn with each LOD (same order). */
+    lodInstances: number[];
+    /** Distance (m) where each LOD starts, after foliage distance scale and LOD bias. */
+    lodDistances: number[];
+    /** Cull distance (m) after the foliage distance scale. */
+    cullDistance: number;
+    /** Cells casting shadows. */
+    shadowCasters: number;
+    /** LODs generated at runtime (simplified mid LOD, impostor, …). */
+    generated: string[];
+    /** Missing / over-budget LODs worth fixing (e.g. rebake the asset). */
+    warnings: string[];
+};
+
 export type GameStats = {
     fps: number;
     frameMs: number;
@@ -31,6 +59,8 @@ export type GameStats = {
     foliageDrawn?: number;
     foliageDrawCalls?: number;
     foliageTriangles?: number;
+    /** Per foliage type LOD / culling detail (see Foliage.stats().types). */
+    foliageTypes?: FoliageTypeStat[];
     /** Effective render scale (× device pixel ratio) while dynamic resolution is active. */
     renderScale?: number;
     /** GPU time of the last measured frame (ms), when EXT_disjoint_timer_query is available. */

@@ -227,6 +227,7 @@ export class Game {
         this.scene.background = null;
         this.atmosphere = new Atmosphere(renderer, this.scene);
         this.postFx = new PostFx(renderer, this.scene, this.camera);
+        this.postFx.setLightSource(this.atmosphere);
         this.gpuTimer = new GpuTimer(renderer.getContext());
 
         this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -751,15 +752,35 @@ export class Game {
                 size.x,
                 size.y,
             );
+            this.postFx.setWaterDepth(this.waterTarget.depthTexture);
             // The composer render must not redraw the shadow map a second time.
             renderer.shadowMap.needsUpdate = false;
             // Reflection after the prepass: the shadow map exists (and is current) by now.
             this.renderReflection(dt);
         } else {
             water.setSceneTextures(null);
+            this.postFx.setWaterDepth(null);
         }
 
         this.postFx.render(dt);
+    }
+
+    /**
+     * Depth of field: focus on the surface under a screen point (NDC -1..1, +y up), e.g. a click in
+     * photo mode; the focus follows that point with a smooth pull. `null` returns to the map's focus
+     * setting (manual distance or centre auto-focus).
+     */
+    focusAt(ndcX: number | null, ndcY = 0): void {
+        if (ndcX === null) {
+            this.postFx.clearFocusPoint();
+        } else {
+            this.postFx.focusAtScreen(ndcX, ndcY);
+        }
+    }
+
+    /** Current depth of field focus distance in metres (async GPU read-back); null when DoF is off. */
+    focusDistance(): Promise<number | null> {
+        return this.postFx.readFocusDistance();
     }
 
     /** Planar reflection of the water level closest to what the viewer is looking at. */
@@ -957,6 +978,7 @@ export class Game {
     private applyEnvironment(env: EnvironmentSettings): void {
         this.manifest.environment = env;
         this.atmosphere.apply(env);
+        this.postFx.setLook(env);
         this.world.water.applyEnvironment(env);
         this.world.foliage.setWind(env.wind_strength);
         this.weather?.apply(env);
@@ -1058,6 +1080,9 @@ export class Game {
             this.dynamicResolution.reset(g.render_scale);
         }
 
+        // Wet-ground reflections mirror the terrain material; the player gets motion vectors (TAA, blur).
+        this.postFx.setTerrainSurface(this.world.material.uniforms);
+        this.postFx.setDynamicObjects([this.player.object]);
         this.postFx.configure(g);
         this.applyAnisotropy(g.anisotropy);
         this.resize();

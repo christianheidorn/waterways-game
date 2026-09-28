@@ -198,7 +198,7 @@ export function colorTarget(
 export class Blitter {
     private readonly quad = new FullScreenQuad();
 
-    constructor(private readonly renderer: THREE.WebGLRenderer) {}
+    constructor(readonly renderer: THREE.WebGLRenderer) {}
 
     draw(
         material: THREE.Material,

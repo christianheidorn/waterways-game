@@ -817,6 +817,11 @@ export class Game {
         return this.postFx.readFocusDistance();
     }
 
+    // Small foliage (grass, flowers, reeds) is left out of the water reflection; cached per type list.
+    private smallFoliageTypes: FoliageType[] | null = null;
+    private smallFoliagePrefixes: string[] = [];
+    private readonly reflectionHidden: THREE.Object3D[] = [];
+
     /** Planar reflection of the water level closest to what the viewer is looking at. */
     private renderReflection(dt: number): void {
         const water = this.world.water;
@@ -848,17 +853,21 @@ export class Game {
             return;
         }
 
-        const small = new Set(
-            this.manifest.foliage_types
+        if (this.smallFoliageTypes !== this.manifest.foliage_types) {
+            this.smallFoliageTypes = this.manifest.foliage_types;
+            this.smallFoliagePrefixes = this.manifest.foliage_types
                 .filter(
                     (t) =>
                         t.kind === 'grass' ||
                         t.kind === 'flower' ||
                         t.kind === 'reed',
                 )
-                .map((t) => `Foliage_${t.name}_`),
-        );
-        const hidden: THREE.Object3D[] = [];
+                .map((t) => `Foliage_${t.name}_`);
+        }
+
+        const small = this.smallFoliagePrefixes;
+        const hidden = this.reflectionHidden;
+        hidden.length = 0;
         this.reflection.level = this.reflectionLevel;
         this.reflection.render(
             this.renderer,
@@ -870,9 +879,7 @@ export class Game {
                 for (const child of this.world.foliage.group.children) {
                     if (
                         child.visible &&
-                        [...small].some((prefix) =>
-                            child.name.startsWith(prefix),
-                        )
+                        small.some((prefix) => child.name.startsWith(prefix))
                     ) {
                         child.visible = false;
                         hidden.push(child);

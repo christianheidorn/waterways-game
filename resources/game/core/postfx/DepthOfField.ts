@@ -91,6 +91,12 @@ const PrefilterShader = /* glsl */ `
         float near = min(min(c0, c1), min(c2, c3));
         float coc = near < 0.0 ? near : 0.25 * (c0 + c1 + c2 + c3);
         vec3 color = texture2D(tColor, vUv).rgb;
+
+        // The gather spreads every sample over a large area: keep NaN / Inf out of it.
+        if (any(isnan(color)) || any(isinf(color))) {
+            color = vec3(0.0);
+        }
+
         gl_FragColor = vec4(color, coc);
     }
 `;

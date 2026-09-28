@@ -39,8 +39,11 @@ const ContactShadowShader = /* glsl */ `
             return;
         }
 
-        float rayLength = clamp(z * 0.012, 0.12, 1.6);
-        float thickness = clamp(z * 0.01, 0.08, 1.2);
+        // About 5 % of the distance: a few dozen pixels on screen at any range.
+        float rayLength = clamp(z * 0.05, 0.3, 4.0);
+        // Assumed occluder thickness: rays towards a light behind the camera pass behind an occluder's
+        // front face, so this must cover the size of rocks and bushes (but not a trunk metres in front).
+        float thickness = clamp(0.3 + z * 0.05, 0.3, 4.0);
         // Start slightly off the surface (along the normal) to avoid self-intersection.
         vec3 origin = p + n * (0.03 + z * 0.004);
         vec3 stepVec = uLightDirView * rayLength / float(STEPS);

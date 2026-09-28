@@ -197,6 +197,14 @@ export class Taa {
     private frame = 0;
     private needsReset = true;
     private readonly material: THREE.ShaderMaterial;
+    private readonly copy = fullscreenMaterial({
+        name: 'WaterwaysTAAResample',
+        uniforms: { tSource: { value: null } },
+        fragmentShader: /* glsl */ `
+            uniform sampler2D tSource;
+            varying vec2 vUv;
+            void main() { gl_FragColor = texture2D(tSource, vUv); }`,
+    });
     /** Current jitter in pixels. */
     readonly jitterPx = new THREE.Vector2();
 
@@ -237,10 +245,34 @@ export class Taa {
         this.needsReset = true;
     }
 
+    /**
+     * Resizing (dynamic resolution steps, capture at 2×) keeps the history: it is resampled into the new
+     * targets, so a resolution change doesn't flash the un-anti-aliased image for a few frames.
+     */
     setSize(width: number, height: number): void {
-        this.targets[0].setSize(width, height);
-        this.targets[1].setSize(width, height);
-        this.needsReset = true;
+        const history = this.targets[this.index];
+
+        if (history.width === width && history.height === height) {
+            return;
+        }
+
+        if (this.needsReset) {
+            this.targets[0].setSize(width, height);
+            this.targets[1].setSize(width, height);
+
+            return;
+        }
+
+        const resampled = colorTarget(width, height);
+        const renderer = this.blitter.renderer;
+        const previousTarget = renderer.getRenderTarget();
+        this.copy.uniforms.tSource.value = history.texture;
+        this.blitter.draw(this.copy, resampled);
+        renderer.setRenderTarget(previousTarget);
+        this.targets[0].dispose();
+        this.targets[1].dispose();
+        this.targets = [resampled, colorTarget(width, height)];
+        this.index = 0;
     }
 
     render(
@@ -278,5 +310,6 @@ export class Taa {
         this.targets[0].dispose();
         this.targets[1].dispose();
         this.material.dispose();
+        this.copy.dispose();
     }
 }

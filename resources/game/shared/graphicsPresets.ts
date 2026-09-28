@@ -59,14 +59,14 @@ export const PRESET_INFO: Record<
     high: {
         label: 'High',
         description:
-            'The project default. Full resolution, SMAA, bloom, 1K terrain textures.',
+            'The project default. Full resolution, TAA, eye adaptation, light shafts, colour grading, bloom, 1K terrain textures.',
         performance: 'Baseline',
     },
     epic: {
         label: 'Epic',
         description:
-            'Fast desktop GPUs. Ambient occlusion, 2K textures, long view, shadow and foliage distances.',
-        performance: '≈ 1.5× slower than High',
+            'Fast desktop GPUs. Ambient occlusion, contact shadows, wet-ground reflections, subtle depth of field and motion blur, lens effects, 2K textures, long view, shadow and foliage distances.',
+        performance: '≈ 1.8× slower than High',
     },
     cinematic: {
         label: 'Cinematic',

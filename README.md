@@ -242,6 +242,46 @@ uniforms. Every change applies live, without a reload.
   project settings.
 - **Reset to project defaults** removes your changes.
 
+## Post-processing and photo mode
+
+The render pipeline (`resources/game/core/PostFx.ts`, one module per effect in `core/postfx/`) runs in this
+order. Every stage exists only when it is enabled.
+
+1. HDR scene with depth, plus player velocity when needed.
+2. GTAO and contact shadows.
+3. Screen-space reflections on wet ground.
+4. Light shafts.
+5. TAA (temporal AA with reprojection and variance clipping).
+6. Depth of field (physical circle of confusion, autofocus or click-to-focus).
+7. Motion blur.
+8. Auto exposure (GPU histogram, no read-backs).
+9. Bloom and lens flare.
+10. One output pass: chromatic aberration, tone mapping, sharpening, 3D-LUT colour grade, saturation and
+    contrast, vignette, film grain and letterbox.
+
+**Quality switches** live in Game settings → Graphics → Cinematic effects and are set by the presets:
+
+- High: TAA, auto exposure, medium light shafts.
+- Epic: adds contact shadows, low SSR, DoF and motion blur, and lens effects.
+- Cinematic: everything at full quality.
+
+**How it looks** is set per map in Environment → Camera & look:
+
+- ten film looks (grade + lens bundles);
+- exposure and adaptation range, white balance;
+- light-shaft strength, bloom threshold;
+- focus, aperture and max blur;
+- motion blur, lens flare, chromatic aberration, grain, letterbox.
+
+The same film looks are in the editor's Environment sheet for live preview.
+
+**Photo mode (F9)** hides the UI and switches to Cinematic quality. It previews look changes and restores
+them on exit. Keys and controls:
+
+- Click to focus, and adjust aperture and field of view.
+- `H` hides the panel.
+- `Enter` saves a PNG; _2× capture_ renders at twice the resolution.
+
 ## Weather & sky
 
 Every map has a weather setup in its **Environment** page (and in the studio editor's live Environment panel).

@@ -5,7 +5,8 @@ import { FRAME_UNIFORMS, fullscreenMaterial, setDefine } from './common';
 /**
  * HDR lighting composite, one full-resolution pass for all screen-space lighting terms computed at
  * lower resolution: × ambient occlusion (GTAO), × contact shadows (depth-aware bilateral upsample so
- * shadows never bleed across silhouettes), screen-space reflections (premultiplied), + god rays.
+ * shadows never bleed across silhouettes), screen-space reflections (premultiplied), + god rays (weighted
+ * by the air in front of each surface, so close foreground is not washed out).
  */
 const CompositeShader = /* glsl */ `
     ${FRAME_UNIFORMS}
@@ -58,12 +59,24 @@ const CompositeShader = /* glsl */ `
         #endif
 
         #if RAYS
-            c += texture2D(tRays, vUv).rgb * uRayColor;
+            // In-scattering builds up with the distance travelled through the air: close surfaces (a trunk
+            // or foliage right in front of the camera) get little of it instead of being washed out.
+            float airDepth = 1.0 - exp(-linearDepth(vUv) / 25.0);
+            c += texture2D(tRays, vUv).rgb * uRayColor * airDepth;
         #endif
 
         gl_FragColor = vec4(c, 1.0);
     }
 `;
+
+export type CompositeTerms = {
+    ao: THREE.Texture | null;
+    contact: THREE.Texture | null;
+    contactStrength: number;
+    ssr: THREE.Texture | null;
+    rays: THREE.Texture | null;
+    rayColor: THREE.Vector3;
+};
 
 export class Composite {
     readonly material: THREE.ShaderMaterial;
@@ -88,17 +101,7 @@ export class Composite {
         });
     }
 
-    set(
-        input: THREE.Texture,
-        terms: {
-            ao: THREE.Texture | null;
-            contact: THREE.Texture | null;
-            contactStrength: number;
-            ssr: THREE.Texture | null;
-            rays: THREE.Texture | null;
-            rayColor: THREE.Vector3;
-        },
-    ): void {
+    set(input: THREE.Texture, terms: CompositeTerms): void {
         const m = this.material;
         const u = m.uniforms;
         u.tColor.value = input;

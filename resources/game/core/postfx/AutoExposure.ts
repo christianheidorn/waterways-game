@@ -18,7 +18,11 @@ const LuminanceShader = /* glsl */ `
     uniform vec2 uSourceTexel;
     varying vec2 vUv;
 
-    float lum(vec3 c) { return dot(max(c, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)); }
+    float lum(vec3 c) {
+        float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        // NaN / Inf / negative guard (one bad pixel must not poison the exposure).
+        return l > 0.0 && l < 65000.0 ? l : 0.0;
+    }
 
     void main() {
         // Four bilinear taps spread over this texel's footprint (16 source texels).

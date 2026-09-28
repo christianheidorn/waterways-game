@@ -12,8 +12,8 @@ export type PhotoModeHost = {
     restoreEnvironment: (snapshot: EnvironmentSettings) => void;
     /** Cinematic render quality while photo mode is open (restored on exit). */
     setCinematic: (on: boolean) => void;
-    /** Focus depth of field on a screen point (NDC -1…1). */
-    focusAt: (ndcX: number, ndcY: number) => void;
+    /** Focus depth of field on a screen point (NDC -1…1); null returns to the look's focus. */
+    focusAt: (ndcX: number | null, ndcY?: number) => void;
     /** Render one frame at `scale` × the current resolution and return it as PNG. */
     capture: (scale: number) => Promise<Blob>;
     /** Hide / show every other overlay (editor panel, HUD, stats, menus). */
@@ -107,6 +107,7 @@ export class PhotoMode {
         this.autofocus = toggle('Autofocus (screen centre)', true, (on) => {
             if (on) {
                 set({ dof_focus_distance: 0 });
+                this.host.focusAt(null);
                 this.focusPicking = false;
                 this.syncStatus();
             }
@@ -344,6 +345,7 @@ export class PhotoMode {
         this.host.setCinematic(false);
         this.host.setUiHidden(false);
         this.host.setFov(this.fovBefore);
+        this.host.focusAt(null);
 
         if (this.snapshot) {
             this.host.restoreEnvironment(this.snapshot);
@@ -355,6 +357,7 @@ export class PhotoMode {
         if (this.snapshot) {
             this.host.restoreEnvironment(this.snapshot);
             this.host.setFov(this.fovBefore);
+            this.host.focusAt(null);
             this.sync();
         }
     }
@@ -371,7 +374,7 @@ export class PhotoMode {
             s.set(Number(env[key] ?? 0));
         }
 
-        this.gradeSelect.value = env.color_grade ?? 'filmic';
+        this.gradeSelect.value = env.color_grade ?? 'neutral';
         this.autofocus.set(!env.dof_focus_distance);
         this.letterbox.set(String(env.letterbox ?? 0));
         this.fovSlider.set(this.host.fov());

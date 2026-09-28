@@ -14,12 +14,14 @@ import {
 } from './postfx/ColorLut';
 import type { LightSource, Look } from './postfx/common';
 import { Blitter, colorTarget, createFrameUniforms } from './postfx/common';
+import type { CompositeTerms } from './postfx/Composite';
 import { Composite } from './postfx/Composite';
 import { ContactShadows } from './postfx/ContactShadows';
 import { DepthOfField } from './postfx/DepthOfField';
 import { GodRays } from './postfx/GodRays';
 import { LensFlare } from './postfx/LensFlare';
 import { MotionBlur } from './postfx/MotionBlur';
+import type { OutputParams } from './postfx/Output';
 import { OutputStage } from './postfx/Output';
 import type { TerrainSurface } from './postfx/Ssr';
 import { Ssr } from './postfx/Ssr';
@@ -100,8 +102,20 @@ const AO_QUALITY = {
  */
 class ScaledGTAOPass extends GTAOPass {
     resolutionScale = 1;
-    private fullWidth = 1;
-    private fullHeight = 1;
+    private fullWidth: number;
+    private fullHeight: number;
+
+    constructor(
+        scene: THREE.Scene,
+        camera: THREE.PerspectiveCamera,
+        width: number,
+        height: number,
+    ) {
+        super(scene, camera, width, height);
+        // (Without this the first setResolutionScale resized the AO buffers to 1×1.)
+        this.fullWidth = width;
+        this.fullHeight = height;
+    }
 
     override setSize(width: number, height: number): void {
         this.fullWidth = width;
@@ -136,6 +150,12 @@ const BloomHighPass = /* glsl */ `
 
     void main() {
         vec4 texel = texture2D(tDiffuse, vUv);
+
+        // NaN / Inf would be spread over the screen by the blur chain.
+        if (any(isnan(texel.rgb)) || any(isinf(texel.rgb))) {
+            texel = vec4(0.0);
+        }
+
         float v = dot(texel.rgb, vec3(0.2126, 0.7152, 0.0722));
         #if AUTO_EXPOSURE
             v *= texture2D(tExposure, vec2(0.5)).r;
@@ -220,6 +240,8 @@ const CUT_ANGLE = THREE.MathUtils.degToRad(45);
 type Structure = {
     aa: GraphicsSettings['anti_aliasing'];
     ao: boolean;
+    /** GTAO with its own normal pre-pass (a second scene render); otherwise normals from depth. */
+    aoNormals: boolean;
     bloom: boolean;
     autoExposure: boolean;
     godRays: GraphicsSettings['god_rays'];
@@ -308,6 +330,31 @@ export class PostFx {
     private readonly whiteBalance = new THREE.Vector3(1, 1, 1);
     private readonly rayColor = new THREE.Vector3();
     private readonly lightDir = new THREE.Vector3();
+    // Per-frame parameter objects, reused (no allocations in the frame loop).
+    private readonly compositeTerms: CompositeTerms = {
+        ao: null,
+        contact: null,
+        contactStrength: 0,
+        ssr: null,
+        rays: null,
+        rayColor: this.rayColor,
+    };
+    private readonly outputParams: OutputParams = {
+        exposure: 1,
+        whiteBalance: this.whiteBalance,
+        lut: null,
+        lutIntensity: 1,
+        saturation: 1,
+        contrast: 1,
+        vignette: 0,
+        sharpen: 0,
+        aberration: 0,
+        grain: 0,
+        letterbox: 0,
+        bloom: null,
+        flare: null,
+        autoExposure: false,
+    };
 
     constructor(
         private readonly renderer: THREE.WebGLRenderer,
@@ -561,13 +608,21 @@ export class PostFx {
                     this.viewProj,
                 );
 
-                if (vis > 0.001) {
+                // Shafts fade out as the light source sets (none from below the horizon).
+                const horizon = THREE.MathUtils.smoothstep(
+                    this.lightDir.y,
+                    -0.03,
+                    0.03,
+                );
+
+                if (vis * horizon > 0.001) {
                     this.godRays.render(this.sceneTarget.texture, baseExposure);
                     const c = light.sun.color;
                     const k =
                         (0.6 *
                             look.godRayIntensity *
                             vis *
+                            horizon *
                             (night ? 0.35 : 1) *
                             (1 + Math.min(0.75, look.fogDensity / 0.001)) *
                             (1 - light.darkness * 0.6)) /
@@ -580,14 +635,13 @@ export class PostFx {
                 }
             }
 
-            this.composite.set(current.texture, {
-                ao: this.ao ? this.ao.pdRenderTarget.texture : null,
-                contact: this.contact ? this.contact.texture : null,
-                contactStrength,
-                ssr: this.ssr ? this.ssr.texture : null,
-                rays: this.godRays ? this.godRays.texture : null,
-                rayColor: this.rayColor,
-            });
+            const terms = this.compositeTerms;
+            terms.ao = this.ao ? this.ao.pdRenderTarget.texture : null;
+            terms.contact = this.contact ? this.contact.texture : null;
+            terms.contactStrength = contactStrength;
+            terms.ssr = this.ssr ? this.ssr.texture : null;
+            terms.rays = this.godRays ? this.godRays.texture : null;
+            this.composite.set(current.texture, terms);
             const next = this.other(current);
             this.blitter.draw(this.composite.material, next);
             current = next;
@@ -621,8 +675,13 @@ export class PostFx {
             current = next;
         }
 
-        // ---- 6. motion blur (skipped while nothing moves)
-        if (this.motionBlur && (this.cameraMoved || velocity)) {
+        // ---- 6. motion blur (skipped while nothing moves, on camera cuts and for stills rendered with dt 0)
+        if (
+            this.motionBlur &&
+            !cut &&
+            dt > 0 &&
+            (this.cameraMoved || velocity)
+        ) {
             const next = this.other(current);
             this.motionBlur.render(current.texture, next, {
                 strength: look.motionBlurStrength,
@@ -762,30 +821,25 @@ export class PostFx {
                 ? colorGradeLut(look.colorGrade)
                 : null;
         whiteBalanceGains(look.whiteBalance, this.whiteBalance);
+        const p = this.outputParams;
+        p.exposure = baseExposure;
+        p.lut = lut;
+        p.lutIntensity = THREE.MathUtils.clamp(look.colorGradeIntensity, 0, 1);
+        p.saturation = g.saturation ?? 1;
+        p.contrast = g.contrast ?? 1;
+        p.vignette = g.vignette ?? 0;
+        // TAA's resolve is slightly soft: a touch of adaptive sharpening restores it.
+        p.sharpen = Math.max(g.sharpen ?? 0, s.aa === 'taa' ? 0.25 : 0);
+        p.aberration = lens ? look.chromaticAberration : 0;
+        p.grain = lens ? look.filmGrain : 0;
+        p.letterbox = look.letterbox;
+        p.bloom = this.bloom ? this.bloom.texture : null;
+        p.flare = this.flare ? this.flare.texture : null;
+        p.autoExposure = s.autoExposure;
         this.output.update(
             this.renderer,
             input,
-            {
-                exposure: baseExposure,
-                whiteBalance: this.whiteBalance,
-                lut,
-                lutIntensity: THREE.MathUtils.clamp(
-                    look.colorGradeIntensity,
-                    0,
-                    1,
-                ),
-                saturation: g.saturation ?? 1,
-                contrast: g.contrast ?? 1,
-                vignette: g.vignette ?? 0,
-                // TAA's resolve is slightly soft: a touch of adaptive sharpening restores it.
-                sharpen: Math.max(g.sharpen ?? 0, s.aa === 'taa' ? 0.25 : 0),
-                aberration: lens ? look.chromaticAberration : 0,
-                grain: lens ? look.filmGrain : 0,
-                letterbox: look.letterbox,
-                bloom: this.bloom ? this.bloom.texture : null,
-                flare: this.flare ? this.flare.texture : null,
-                autoExposure: s.autoExposure,
-            },
+            p,
             this.renderSize.x,
             this.renderSize.y,
             this.width / Math.max(1, this.height),
@@ -804,6 +858,7 @@ export class PostFx {
         const s: Structure = {
             aa,
             ao: !!g.ambient_occlusion,
+            aoNormals: !!g.ambient_occlusion && g.ao_quality === 'high',
             bloom: !!g.bloom && (g.bloom_intensity ?? 0.12) > 0.001,
             autoExposure: !!g.auto_exposure,
             godRays:
@@ -884,7 +939,13 @@ export class PostFx {
                 h,
             );
             this.ao.output = GTAOPass.OUTPUT.Off;
-            names.push('GTAO');
+
+            if (!s.aoNormals) {
+                // Normals reconstructed from the scene depth: no second scene render for a normal buffer.
+                this.ao.setGBuffer(this.sceneTarget.depthTexture!);
+            }
+
+            names.push(s.aoNormals ? 'GTAO (normal pass)' : 'GTAO');
         }
 
         if (s.contact) {

@@ -26,6 +26,7 @@ export type PresetKey = Exclude<
     | 'dynamic_resolution'
     | 'target_fps'
     | 'max_fps'
+    | 'renderer_backend'
 >;
 
 export type PresetValues = Pick<GraphicsSettings, PresetKey>;
@@ -452,6 +453,7 @@ export function normalizeGraphics(
         dynamic_resolution: false,
         target_fps: 60,
         max_fps: 0,
+        renderer_backend: 'auto',
         ...PRESETS.high,
         antialias: false,
         ...settings,

@@ -162,6 +162,8 @@ export type GraphicsSettings = {
     render_scale: number;
     /** Highest device pixel ratio rendered at (Retina / HiDPI); render_scale applies on top. */
     max_pixel_ratio: number;
+    /** Graphics API: WebGPU when available (auto), or force one. Applies on reload. */
+    renderer_backend: 'auto' | 'webgpu' | 'webgl';
     draw_distance: number;
     terrain_lod_bias: number;
     foliage_density: number;

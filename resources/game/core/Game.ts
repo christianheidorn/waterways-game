@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { Editor } from '../editor/Editor';
 import type { DirtyChannel } from '../editor/Editor';
 import { EditorPanel } from '../editor/ui/EditorPanel';
@@ -47,6 +47,8 @@ import { DynamicResolution } from './DynamicResolution';
 import { GpuProfiler } from './GpuProfiler';
 import { Input } from './Input';
 import { PostFx } from './PostFx';
+import type { GameRenderer } from './renderer';
+import { installWebGpuCompat, isWebGpu } from './renderer';
 
 type World = {
     heights: Heightfield;
@@ -69,7 +71,7 @@ export class Game {
     private readonly api: Api;
     private readonly bridge = new Bridge();
     private readonly container: HTMLElement;
-    private renderer!: THREE.WebGLRenderer;
+    private renderer!: GameRenderer;
     private postFx!: PostFx;
     private profiler: GpuProfiler | null = null;
     private dynamicResolution = new DynamicResolution();
@@ -82,7 +84,7 @@ export class Game {
     private anisotropyTimer = 0;
     private lastFrameAt = 0;
     private frameIntervalMs = 16.7;
-    private waterTarget: THREE.WebGLRenderTarget | null = null;
+    private backend: 'webgpu' | 'webgl' = 'webgl';
     private reflection = new WaterReflection();
     private reflectionLevelTimer = 0;
     private reflectionLevel: number | null = null;
@@ -143,7 +145,7 @@ export class Game {
                 return;
             }
 
-            this.createRenderer();
+            await this.createRenderer();
             await this.loadWorld();
             this.createGameplay();
             this.weather = new Weather(this.scene, this.atmosphere, {
@@ -214,19 +216,36 @@ export class Game {
         }
     }
 
-    private createRenderer(): void {
-        const renderer = new THREE.WebGLRenderer({
+    /**
+     * WebGPU where the browser supports it (Chrome / Edge, Safari 26+, Firefox 141+ on Windows), the
+     * WebGL 2 backend of the same renderer otherwise, or when `renderer_backend` forces it.
+     */
+    private async createRenderer(): Promise<void> {
+        const requested =
+            loadGraphicsOverrides().renderer_backend ??
+            this.manifest.settings.graphics.renderer_backend ??
+            'auto';
+        if (requested !== 'webgl') {
+            await installWebGpuCompat();
+        }
+
+        const renderer = new THREE.WebGPURenderer({
             antialias: false,
             powerPreference: 'high-performance',
             stencil: false,
+            forceWebGL: requested === 'webgl',
+            trackTimestamp: true,
         });
+        await renderer.init();
         renderer.outputColorSpace = THREE.SRGBColorSpace;
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFShadowMap;
         renderer.info.autoReset = false;
-        // Shadows are refreshed once per frame manually, because the water prepass renders the scene twice.
-        renderer.shadowMap.autoUpdate = false;
+        this.backend = isWebGpu(renderer) ? 'webgpu' : 'webgl';
+        console.info(
+            `Waterways renderer: ${this.backend === 'webgpu' ? 'WebGPU' : 'WebGL 2'} backend`,
+        );
         renderer.domElement.className = 'ww-canvas';
         renderer.domElement.tabIndex = 0;
         this.container.prepend(renderer.domElement);
@@ -237,7 +256,7 @@ export class Game {
         this.atmosphere = new Atmosphere(renderer, this.scene);
         this.postFx = new PostFx(renderer, this.scene, this.camera);
         this.postFx.setLightSource(this.atmosphere);
-        this.profiler = new GpuProfiler(renderer.getContext());
+        this.profiler = new GpuProfiler(renderer);
 
         this.resizeObserver = new ResizeObserver(() => this.resize());
         this.resizeObserver.observe(this.container);
@@ -769,92 +788,22 @@ export class Game {
     }
 
     /**
-     * Renders the frame: first the opaque scene without water into a colour + depth target (used by the
-     * water shader for refraction, absorption and soft shores), then the full scene through the composer.
+     * Renders the frame: the water's planar reflection (when there is water), then the scene through the
+     * post-processing pipeline. Water refraction reads the opaque scene from the same pass (viewport
+     * textures), so there is no separate refraction pre-pass.
      */
     private renderFrame(dt: number): void {
-        const renderer = this.renderer;
         const water = this.world.water;
         const profiler = this.profiler;
+        water.setSceneTextures(null);
 
-        if (this.waterTarget && water.hasWater()) {
-            profiler?.mark('Water refraction');
-            // Only what can be seen *through* the water matters here: terrain, the player and shore plants
-            // (reeds). Grass, bushes and trees would double the vertex work of the frame for nothing.
-            // Shadows are not re-rendered: this pass and the reflection reuse last frame's shadow map.
-            renderer.shadowMap.needsUpdate = false;
-            water.group.visible = false;
-            const hidden = this.hideFoliage(this.refractionFoliagePrefixes());
-            renderer.setRenderTarget(this.waterTarget);
-            renderer.clear();
-            renderer.render(this.scene, this.camera);
-            renderer.setRenderTarget(null);
-            this.restoreFoliage(hidden);
-            water.group.visible = true;
-            // Water maps gl_FragCoord of the composer render (dynamic resolution aware) to scene UVs.
-            const size = this.postFx.renderSize;
-            water.setSceneTextures(
-                {
-                    color: this.waterTarget.texture,
-                    depth: this.waterTarget.depthTexture!,
-                },
-                size.x,
-                size.y,
-            );
-            this.postFx.setWaterDepth(this.waterTarget.depthTexture);
+        if (water.hasWater()) {
             profiler?.mark('Water reflection');
             this.renderReflection(dt);
-        } else {
-            water.setSceneTextures(null);
-            this.postFx.setWaterDepth(null);
         }
 
-        // The shadow map is drawn once per frame, by the main scene render.
-        renderer.shadowMap.needsUpdate = true;
         this.postFx.render(dt, profiler);
         profiler?.end();
-    }
-
-    /** Hides visible foliage meshes whose name starts with none of `keep`; returns them for restoring. */
-    private hideFoliage(keep: string[]): THREE.Object3D[] {
-        const hidden = this.hiddenFoliage;
-        hidden.length = 0;
-
-        for (const child of this.world.foliage.group.children) {
-            if (
-                child.visible &&
-                !keep.some((prefix) => child.name.startsWith(prefix))
-            ) {
-                child.visible = false;
-                hidden.push(child);
-            }
-        }
-
-        return hidden;
-    }
-
-    private restoreFoliage(hidden: THREE.Object3D[]): void {
-        for (const child of hidden) {
-            child.visible = true;
-        }
-
-        hidden.length = 0;
-    }
-
-    private readonly hiddenFoliage: THREE.Object3D[] = [];
-    private refractionTypes: FoliageType[] | null = null;
-    private refractionPrefixes: string[] = [];
-
-    /** Mesh name prefixes of the foliage kept in the water refraction pass (plants that stand in water). */
-    private refractionFoliagePrefixes(): string[] {
-        if (this.refractionTypes !== this.manifest.foliage_types) {
-            this.refractionTypes = this.manifest.foliage_types;
-            this.refractionPrefixes = this.manifest.foliage_types
-                .filter((t) => t.kind === 'reed')
-                .map((t) => `Foliage_${t.name}_`);
-        }
-
-        return this.refractionPrefixes;
     }
 
     /**
@@ -966,8 +915,6 @@ export class Game {
     private resizeWaterTarget(): void {
         const quality =
             this.manifest?.settings.graphics.water_quality ?? 'medium';
-        const scale =
-            quality === 'high' ? 1 : quality === 'medium' ? 0.6 : 0.35;
         // Follows the composer resolution (which dynamic resolution may lower below the canvas size).
         const size = this.postFx.renderSize;
         this.reflection.setSize(
@@ -975,19 +922,6 @@ export class Game {
             size.y,
             quality === 'high' ? 0.6 : quality === 'medium' ? 0.4 : 0,
         );
-        const w = Math.max(1, Math.round(size.x * scale));
-        const h = Math.max(1, Math.round(size.y * scale));
-
-        if (!this.waterTarget) {
-            this.waterTarget = new THREE.WebGLRenderTarget(w, h, {
-                type: THREE.HalfFloatType,
-                depthTexture: new THREE.DepthTexture(w, h),
-            });
-            this.waterTarget.texture.minFilter = THREE.LinearFilter;
-            this.waterTarget.texture.generateMipmaps = false;
-        } else {
-            this.waterTarget.setSize(w, h);
-        }
     }
 
     /**
@@ -1205,7 +1139,7 @@ export class Game {
      * foliage types change so new textures pick it up.
      */
     private applyAnisotropy(requested: number): void {
-        const max = this.renderer.capabilities.getMaxAnisotropy();
+        const max = this.renderer.getMaxAnisotropy();
         const value = Math.max(1, Math.min(max, Math.round(requested || 1)));
         const seen = new Set<THREE.Texture>();
 
@@ -1221,7 +1155,7 @@ export class Game {
 
             for (const m of Array.isArray(material) ? material : [material]) {
                 const uniforms = (
-                    m as { uniforms?: Record<string, THREE.IUniform> }
+                    m as { uniforms?: Record<string, { value: unknown }> }
                 ).uniforms;
                 const values = [
                     ...Object.values(m),

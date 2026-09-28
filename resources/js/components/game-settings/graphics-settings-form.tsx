@@ -143,6 +143,7 @@ const SECTIONS: Section[] = [
             'dynamic_resolution',
             'target_fps',
             'max_fps',
+            'renderer_backend',
         ],
     },
 ];

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { GameRenderer } from '../core/renderer';
 
 /**
  * Planar reflection for the water level nearest to the viewer (lakes, sea, calm rivers).
@@ -47,7 +48,7 @@ export class WaterReflection {
      * reflected (water itself, dense grass) and `restore` afterwards.
      */
     render(
-        renderer: THREE.WebGLRenderer,
+        renderer: GameRenderer,
         scene: THREE.Scene,
         camera: THREE.PerspectiveCamera,
         hide: () => void,
@@ -135,13 +136,10 @@ export class WaterReflection {
 
         hide();
         const prevTarget = renderer.getRenderTarget();
-        const prevShadowUpdate = renderer.shadowMap.needsUpdate;
-        renderer.shadowMap.needsUpdate = false;
         renderer.setRenderTarget(this.target);
         renderer.clear();
         renderer.render(scene, reflect);
         renderer.setRenderTarget(prevTarget);
-        renderer.shadowMap.needsUpdate = prevShadowUpdate;
         restore();
         this.active = true;
         this.view.copy(camera.position);

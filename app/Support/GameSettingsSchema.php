@@ -99,6 +99,9 @@ final class GameSettingsSchema
                 SettingField::number('sharpen', 'Sharpen', 0, 0, 1, 0.01, null, 'Contrast-adaptive sharpening; useful with a render scale below 1.'),
                 SettingField::boolean('dynamic_resolution', 'Dynamic resolution', false, 'Lowers the render scale (down to 0.5×) automatically to hold the target frame rate.'),
                 SettingField::number('target_fps', 'Target frame rate', 60, 30, 144, 1, 'fps', 'Frame rate dynamic resolution tries to hold.'),
+                SettingField::select('renderer_backend', 'Graphics API', 'auto', [
+                    'auto' => 'Automatic (WebGPU when available)', 'webgpu' => 'WebGPU', 'webgl' => 'WebGL 2 (compatibility)',
+                ], 'WebGPU uses the GPU directly (Metal / D3D12 / Vulkan) with GPU-driven foliage culling. Applies after a reload.'),
                 SettingField::number('max_fps', 'Frame rate limit', 0, 0, 240, 1, 'fps', '0 = unlimited (display refresh rate).'),
             ]),
             'editor' => new SettingGroup('editor', 'Editor', 'In-game world editor behaviour.', [

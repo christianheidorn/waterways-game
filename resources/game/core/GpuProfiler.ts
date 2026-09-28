@@ -1,60 +1,77 @@
+import { InspectorBase, TimestampQuery } from 'three/webgpu';
+import type { GameRenderer } from './renderer';
+
 export type ProfileSection = {
     name: string;
-    /** GPU time in ms (smoothed); null when timer queries are unsupported or no result arrived yet. */
+    /** GPU time in ms (smoothed); null when timestamp queries are unsupported or no result arrived yet. */
     gpuMs: number | null;
-    /** CPU (JavaScript + WebGL submission) time in ms (smoothed). */
+    /** CPU (JavaScript + command submission) time in ms (smoothed). */
     cpuMs: number;
 };
 
-type Pending = { name: string; query: WebGLQuery | null }[];
-
-const MAX_IN_FLIGHT = 4;
 const SMOOTHING = 0.15;
 
+type QueryPools = Record<
+    string,
+    { timestamps?: Map<string, number> } | undefined
+>;
+
 /**
- * Per-pass frame profiler, like UE's `stat gpu`: GPU time per section with EXT_disjoint_timer_query_webgl2
- * (results arrive a few frames late) and CPU time per section with performance.now().
+ * Hooks into the renderer's inspector: every render / compute call of a frame gets a timestamp query
+ * id (uid); the profiler remembers which section was open when each one started.
+ */
+class SectionInspector extends InspectorBase {
+    section = 'Frame';
+    readonly owners = new Map<string, string>();
+
+    override beginRender(uid: string): void {
+        this.owners.set(uid, this.section);
+    }
+
+    override beginCompute(uid: string): void {
+        this.owners.set(uid, this.section);
+    }
+}
+
+/**
+ * Per-pass frame profiler, like UE's `stat gpu`.
  *
- * Sections are sequential (`mark` closes the previous one), because WebGL allows only one time-elapsed
- * query at a time. With `detailed` off, the whole frame is a single section — that total still drives
- * dynamic resolution — so the per-pass queries only run while someone looks at them (the F10 menu).
+ * - GPU: the renderer's timestamp queries (`trackTimestamp`), one per render / compute call, on WebGPU
+ *   (`timestamp-query`) and on WebGL 2 (EXT_disjoint_timer_query_webgl2). Results arrive a few frames
+ *   late and are attributed to the section that issued each call.
+ * - CPU: performance.now() between `mark`s.
+ *
+ * With `detailed` off, the frame is a single section; its GPU total still drives dynamic resolution.
  */
 export class GpuProfiler {
-    private readonly gl: WebGL2RenderingContext;
-    private readonly ext: {
-        TIME_ELAPSED_EXT: number;
-        GPU_DISJOINT_EXT: number;
-    } | null;
-    private readonly inFlight: Pending[] = [];
-    private frame: Pending | null = null;
+    private readonly inspector = new SectionInspector();
     private open: { name: string; start: number } | null = null;
     private cpu = new Map<string, number>();
     private gpu = new Map<string, number>();
     private order: string[] = [];
     private frameOrder: string[] = [];
+    private resolving = false;
     /** Per-pass sections (true) or a single whole-frame measurement (false). */
     detailed = false;
     /** Total GPU time of the most recent measured frame in ms (null until the first result / unsupported). */
     lastMs: number | null = null;
 
-    constructor(gl: WebGLRenderingContext | WebGL2RenderingContext) {
-        this.gl = gl as WebGL2RenderingContext;
-        this.ext =
-            typeof WebGL2RenderingContext !== 'undefined' &&
-            gl instanceof WebGL2RenderingContext
-                ? gl.getExtension('EXT_disjoint_timer_query_webgl2')
-                : null;
+    constructor(private readonly renderer: GameRenderer) {
+        renderer.inspector = this.inspector;
     }
 
     get supported(): boolean {
-        return this.ext !== null;
+        const backend = this.renderer.backend as {
+            trackTimestamp?: boolean;
+            hasFeature?: (name: string) => boolean;
+        };
+
+        return !!backend.trackTimestamp;
     }
 
     /** Starts a frame with its first section. */
     begin(name: string): void {
-        this.poll();
         this.frameOrder = [];
-        this.frame = this.inFlight.length < MAX_IN_FLIGHT ? [] : null;
         this.start(this.detailed ? name : 'Frame');
     }
 
@@ -68,7 +85,7 @@ export class GpuProfiler {
         this.start(name);
     }
 
-    /** Ends the frame. */
+    /** Ends the frame and collects GPU timings of earlier frames. */
     end(): void {
         if (!this.open) {
             return;
@@ -76,11 +93,8 @@ export class GpuProfiler {
 
         this.stop();
         this.order = this.frameOrder;
-
-        if (this.frame) {
-            this.inFlight.push(this.frame);
-            this.frame = null;
-        }
+        this.inspector.section = 'Frame';
+        void this.resolve();
     }
 
     /** Sections of the last frame, in order. */
@@ -95,74 +109,76 @@ export class GpuProfiler {
     private start(name: string): void {
         this.open = { name, start: performance.now() };
         this.frameOrder.push(name);
-
-        if (this.ext && this.frame) {
-            const query = this.gl.createQuery();
-
-            if (query) {
-                this.gl.beginQuery(this.ext.TIME_ELAPSED_EXT, query);
-            }
-
-            this.frame.push({ name, query });
-        }
+        this.inspector.section = name;
     }
 
     private stop(): void {
         const open = this.open!;
         this.open = null;
         smooth(this.cpu, open.name, performance.now() - open.start);
-
-        if (this.ext && this.frame) {
-            const last = this.frame[this.frame.length - 1];
-
-            if (last?.query) {
-                this.gl.endQuery(this.ext.TIME_ELAPSED_EXT);
-            }
-        }
     }
 
-    /** Collects finished frames (all queries of a frame are read together). */
-    private poll(): void {
-        const gl = this.gl;
+    private async resolve(): Promise<void> {
+        if (this.resolving || !this.supported) {
+            return;
+        }
 
-        while (this.ext && this.inFlight.length) {
-            const frame = this.inFlight[0];
-            const last = frame[frame.length - 1]?.query;
+        this.resolving = true;
 
-            if (
-                last &&
-                !gl.getQueryParameter(last, gl.QUERY_RESULT_AVAILABLE)
-            ) {
-                return;
+        try {
+            const renderer = this.renderer;
+            await Promise.all([
+                renderer.resolveTimestampsAsync(TimestampQuery.RENDER),
+                renderer.resolveTimestampsAsync(TimestampQuery.COMPUTE),
+            ]);
+            const pools = (
+                renderer.backend as unknown as {
+                    timestampQueryPool: QueryPools;
+                }
+            ).timestampQueryPool;
+            // uid = "<r|c>:<call>:<id>:f<frame>" → per frame, per section.
+            const frames = new Map<number, Map<string, number>>();
+
+            for (const pool of Object.values(pools)) {
+                for (const [uid, ms] of pool?.timestamps ?? []) {
+                    const frame = Number(uid.slice(uid.lastIndexOf(':f') + 2));
+                    const section = this.inspector.owners.get(uid) ?? 'Other';
+                    const sums = frames.get(frame) ?? new Map<string, number>();
+                    sums.set(section, (sums.get(section) ?? 0) + ms);
+                    frames.set(frame, sums);
+                }
             }
 
-            this.inFlight.shift();
-            const disjoint = gl.getParameter(
-                this.ext.GPU_DISJOINT_EXT,
-            ) as boolean;
-            let total = 0;
+            const latest = Math.max(...frames.keys());
 
-            for (const { name, query } of frame) {
-                if (!query) {
-                    continue;
-                }
+            if (Number.isFinite(latest)) {
+                const sums = frames.get(latest)!;
+                let total = 0;
 
-                if (!disjoint) {
-                    const ms =
-                        (gl.getQueryParameter(
-                            query,
-                            gl.QUERY_RESULT,
-                        ) as number) / 1e6;
+                for (const [section, ms] of sums) {
                     total += ms;
-                    smooth(this.gpu, name, ms);
+                    smooth(this.gpu, section, ms);
                 }
 
-                gl.deleteQuery(query);
-            }
-
-            if (!disjoint) {
                 this.lastMs = total;
             }
+
+            // Forget uids of resolved frames (they are unique per frame).
+            for (const uid of this.inspector.owners.keys()) {
+                const frame = Number(uid.slice(uid.lastIndexOf(':f') + 2));
+
+                if (frame <= latest) {
+                    this.inspector.owners.delete(uid);
+                }
+            }
+
+            if (this.inspector.owners.size > 4096) {
+                this.inspector.owners.clear();
+            }
+        } catch {
+            // Device lost / unsupported: keep the CPU timings.
+        } finally {
+            this.resolving = false;
         }
     }
 }

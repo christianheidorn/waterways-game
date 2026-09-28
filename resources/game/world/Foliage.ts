@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { GameRenderer } from '../core/renderer';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FOLIAGE_STRIDE } from '../shared/types';
@@ -327,8 +328,8 @@ export class Foliage {
     private readonly queue: { renderer: TypeRenderer; cell: Cell }[] = [];
     private lastCamera: THREE.Camera | null = null;
     /** Renderer used to render missing impostors (set explicitly or picked up from a draw). */
-    private gl: THREE.WebGLRenderer | null = null;
-    private readonly captureRenderer = (renderer: THREE.WebGLRenderer) => {
+    private gl: GameRenderer | null = null;
+    private readonly captureRenderer = (renderer: GameRenderer) => {
         this.gl ??= renderer;
     };
 
@@ -340,7 +341,7 @@ export class Foliage {
      * WebGL renderer for runtime-generated impostors of models without a far LOD. Optional: the
      * renderer is otherwise picked up from the first foliage draw.
      */
-    setRenderer(renderer: THREE.WebGLRenderer | null): void {
+    setRenderer(renderer: GameRenderer | null): void {
         this.gl = renderer;
     }
 
@@ -1188,7 +1189,7 @@ export class Foliage {
     }
 
     /** Renders at most one missing impostor per frame (outside the render pass). */
-    private renderPendingImpostor(gl: THREE.WebGLRenderer): void {
+    private renderPendingImpostor(gl: GameRenderer): void {
         for (const renderer of this.renderers.values()) {
             const pending = renderer.pendingImpostor;
 
@@ -1201,7 +1202,7 @@ export class Foliage {
 
             try {
                 built = renderImpostor(
-                    gl,
+                    gl as never,
                     renderer.lods[0],
                     renderer.lodMaterials[0],
                 );
@@ -2197,7 +2198,7 @@ export class Foliage {
                 proxy.geometry.setDrawRange(0, proxy.main);
             }
         };
-        mesh.onBeforeRender = this.captureRenderer;
+        mesh.onBeforeRender = this.captureRenderer as never;
         // Set explicitly (never null): three would otherwise compute them from every instance.
         mesh.boundingSphere = new THREE.Sphere();
         mesh.boundingBox = new THREE.Box3();

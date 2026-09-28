@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { PMREMGenerator } from 'three/webgpu';
+import type { GameRenderer } from '../core/renderer';
 import type { EnvironmentSettings, ShadowQuality } from '../shared/types';
 import { fogSunColor, fogSunParams, heightFogParams } from './HeightFog';
 import { extinction, SkyDome, skyRadiance } from './SkyDome';
@@ -90,8 +92,8 @@ export class Atmosphere {
     flash = 0;
     readonly flashDirection = new THREE.Vector3(0, 1, 0);
     private flashLight: THREE.DirectionalLight;
-    private pmrem: THREE.PMREMGenerator;
-    private envTarget: THREE.WebGLRenderTarget | null = null;
+    private pmrem: PMREMGenerator;
+    private envTarget: THREE.RenderTarget | null = null;
     private envScene = new THREE.Scene();
     private envSky: SkyDome;
     private readonly skies: SkyDome[];
@@ -127,7 +129,7 @@ export class Atmosphere {
     };
 
     constructor(
-        private readonly renderer: THREE.WebGLRenderer,
+        private readonly renderer: GameRenderer,
         private readonly scene: THREE.Scene,
     ) {
         this.sky = new SkyDome('medium');
@@ -160,7 +162,7 @@ export class Atmosphere {
         this.fog = new THREE.FogExp2(0xbfd1e5, 0.0002);
         scene.fog = this.fog;
 
-        this.pmrem = new THREE.PMREMGenerator(renderer);
+        this.pmrem = new PMREMGenerator(renderer);
     }
 
     apply(input: EnvironmentSettings): void {
@@ -236,7 +238,6 @@ export class Atmosphere {
         cam.near = 1;
         cam.far = distance * 6 + 4000;
         cam.updateProjectionMatrix();
-        this.renderer.shadowMap.needsUpdate = true;
     }
 
     /** Blend weather, relight, and keep the shadow frustum centred on the focus point. */

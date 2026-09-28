@@ -29,6 +29,14 @@ export class PostFx {
         this.pipeline = new THREE.RenderPipeline(renderer, this.scenePass);
     }
 
+    /**
+     * Depth of the scene pass (render resolution) as last rendered: read before this frame's
+     * `render()` it holds the previous frame's depth (GPU occlusion culling builds its Hi-Z from it).
+     */
+    get depthTexture(): THREE.Texture {
+        return this.scenePass.getTexture('depth');
+    }
+
     /** Human readable list of the active passes (F10 menu / stats). */
     get passNames(): string[] {
         return ['Scene', 'Output'];

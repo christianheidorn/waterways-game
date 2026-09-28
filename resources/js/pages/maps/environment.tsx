@@ -1,8 +1,15 @@
 import { Head } from '@inertiajs/react';
-import { CloudFog, CloudRain, SunMedium, Waves } from 'lucide-react';
+import {
+    Clapperboard,
+    CloudFog,
+    CloudRain,
+    SunMedium,
+    Waves,
+} from 'lucide-react';
 import { MapTabs } from '@/components/map-tabs';
 import type { SettingsSection } from '@/components/settings-form';
 import { SettingsForm } from '@/components/settings-form';
+import { LookPresets } from '@/components/look-presets';
 import { WeatherPresets } from '@/components/weather-presets';
 import { formatTimeOfDay } from '@/lib/format';
 import { formatWindDirection } from '@/lib/weather-presets';
@@ -58,6 +65,34 @@ const SECTIONS: SettingsSection[] = [
             'height_fog_density',
             'wind_strength',
             'wind_direction',
+        ],
+    },
+    {
+        title: 'Camera & look',
+        description:
+            'Film look, eye adaptation, light shafts, depth of field and lens effects. Each effect also needs its switch in Graphics settings (on by preset from High / Epic / Cinematic).',
+        icon: Clapperboard,
+        addon: ({ values, setValues }) => (
+            <LookPresets values={values} onApply={setValues} />
+        ),
+        fields: [
+            'color_grade',
+            'color_grade_intensity',
+            'white_balance',
+            'exposure_compensation',
+            'auto_exposure_min_ev',
+            'auto_exposure_max_ev',
+            'auto_exposure_speed',
+            'god_ray_intensity',
+            'bloom_threshold',
+            'dof_focus_distance',
+            'dof_aperture',
+            'dof_max_blur',
+            'motion_blur_strength',
+            'lens_flare_intensity',
+            'chromatic_aberration',
+            'film_grain',
+            'letterbox',
         ],
     },
     {

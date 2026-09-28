@@ -60,7 +60,44 @@ export type EnvironmentSettings = {
     height_fog_density: number;
     /** 0-1 how wet surfaces look (darker, glossier ground). */
     wetness: number;
+    // ---- Camera & look: artistic post-processing per map (resources/game/core/PostFx.ts) ----
+    /** Colour grade preset, applied as a generated 3D LUT. */
+    color_grade: ColorGrade;
+    /** 0-1 blend of the LUT over the neutral image. */
+    color_grade_intensity: number;
+    /** White balance shift: negative = cooler / bluer, positive = warmer. */
+    white_balance: number;
+    /** Exposure compensation in EV stops on top of `exposure` / auto exposure. */
+    exposure_compensation: number;
+    /** Auto exposure (eye adaptation) limits in EV around the base exposure, and adaptation speed. */
+    auto_exposure_min_ev: number;
+    auto_exposure_max_ev: number;
+    auto_exposure_speed: number;
+    god_ray_intensity: number;
+    bloom_threshold: number;
+    /** Depth of field: focus distance in metres (0 = autofocus on the screen centre), f-stop, max blur in px. */
+    dof_focus_distance: number;
+    dof_aperture: number;
+    dof_max_blur: number;
+    motion_blur_strength: number;
+    lens_flare_intensity: number;
+    chromatic_aberration: number;
+    film_grain: number;
+    /** Letterbox bars for cinematic framing (0 = off, else target aspect ratio e.g. 2.39). */
+    letterbox: number;
 };
+
+export type ColorGrade =
+    | 'neutral'
+    | 'filmic'
+    | 'golden_hour'
+    | 'teal_orange'
+    | 'cold_storm'
+    | 'bleach_bypass'
+    | 'vintage'
+    | 'noir'
+    | 'lush'
+    | 'desert';
 
 export type WeatherKind =
     | 'clear'
@@ -131,7 +168,8 @@ export type GraphicsSettings = {
     terrain_texture_resolution: '512' | '1024' | '2048';
     /** Legacy MSAA switch; `anti_aliasing` wins when present. */
     antialias: boolean;
-    anti_aliasing: 'off' | 'fxaa' | 'smaa' | 'msaa';
+    /** 'taa' = temporal AA with camera reprojection (best for foliage shimmer). */
+    anti_aliasing: 'off' | 'fxaa' | 'smaa' | 'msaa' | 'taa';
     /** Texture anisotropic filtering (1-16). */
     anisotropy: number;
     bloom: boolean;
@@ -155,6 +193,18 @@ export type GraphicsSettings = {
     /** Weather particles, lightning, splashes. */
     effects_quality: QualityLevel;
     cloud_quality: 'off' | 'low' | 'medium' | 'high';
+    // ---- Cinematic post-processing (quality switches; the artistic amounts live in EnvironmentSettings) ----
+    auto_exposure: boolean;
+    color_grading_lut: boolean;
+    god_rays: 'off' | 'low' | 'medium' | 'high';
+    depth_of_field: 'off' | 'low' | 'high';
+    motion_blur: 'off' | 'low' | 'high';
+    /** Screen-space reflections (wet ground, puddles, glossy surfaces). */
+    ssr: 'off' | 'low' | 'high';
+    /** Lens flare, chromatic aberration and film grain. */
+    lens_effects: boolean;
+    /** Screen-space contact shadows for small-scale grounding. */
+    contact_shadows: boolean;
 };
 
 export type EditorSettings = {

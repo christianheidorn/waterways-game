@@ -37,9 +37,9 @@ final class GameSettingsSchema
                 SettingField::number('draw_distance', 'Draw distance', 12000, 500, 50000, 100, 'm'),
                 SettingField::number('terrain_lod_bias', 'Terrain detail', 1, 0.25, 4, 0.05, '×', 'Higher values keep full terrain detail further away.'),
                 // Anti-aliasing
-                SettingField::select('anti_aliasing', 'Anti-aliasing', 'smaa', [
-                    'off' => 'Off', 'fxaa' => 'FXAA (fastest)', 'smaa' => 'SMAA (sharp)', 'msaa' => 'MSAA 4× (geometry edges)',
-                ], 'FXAA/SMAA are post-process filters that also smooth foliage; MSAA only smooths geometry edges and costs more memory.'),
+                SettingField::select('anti_aliasing', 'Anti-aliasing', 'taa', [
+                    'off' => 'Off', 'fxaa' => 'FXAA (fastest)', 'smaa' => 'SMAA (sharp)', 'msaa' => 'MSAA 4× (geometry edges)', 'taa' => 'TAA (temporal, best)',
+                ], 'TAA accumulates samples over frames and removes foliage shimmer; FXAA/SMAA are cheaper filters; MSAA only smooths geometry edges and disables depth-based effects.'),
                 SettingField::boolean('antialias', 'Anti-aliasing (legacy MSAA switch)', false, 'Kept for older clients; the game uses "Anti-aliasing" above.'),
                 // Post-processing
                 SettingField::boolean('bloom', 'Bloom', true),
@@ -51,6 +51,23 @@ final class GameSettingsSchema
                 SettingField::number('saturation', 'Saturation', 1, 0.5, 1.5, 0.01, '×', 'Colour grading: 1 is neutral.'),
                 SettingField::number('contrast', 'Contrast', 1, 0.5, 1.5, 0.01, '×', 'Colour grading: 1 is neutral.'),
                 SettingField::number('vignette', 'Vignette', 0, 0, 1, 0.01, null, 'Darkens the screen corners.'),
+                // Cinematic post-processing (the artistic amounts are per map: Environment → Camera & look)
+                SettingField::boolean('auto_exposure', 'Auto exposure', true, 'Eye adaptation: the image brightens in dark valleys and darkens against a bright sky.'),
+                SettingField::boolean('color_grading_lut', 'Colour grading (LUT)', true, 'Applies the map\'s colour grade (film looks). Almost free.'),
+                SettingField::select('god_rays', 'Light shafts', 'medium', [
+                    'off' => 'Off', 'low' => 'Low', 'medium' => 'Medium', 'high' => 'High',
+                ], 'Volumetric sun rays through trees, terrain and fog.'),
+                SettingField::select('depth_of_field', 'Depth of field', 'off', [
+                    'off' => 'Off', 'low' => 'Low (gameplay)', 'high' => 'High (cinematic bokeh)',
+                ], 'Blurs what is out of focus. Focus and aperture are set per map or in photo mode.'),
+                SettingField::select('motion_blur', 'Motion blur', 'off', [
+                    'off' => 'Off', 'low' => 'Low', 'high' => 'High',
+                ]),
+                SettingField::select('ssr', 'Screen-space reflections', 'off', [
+                    'off' => 'Off', 'low' => 'Low', 'high' => 'High',
+                ], 'Reflections on wet ground and glossy surfaces (water has its own reflections).'),
+                SettingField::boolean('lens_effects', 'Lens effects', false, 'Lens flare, chromatic aberration and film grain.'),
+                SettingField::boolean('contact_shadows', 'Contact shadows', false, 'Small screen-space shadows where objects touch the ground.'),
                 // Shadows
                 SettingField::select('shadow_quality', 'Shadow quality', 'high', [
                     'off' => 'Off', 'low' => 'Low', 'medium' => 'Medium', 'high' => 'High', 'ultra' => 'Ultra',

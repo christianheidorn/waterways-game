@@ -1025,3 +1025,49 @@ body.ww-body {
     padding: 8px 12px;
     font-size: 11px;
 }
+
+/* Photo mode (F9) */
+.ww-photo {
+    position: absolute;
+    left: 12px;
+    top: 12px;
+    width: 300px;
+    max-height: calc(100% - 24px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    z-index: 30;
+    pointer-events: auto;
+}
+
+.ww-photo[hidden] {
+    display: none;
+}
+
+.ww-photo.is-collapsed .ww-photo-body {
+    display: none;
+}
+
+.ww-photo.is-collapsed {
+    width: auto;
+    opacity: 0.35;
+    transition: opacity 0.2s;
+}
+
+.ww-photo.is-collapsed:hover {
+    opacity: 1;
+}
+
+.ww-photo-body {
+    overflow-y: auto;
+    padding: 4px 12px 12px;
+}
+
+.ww-photo-status {
+    min-height: 1.2em;
+}
+
+/* Everything except the photo panel disappears while photo mode is open. */
+.ww-hud.is-photo > *:not(.ww-photo) {
+    visibility: hidden !important;
+}

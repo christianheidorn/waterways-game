@@ -26,6 +26,7 @@ import AppLogoIcon from '@/components/app-logo-icon';
 import { AiReviewSheet } from '@/components/studio/ai-review-sheet';
 import { LiveSettings } from '@/components/studio/live-settings';
 import { useGameBridge } from '@/components/studio/use-game-bridge';
+import { LookPresets } from '@/components/look-presets';
 import { WeatherPresets } from '@/components/weather-presets';
 import { Button } from '@/components/ui/button';
 import {
@@ -405,13 +406,26 @@ export default function MapEditor({
                                         wind_direction: formatWindDirection,
                                     }}
                                     addon={({ values, setValues }) => (
-                                        <WeatherPresets
-                                            className="grid-cols-4 sm:grid-cols-4"
-                                            value={String(
-                                                values.weather ?? 'clear',
-                                            )}
-                                            onApply={setValues}
-                                        />
+                                        <div className="grid gap-3">
+                                            <p className="text-xs font-medium text-muted-foreground">
+                                                Weather
+                                            </p>
+                                            <WeatherPresets
+                                                className="grid-cols-4 sm:grid-cols-4"
+                                                value={String(
+                                                    values.weather ?? 'clear',
+                                                )}
+                                                onApply={setValues}
+                                            />
+                                            <p className="text-xs font-medium text-muted-foreground">
+                                                Camera look
+                                            </p>
+                                            <LookPresets
+                                                className="grid-cols-3 sm:grid-cols-3"
+                                                values={values}
+                                                onApply={setValues}
+                                            />
+                                        </div>
                                     )}
                                 />
                             </div>

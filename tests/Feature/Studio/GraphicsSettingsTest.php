@@ -18,7 +18,10 @@ class GraphicsSettingsTest extends TestCase
         $defaults = GameSettingsSchema::group('graphics')->defaults();
 
         $this->assertSame('high', $defaults['quality_preset']);
-        $this->assertSame('smaa', $defaults['anti_aliasing']);
+        $this->assertSame('taa', $defaults['anti_aliasing']);
+        $this->assertTrue($defaults['auto_exposure']);
+        $this->assertSame('medium', $defaults['god_rays']);
+        $this->assertSame('off', $defaults['depth_of_field']);
         $this->assertEquals(8, $defaults['anisotropy']);
         $this->assertEquals(1, $defaults['saturation']);
         $this->assertEquals(1, $defaults['contrast']);
@@ -62,7 +65,10 @@ class GraphicsSettingsTest extends TestCase
 
         foreach ([
             ['quality_preset' => 'ultra'],
-            ['anti_aliasing' => 'taa'],
+            ['anti_aliasing' => 'dlss'],
+            ['god_rays' => 'ultra'],
+            ['ssr' => 'epic'],
+            ['depth_of_field' => 'medium'],
             ['anisotropy' => 32],
             ['anisotropy' => 0],
             ['saturation' => 2],
@@ -106,7 +112,7 @@ class GraphicsSettingsTest extends TestCase
         $this->get('/settings/game/graphics')->assertInertia(fn (Assert $page) => $page
             ->component('game-settings/edit')
             ->where('values.quality_preset', 'high')
-            ->where('values.anti_aliasing', 'smaa')
+            ->where('values.anti_aliasing', 'taa')
             ->has('group.fields', count(GameSettingsSchema::group('graphics')->fields)));
     }
 }

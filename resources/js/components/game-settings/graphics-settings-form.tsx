@@ -18,6 +18,7 @@ import { useForm } from '@inertiajs/react';
 import type { LucideIcon } from 'lucide-react';
 import {
     Aperture,
+    Clapperboard,
     Gauge,
     Grid2x2,
     Layers,
@@ -58,7 +59,7 @@ const SECTIONS: Section[] = [
     {
         title: 'Anti-aliasing',
         description:
-            'Smooths jagged edges. SMAA is the best balance; FXAA is cheapest.',
+            'Smooths jagged edges. TAA looks best and removes foliage shimmer; SMAA is sharp and cheap; FXAA is cheapest.',
         icon: Grid2x2,
         groups: ['anti_aliasing'],
         fields: ['anti_aliasing'],
@@ -80,11 +81,26 @@ const SECTIONS: Section[] = [
         ],
     },
     {
+        title: 'Cinematic effects',
+        description:
+            'Eye adaptation, film looks, light shafts, depth of field, motion blur and lens effects. How strong each looks is set per map (Environment → Camera & look).',
+        icon: Clapperboard,
+        groups: ['post_processing'],
+        fields: [
+            'auto_exposure',
+            'color_grading_lut',
+            'god_rays',
+            'depth_of_field',
+            'motion_blur',
+            'lens_effects',
+        ],
+    },
+    {
         title: 'Shadows',
         description: 'Sun shadow map resolution and how far shadows reach.',
         icon: SunDim,
         groups: ['shadows'],
-        fields: ['shadow_quality', 'shadow_distance'],
+        fields: ['shadow_quality', 'shadow_distance', 'contact_shadows'],
     },
     {
         title: 'Textures',
@@ -95,10 +111,11 @@ const SECTIONS: Section[] = [
     },
     {
         title: 'Effects & weather',
-        description: 'Particles, lightning, clouds and water rendering.',
+        description:
+            'Particles, lightning, clouds, water and screen-space reflections.',
         icon: Sparkles,
         groups: ['effects', 'shading'],
-        fields: ['effects_quality', 'cloud_quality', 'water_quality'],
+        fields: ['effects_quality', 'cloud_quality', 'water_quality', 'ssr'],
     },
     {
         title: 'Foliage',

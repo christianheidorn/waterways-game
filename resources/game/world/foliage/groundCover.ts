@@ -28,6 +28,11 @@ export type GroundCoverContext = {
     heights: Heightfield;
     splat: SplatMap;
     waterLevelAt: (x: number, z: number) => number | null;
+    /**
+     * Water surface grid (NO_WATER where dry) that waterLevelAt reads: with it, tiles grow on the GPU
+     * on WebGPU (see GroundCoverGpu.ts).
+     */
+    water?: Heightfield;
     /** The type's own placement rules (slope, altitude, underwater). */
     allowed: (type: FoliageType, x: number, z: number) => boolean;
 };
@@ -62,7 +67,7 @@ export function splatWeight(
 }
 
 /** Whether any source layer has paint on the splat samples covering a tile (cheap early-out). */
-function tilePainted(
+export function tilePainted(
     size: number,
     cx: number,
     cz: number,
@@ -134,6 +139,7 @@ export const SALT = {
     scale: 0x297a2d39,
     yaw: 0x5bd1e995,
     cluster: 0x61c88647,
+    rank: 0x3c6ef372,
 } as const;
 
 /** Size (m) of the groves and clearings clustering produces, by kind (trees form larger groves). */
@@ -203,11 +209,59 @@ export function candidateGrid(
     return { cell, margin: Math.min(spacing, cell) / 2, peak };
 }
 
+/** Candidate grid cells of one tile (every candidate that can land in it). */
+export type TileGrid = {
+    /** Grid cell size (m), the margin kept from its edges and the span candidates are placed in. */
+    cell: number;
+    margin: number;
+    span: number;
+    /** Highest local density any source asks for (the keep probability's denominator). */
+    peak: number;
+    /** First grid cell and the number of cells across / down. */
+    g0: number;
+    h0: number;
+    columns: number;
+    rows: number;
+};
+
+/** Candidate grid of a tile (`size` m square at cx, cz); null when the type grows nothing. */
+export function tileGrid(
+    type: FoliageType,
+    sources: GroundCoverSource[],
+    size: number,
+    cx: number,
+    cz: number,
+): TileGrid | null {
+    const grid = candidateGrid(type, sources);
+
+    if (type.density <= 0 || grid.peak <= 0 || !Number.isFinite(grid.cell)) {
+        return null;
+    }
+
+    // Very dense types on large tiles: coarser candidates, same density (see MAX_PER_TILE).
+    const cell = Math.max(grid.cell, size / Math.sqrt(MAX_PER_TILE));
+    const g0 = Math.floor((cx * size) / cell);
+    const h0 = Math.floor((cz * size) / cell);
+
+    return {
+        cell,
+        margin: grid.margin,
+        span: cell - grid.margin * 2,
+        peak: grid.peak,
+        g0,
+        h0,
+        columns: Math.floor(((cx + 1) * size) / cell) - g0 + 1,
+        rows: Math.floor(((cz + 1) * size) / cell) - h0 + 1,
+    };
+}
+
 /**
  * Instances of one tile (`size` m square at cx, cz), in the foliage file layout
  * ([x, y, z, yaw, scale, tiltX, tiltZ] per instance). Every grid cell whose candidate falls in the
  * tile is kept with probability (paint weight × density × clustering) / peak, so the count follows
- * the paint smoothly (a half-painted border gets half the grass).
+ * the paint smoothly (a half-painted border gets half the grass). Instances come out ordered by a
+ * per-candidate random rank (distance thinning draws a prefix), the order the GPU generator's ranks
+ * give too.
  */
 export function generateGroundCoverTile(
     type: FoliageType,
@@ -217,21 +271,13 @@ export function generateGroundCoverTile(
     sources: GroundCoverSource[],
     ctx: GroundCoverContext,
 ): number[] {
-    const out: number[] = [];
+    const grid = tileGrid(type, sources, size, cx, cz);
 
-    if (type.density <= 0 || !tilePainted(size, cx, cz, sources, ctx)) {
-        return out;
+    if (!grid || !tilePainted(size, cx, cz, sources, ctx)) {
+        return [];
     }
 
-    const grid = candidateGrid(type, sources);
-
-    if (grid.peak <= 0 || !Number.isFinite(grid.cell)) {
-        return out;
-    }
-
-    // Very dense types on large tiles: coarser candidates, same density (see MAX_PER_TILE).
-    const cell = Math.max(grid.cell, size / Math.sqrt(MAX_PER_TILE));
-    const span = cell - grid.margin * 2;
+    const { cell, margin, span, peak } = grid;
     const seed = typeSeed(type.id);
     const scaleRange = type.max_scale - type.min_scale;
     const groves = clusterScale(type.kind);
@@ -239,21 +285,14 @@ export function generateGroundCoverTile(
     const hf = ctx.heights;
     const x0 = cx * size;
     const z0 = cz * size;
-    const g0 = Math.floor(x0 / cell);
-    const g1 = Math.floor((x0 + size) / cell);
-    const h0 = Math.floor(z0 / cell);
-    const h1 = Math.floor((z0 + size) / cell);
+    const kept: { rank: number; values: number[] }[] = [];
 
-    for (let gz = h0; gz <= h1; gz++) {
-        for (let gx = g0; gx <= g1; gx++) {
+    for (let gz = grid.h0; gz < grid.h0 + grid.rows; gz++) {
+        for (let gx = grid.g0; gx < grid.g0 + grid.columns; gx++) {
             const x =
-                gx * cell +
-                grid.margin +
-                cellRandom(seed, gx, gz, SALT.x) * span;
+                gx * cell + margin + cellRandom(seed, gx, gz, SALT.x) * span;
             const z =
-                gz * cell +
-                grid.margin +
-                cellRandom(seed, gx, gz, SALT.z) * span;
+                gz * cell + margin + cellRandom(seed, gx, gz, SALT.z) * span;
 
             // Each candidate belongs to exactly one tile (the one it lands in).
             if (x < x0 || x >= x0 + size || z < z0 || z >= z0 + size) {
@@ -277,7 +316,7 @@ export function generateGroundCoverTile(
             }
 
             if (
-                cellRandom(seed, gx, gz, SALT.keep) >= weight / grid.peak ||
+                cellRandom(seed, gx, gz, SALT.keep) >= weight / peak ||
                 !ctx.allowed(type, x, z)
             ) {
                 continue;
@@ -295,19 +334,24 @@ export function generateGroundCoverTile(
                 tiltZ = -Math.atan2(_normal.x, _normal.y);
             }
 
-            out.push(
-                x,
-                hf.sample(x, z) - 0.05 * scale,
-                z,
-                type.random_yaw
-                    ? cellRandom(seed, gx, gz, SALT.yaw) * Math.PI * 2
-                    : 0,
-                scale,
-                tiltX,
-                tiltZ,
-            );
+            kept.push({
+                rank: cellRandom(seed, gx, gz, SALT.rank),
+                values: [
+                    x,
+                    hf.sample(x, z) - 0.05 * scale,
+                    z,
+                    type.random_yaw
+                        ? cellRandom(seed, gx, gz, SALT.yaw) * Math.PI * 2
+                        : 0,
+                    scale,
+                    tiltX,
+                    tiltZ,
+                ],
+            });
         }
     }
 
-    return out;
+    kept.sort((a, b) => a.rank - b.rank);
+
+    return kept.flatMap((k) => k.values);
 }

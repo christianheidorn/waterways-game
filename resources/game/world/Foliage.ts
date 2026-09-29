@@ -32,6 +32,10 @@ import {
 } from './foliage/FoliageMaterial';
 import type { FoliageTypeUniforms, LodRole } from './foliage/FoliageMaterial';
 import { generateGroundCoverTile } from './foliage/groundCover';
+import {
+    GroundCoverField,
+    GroundCoverGenerator,
+} from './foliage/GroundCoverGpu';
 import type {
     GroundCoverContext,
     GroundCoverSource,
@@ -238,6 +242,8 @@ type TypeRenderer = {
         signature: string;
         /** Tiles to regrow (painted, sculpted, …); they keep their old instances until then. */
         stale: Set<string>;
+        /** WebGPU: grows the tiles on the GPU (their cells hold no data then). */
+        generator: GroundCoverGenerator | null;
     } | null;
 };
 
@@ -407,6 +413,8 @@ export class Foliage {
     private types = new Map<number, FoliageType>();
     private coverLayers: TerrainLayer[] = [];
     private coverCtx: GroundCoverContext | null = null;
+    /** Terrain data of the GPU ground cover generators (WebGPU). */
+    private coverField: GroundCoverField | null = null;
     /** Re-check the ground cover tiles on the next update (else only after the camera moved). */
     private coverScan = true;
     private readonly lastCoverPos = new THREE.Vector3(Infinity, 0, 0);
@@ -592,17 +600,21 @@ export class Foliage {
             }
         }
 
+        this.coverField?.invalidate(minX, minZ, maxX, maxZ);
         this.coverScan = true;
     }
 
-    /** Ground cover instances currently grown around the camera (not part of the saved foliage). */
+    /**
+     * Ground cover instances currently grown around the camera (not part of the saved foliage). Tiles
+     * grown on the GPU count as last read back (a frame or two behind).
+     */
     get groundCoverCount(): number {
         let count = 0;
 
         for (const renderer of this.renderers.values()) {
             if (renderer.cover) {
                 for (const cell of renderer.cells.values()) {
-                    count += cell.data.length / FOLIAGE_STRIDE;
+                    count += this.cellInstances(renderer, cell);
                 }
             }
         }
@@ -677,6 +689,7 @@ export class Foliage {
                     sources: list,
                     signature: old?.cover?.signature ?? signature,
                     stale: new Set(),
+                    generator: null,
                 };
 
                 if (old) {
@@ -702,10 +715,63 @@ export class Foliage {
                     cover.stale.add(k);
                 }
             }
+
+            this.attachCoverGpu(renderer);
         }
 
         this.coverScan = true;
         this.needsEval = true;
+    }
+
+    /**
+     * WebGPU: a ground cover renderer's tiles grow on the GPU (GroundCoverGpu) instead of being
+     * generated and uploaded by the CPU, given the water grid. Tiles grown before (on the CPU, or from
+     * another terrain) grow again.
+     */
+    private attachCoverGpu(renderer: TypeRenderer): void {
+        const cover = renderer.cover;
+        const ctx = this.coverCtx;
+
+        if (!cover || !renderer.gpu || !ctx?.water) {
+            return;
+        }
+
+        if (this.coverField?.ctx !== ctx) {
+            this.coverField = new GroundCoverField(ctx, ctx.water);
+        }
+
+        if (cover.generator?.field !== this.coverField) {
+            cover.generator = new GroundCoverGenerator(
+                this.coverField,
+                renderer.type,
+            );
+            renderer.gpu.setFiller(cover.generator);
+
+            for (const cell of renderer.cells.values()) {
+                if (cell.data.length) {
+                    cell.data = [];
+                    renderer.gpu.removeCell(cell);
+                }
+
+                renderer.gpuDirty.delete(cell);
+                cover.stale.add(cell.key);
+            }
+
+            this.coverScan = true;
+        }
+
+        cover.generator.configure(
+            renderer.type,
+            cover.sources,
+            renderer.cellSize,
+        );
+    }
+
+    /** Instances of a cell (ground cover grown on the GPU: its read-back count). */
+    private cellInstances(renderer: TypeRenderer, cell: Cell): number {
+        return renderer.cover?.generator && renderer.gpu
+            ? renderer.gpu.cellCount(cell)
+            : cell.data.length / FOLIAGE_STRIDE;
     }
 
     /**
@@ -811,15 +877,23 @@ export class Foliage {
             const size = renderer.cellSize;
             const key = `${size}:${cx},${cz}`;
             const cell = this.cellFor(renderer, key);
+            const cover = renderer.cover!;
+            cover.stale.delete(key);
+
+            if (cover.generator && renderer.gpu) {
+                // Grown by the next GPU fill pass; the CPU only sizes the tile's slot range.
+                renderer.gpu.fillCell(cell, cover.generator.capacity(cx, cz));
+                continue;
+            }
+
             cell.data = generateGroundCoverTile(
                 renderer.type,
                 size,
                 cx,
                 cz,
-                renderer.cover!.sources,
+                cover.sources,
                 ctx,
             );
-            renderer.cover!.stale.delete(key);
             this.markDirty(renderer, cell);
         }
 
@@ -1567,7 +1641,7 @@ export class Foliage {
             stats.types.push(detail);
 
             for (const cell of renderer.cells.values()) {
-                const n = cell.data.length / FOLIAGE_STRIDE;
+                const n = this.cellInstances(renderer, cell);
                 stats.instances += n;
                 detail.instances += n;
                 stats.meshes += cell.mesh ? 1 : 0;
@@ -1770,16 +1844,22 @@ export class Foliage {
         // Parallax since the depth was rendered: widen the tested spheres by the camera movement.
         frame.occlusionMargin.value = moved * 1.5;
         const nodes: THREE.ComputeNode[] = [];
+        // Terrain edits reach the ground cover generators before their fill passes.
+        this.coverField?.sync();
 
         for (const type of this.renderers.values()) {
             if (type.gpu) {
                 nodes.push(...type.gpu.computeNodes());
-                type.gpu.updateStats(renderer, dt);
             }
         }
 
         if (nodes.length) {
             void renderer.compute(nodes);
+        }
+
+        // After the passes were submitted: the read-backs copy this frame's results.
+        for (const type of this.renderers.values()) {
+            type.gpu?.updateStats(renderer, dt);
         }
 
         frame.setPrevious(camera);
@@ -1879,12 +1959,23 @@ export class Foliage {
 
             renderer.gpuDirty.clear();
 
+            if (renderer.cover?.generator) {
+                // The tiles grew on the GPU: the CPU grows them again.
+                renderer.cover.generator = null;
+
+                for (const key of renderer.cells.keys()) {
+                    renderer.cover.stale.add(key);
+                }
+            }
+
             for (const cell of renderer.cells.values()) {
                 this.markDirty(renderer, cell);
             }
         }
 
         this.gpuFrame?.hiz.dispose();
+        this.coverField = null;
+        this.coverScan = true;
         this.gpuFrame = null;
         this.hasPrevious = false;
         this.needsEval = true;
@@ -1907,6 +1998,8 @@ export class Foliage {
         for (const cell of renderer.cells.values()) {
             renderer.gpuDirty.add(cell);
         }
+
+        this.attachCoverGpu(renderer);
     }
 
     /** Uploads the cells edited since the last frame (only their slot ranges). */
@@ -1917,10 +2010,11 @@ export class Foliage {
             }
 
             for (const cell of renderer.gpuDirty) {
-                if (renderer.cells.get(cell.key) === cell) {
-                    renderer.gpu.writeCell(cell);
-                } else {
+                if (renderer.cells.get(cell.key) !== cell) {
                     renderer.gpu.removeCell(cell);
+                } else if (!renderer.cover?.generator) {
+                    // GPU-grown tiles have nothing to upload (updateGroundCover queues their fills).
+                    renderer.gpu.writeCell(cell);
                 }
             }
 

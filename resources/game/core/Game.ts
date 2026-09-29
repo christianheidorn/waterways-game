@@ -402,6 +402,7 @@ export class Game {
             heights,
             splat,
             waterLevelAt,
+            water: waterGrid,
             allowed: (type, x, z) =>
                 placementAllowed({ heights, waterLevelAt }, type, x, z),
         });

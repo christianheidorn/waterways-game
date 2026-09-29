@@ -10,6 +10,7 @@ import {
     dot,
     exp,
     float,
+    floor,
     fract,
     fwidth,
     hash,
@@ -505,10 +506,28 @@ function snowNodes(s: SharedUniforms, u: LayerUniforms): ParticleNodes {
     };
 }
 
+/** Smooth 2D value noise (0-1) from hashed lattice corners. */
+function valueNoise(p: Node<'vec2'>): Node<'float'> {
+    const i = floor(p).add(4096);
+    const f = fract(p);
+    const w = f.mul(f).mul(f.mul(-2).add(3));
+    const corner = (x: number, y: number) =>
+        hash(i.x.add(x).add(i.y.add(y).mul(157)));
+
+    return mix(
+        mix(corner(0, 0), corner(1, 0), w.x),
+        mix(corner(0, 1), corner(1, 1), w.x),
+        w.y,
+    );
+}
+
 /**
- * Distant precipitation on the inside of a cylinder around the camera: columns of streaks (rain) or
- * flakes (snow) at world-stable angles, falling and slanting with the wind. Where the pattern gets
- * finer than a pixel it fades to its average, a soft sheet of rain; the vertical ends fade out.
+ * Distant precipitation on the inside of a cylinder around the camera. Three layers of columns at
+ * unrelated (non-integer) spacings; every column falls at its own speed and is cut into cells of its
+ * own length, and every cell holds at most one streak / flake at a random position, so nothing lines
+ * up in rows or a grid. Large-scale noise drifting with the wind makes denser and thinner sheets
+ * (gusts). Where a layer gets finer than a pixel (screen derivatives) it fades to its average
+ * coverage, a soft haze without moiré; the vertical ends of the cylinder fade out.
  */
 function curtainNodes(
     s: SharedUniforms,
@@ -522,48 +541,76 @@ function curtainNodes(
 ): { color: Node<'vec3'>; opacity: Node<'float'> } {
     const rel = positionWorld.sub(s.camPos);
     const theta = atan(rel.z, rel.x);
-    // Tangential wind slants the columns; it also moves the pattern sideways.
+    // Tangential wind slants the columns.
     const tangent = vec2(sin(theta).negate(), cos(theta));
     const windT = dot(style.wind, tangent);
     const fall = style.fall;
     const isRain = style.rain;
-    const layerSeed = radius * 0.137;
-    // Arc length (m) and height, in the falling frame.
+    // Arc length (m) along the cylinder, sheared by the wind, and height.
     const u0 = theta.mul(radius).add(rel.y.mul(windT).div(fall));
-    const v0 = positionWorld.y.add(s.time.mul(fall));
+    const y = positionWorld.y;
 
-    const layer = (spacing: number, dash: number, k: number) => {
-        const cu = u0.div(spacing).add(layerSeed * k);
-        const col = cu.floor();
-        const r = hash(col.add(k * 17.0));
-        const r2 = hash(col.add(k * 31.0 + 5));
-        const x = fract(cu).sub(0.5).sub(r2.sub(0.5).mul(0.6));
-        // Rain: long thin streaks; snow: small round flakes (a few cm).
-        const widthK = mix(0.1, 0.12, isRain);
-        const across = exp(x.mul(x).div(widthK.mul(widthK)).negate());
-        const segment = mix(float(1.6), float(dash), isRain);
-        const f = fract(v0.add(r.mul(97)).div(segment).add(r2));
-        const streak = mix(
-            smoothstep(0, 0.022, abs(f.sub(0.5))).oneMinus(),
-            smoothstep(0, 0.08, f).mul(smoothstep(0.2, 0.5, f).oneMinus()),
-            isRain,
+    const layer = (spacing: number, k: number) => {
+        const cu = u0.div(spacing).add(radius * 0.071 + k * 13.7);
+        // Offset keeps the hash seeds positive (they are converted to unsigned integers).
+        const col = floor(cu).add(8192 + k * 977);
+        const rc = hash(col);
+        const rc2 = hash(col.mul(3).add(17));
+        // Per column: fall speed and cell length, so cells never form rows across columns.
+        const speed = rc.mul(0.45).add(0.8);
+        const cell = mix(float(2.2), float(6), isRain).mul(
+            rc2.mul(0.6).add(0.7),
         );
-        const pattern = across.mul(streak).mul(r.mul(0.6).add(0.4));
-        // Pixel footprint of a column (or a flake): finer than ~1 px → the pattern's average coverage.
+        const vv = y.add(s.time.mul(fall).mul(speed)).div(cell).add(rc.mul(37));
+        const row = floor(vv).add(65536);
+        const fv = fract(vv);
+        const rr = hash(col.mul(131).add(row));
+        const rr2 = hash(col.mul(131).add(row).add(40503));
+        const present = smoothstep(0.42, 0.46, rr);
+        // Position inside the cell: sideways jitter (plus a sway for flakes) and height.
+        const sway = sin(s.time.mul(rr.add(0.6)).add(rr2.mul(6.28)))
+            .mul(0.12)
+            .mul(isRain.oneMinus());
+        const x = fract(cu).sub(0.5).sub(rr2.sub(0.5).mul(0.5)).add(sway);
+        // Rain: a thin streak over part of the cell; snow: a round flake a few cm across.
+        const top = rr2.mul(0.4);
+        const len = rr.mul(0.25).add(0.3);
+        const streak = smoothstep(top, top.add(0.04), fv)
+            .mul(smoothstep(top.add(len.mul(0.5)), top.add(len), fv).oneMinus())
+            .mul(exp(x.mul(x).mul(-70)));
+        const dy = fv.sub(rr2.mul(0.6).add(0.2)).mul(cell).div(spacing);
+        const flake = exp(x.mul(x).add(dy.mul(dy)).mul(-90));
+        const pattern = mix(flake, streak, isRain)
+            .mul(present)
+            .mul(rc.mul(0.5).add(0.5));
+        // Pixel footprint of a column / a cell's feature: sub-pixel → the layer's mean coverage.
         const footprint = max(
-            fwidth(cu),
-            fwidth(v0).mul(isRain.oneMinus().mul(20)),
+            fwidth(cu).mul(1.5),
+            fwidth(vv).mul(mix(float(30), float(3), isRain)),
         );
-        const average = mix(0.03, 0.12, isRain);
+        const average = mix(float(0.012), float(0.05), isRain);
 
-        return mix(pattern, float(average), smoothstep(0.35, 1.2, footprint));
+        return mix(pattern, average, smoothstep(0.3, 1, footprint));
     };
 
-    const density = layer(0.45, 5, 1).add(layer(0.8, 8, 2).mul(0.7));
+    const density = layer(0.37, 1)
+        .add(layer(0.59, 2).mul(0.8))
+        .add(layer(0.93, 3).mul(0.6));
+    // Gusts: denser and thinner sheets, drifting with the wind (continuous all around the cylinder).
+    const dir = rel.xz.div(max(length(rel.xz), 1e-3));
+    const q = dir
+        .mul(radius / 26)
+        .sub(style.wind.mul(s.time.mul(1 / 26)))
+        .add(vec2(y.mul(1 / 37), y.mul(-1 / 53)));
+    const gust = valueNoise(q)
+        .mul(0.65)
+        .add(valueNoise(q.mul(2.3).add(7.1)).mul(0.35));
+    const sheets = smoothstep(0.2, 0.8, gust).mul(1.4).add(0.3);
     // Fade the open ends of the cylinder (it is 70 m high around the eye).
     const h = rel.y;
     const ends = smoothstep(-24, -12, h).mul(smoothstep(20, 46, h).oneMinus());
     const alpha = density
+        .mul(sheets)
         .mul(ends)
         .mul(opacity)
         .mul(mix(0.45, 0.22, isRain));

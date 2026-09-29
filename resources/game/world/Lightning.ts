@@ -1,9 +1,11 @@
 import * as THREE from 'three/webgpu';
+import type { Node } from 'three/webgpu';
 import {
     abs,
     attribute,
     cameraPosition,
     cross,
+    exp,
     length,
     max,
     mix,
@@ -30,8 +32,11 @@ export class Lightning {
     private starts: Float32Array;
     private ends: Float32Array;
     private widths: Float32Array;
-    private core: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial>;
-    private glow: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial>;
+    /** Channel core, its glow and a wide halo of light scattered by the rain and cloud around it. */
+    private readonly ribbons: THREE.Mesh<
+        THREE.BufferGeometry,
+        THREE.MeshBasicNodeMaterial
+    >[];
     /** Flash intensity shared by the core and glow ribbons. */
     private readonly intensity = uniform(0);
     private segments = 0;
@@ -72,9 +77,12 @@ export class Lightning {
         g.setIndex(new THREE.BufferAttribute(index, 1));
         g.setDrawRange(0, 0);
 
-        this.core = this.createMesh(1, 1, 7);
-        this.glow = this.createMesh(7, 0.06, 6);
-        this.group.add(this.glow, this.core);
+        this.ribbons = [
+            this.createMesh(30, 0.01, 2, vec3(0.62, 0.66, 1), 5),
+            this.createMesh(6, 0.07, 3, vec3(0.7, 0.76, 1), 6),
+            this.createMesh(1, 1, 0, vec3(0.78, 0.84, 1), 7),
+        ];
+        this.group.add(...this.ribbons);
         this.group.visible = false;
     }
 
@@ -150,8 +158,9 @@ export class Lightning {
 
     dispose(): void {
         this.geometry.dispose();
-        this.core.material.dispose();
-        this.glow.material.dispose();
+        for (const ribbon of this.ribbons) {
+            ribbon.material.dispose();
+        }
     }
 
     /** Midpoint-displaced channel from a to b with random branches. */
@@ -246,8 +255,17 @@ export class Lightning {
         this.segments++;
     }
 
-    /** Camera-facing ribbons along the segments: `widthScale` × channel width, additive glow. */
-    private createMesh(widthScale: number, brightness: number, order: number) {
+    /**
+     * Camera-facing ribbons along the segments, `widthScale` × channel width (≥ ~1.5 px × scale), with
+     * additive light: `falloff` 0 = a sharp core, > 0 = a gaussian glow of that sharpness.
+     */
+    private createMesh(
+        widthScale: number,
+        brightness: number,
+        falloff: number,
+        tint: Node<'vec3'>,
+        order: number,
+    ) {
         const corner = attribute<'vec2'>('aCorner', 'vec2');
         const start = attribute<'vec3'>('aStart', 'vec3');
         const end = attribute<'vec3'>('aEnd', 'vec3');
@@ -255,13 +273,16 @@ export class Lightning {
         const side = normalize(
             cross(normalize(end.sub(start)), normalize(cameraPosition.sub(p))),
         );
-        // At least ~1.5 px wide at any distance.
         const dist = length(cameraPosition.sub(p));
         const width = max(
             attribute<'float'>('aWidth', 'float').mul(widthScale),
             dist.mul(0.0012 * widthScale),
         );
-        const core = abs(corner.x).oneMinus();
+        const x = corner.x;
+        const profile =
+            falloff > 0
+                ? exp(x.mul(x).mul(-falloff)).sub(Math.exp(-falloff))
+                : abs(x).oneMinus().pow(2);
 
         const material = new THREE.MeshBasicNodeMaterial({
             transparent: true,
@@ -270,9 +291,9 @@ export class Lightning {
             side: THREE.DoubleSide,
             fog: false,
         });
-        material.positionNode = p.add(side.mul(corner.x.mul(width)));
-        material.colorNode = vec3(0.78, 0.84, 1).mul(
-            this.intensity.mul(core.mul(core)).mul(12 * brightness),
+        material.positionNode = p.add(side.mul(x.mul(width)));
+        material.colorNode = tint.mul(
+            this.intensity.mul(profile).mul(12 * brightness),
         );
         const mesh = new THREE.Mesh(this.geometry, material);
         mesh.frustumCulled = false;

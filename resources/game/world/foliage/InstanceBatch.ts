@@ -25,7 +25,8 @@ export class InstanceBatch {
             this.array,
             INSTANCE_FLOATS,
         );
-        this.buffer.setUsage(THREE.DynamicDrawUsage);
+        // Default (static) usage on purpose: three's renderer re-uploads DynamicDrawUsage buffers
+        // whenever they are drawn, not only after upload().
         this.attributes = INSTANCE_ATTRIBUTES.map(
             (_name, i) =>
                 new THREE.InterleavedBufferAttribute(this.buffer, 4, i * 4),

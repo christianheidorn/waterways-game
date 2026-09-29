@@ -40,6 +40,11 @@ const CELL_HEADROOM = 0.25;
 const SWAY_MARGIN = 0.6;
 /** Stats read-back interval (s). */
 const STATS_INTERVAL = 0.5;
+/**
+ * LOD switch distances of the water reflection relative to the main view: the rippled, reduced
+ * resolution reflection takes coarser LODs much sooner.
+ */
+const REFLECTION_LOD_SCALE = 0.5;
 
 /** Per-frame inputs shared by every type's culling pass (one set per Foliage). */
 export class GpuCullFrame {
@@ -56,6 +61,14 @@ export class GpuCullFrame {
     readonly occlusionMargin = uniform(0);
     readonly lodBias = uniform(1);
     readonly shadowDistance = uniform(120);
+    /** 1 while the water reflection renders this frame (its visibility lists are filled). */
+    readonly reflect = uniform(0);
+    /** Frustum planes of the mirrored reflection camera (its oblique near plane is the water). */
+    readonly reflectPlanes = uniformArray<'vec4'>(
+        Array.from({ length: 6 }, () => new THREE.Vector4()),
+        'vec4',
+    );
+    readonly reflectCamPos = uniform(new THREE.Vector3());
     private readonly frustum = new THREE.Frustum();
     private readonly projScreen = new THREE.Matrix4();
 
@@ -65,6 +78,24 @@ export class GpuCullFrame {
     ) {}
 
     setCamera(camera: THREE.Camera): void {
+        this.setPlanes(camera, this.planes);
+    }
+
+    /** The water reflection's camera of this frame (null: no reflection rendered this frame). */
+    setReflection(camera: THREE.Camera | null): void {
+        this.reflect.value = camera ? 1 : 0;
+
+        if (camera) {
+            camera.updateMatrixWorld();
+            this.setPlanes(camera, this.reflectPlanes);
+            this.reflectCamPos.value.setFromMatrixPosition(camera.matrixWorld);
+        }
+    }
+
+    private setPlanes(
+        camera: THREE.Camera,
+        planes: THREE.UniformArrayNode<'vec4'>,
+    ): void {
         this.projScreen.multiplyMatrices(
             camera.projectionMatrix,
             camera.matrixWorldInverse,
@@ -72,8 +103,9 @@ export class GpuCullFrame {
         this.frustum.setFromProjectionMatrix(
             this.projScreen,
             camera.coordinateSystem,
+            camera.reversedDepth,
         );
-        const values = this.planes.array as THREE.Vector4[];
+        const values = planes.array as THREE.Vector4[];
         this.frustum.planes.forEach((plane, i) =>
             values[i].set(
                 plane.normal.x,
@@ -119,6 +151,8 @@ export type GpuTypeConfig = {
     /** Bounding sphere of every LOD in instance space (scale 1). */
     center: THREE.Vector3;
     radius: number;
+    /** Drawn in the water reflection (small foliage is not). */
+    reflect: boolean;
 };
 
 type Draw = {
@@ -138,6 +172,8 @@ export type GpuCell = { data: number[] };
 export type GpuTypeStats = {
     lodInstances: number[];
     shadowInstances: number;
+    /** Instances drawn in the water reflection (all LODs). */
+    reflectionInstances: number;
     occluded: number;
 };
 
@@ -148,7 +184,9 @@ export type GpuTypeStats = {
  * counts into `drawIndexedIndirect` arguments. Each LOD (per material group) is then ONE indirect
  * draw whose vertex shader fetches the transform through the visibility list. Shadows use a separate
  * list (LOD0 instances within the shadow distance, not frustum / occlusion culled): LOD0 meshes switch
- * their indirect arguments and instance source in the shadow pass.
+ * their indirect arguments and instance source in the shadow pass. The water reflection gets lists of
+ * its own from the same pass (mirrored camera frustum, coarser LODs, no occlusion), drawn by separate
+ * meshes that are only visible while the reflection renders (see setReflectionPass).
  *
  * Instances are stored per cell in contiguous slot ranges (with headroom), so editing a cell only
  * rewrites its range; freed slots are marked dead and skipped by the culling pass.
@@ -166,6 +204,10 @@ export class GpuFoliageType {
     private readonly capacityNode = uniform(0, 'uint');
     private readonly castShadows = uniform(1);
     private draws: Draw[] = [];
+    /** Draws of the water reflection pass (hidden otherwise). */
+    private reflectionDraws: THREE.Mesh[] = [];
+    /** Visibility lists: one per LOD, the shadow casters, then one per reflection LOD. */
+    private regions = 0;
     private materials: THREE.Material[] = [];
     private computes: THREE.ComputeNode[] = [];
     private config: GpuTypeConfig | null = null;
@@ -179,7 +221,9 @@ export class GpuFoliageType {
     /** Last read-back counters (null until the first result). */
     lastStats: GpuTypeStats | null = null;
 
-    constructor(private readonly frame: GpuCullFrame) {}
+    constructor(private readonly frame: GpuCullFrame) {
+        this.group.matrixAutoUpdate = false;
+    }
 
     get instanceCount(): number {
         return this.live;
@@ -205,6 +249,17 @@ export class GpuFoliageType {
     configure(config: GpuTypeConfig): void {
         this.config = config;
         this.rebuild();
+    }
+
+    /** Swaps the main draws for the reflection draws while the water reflection renders. */
+    setReflectionPass(reflection: boolean): void {
+        for (const draw of this.draws) {
+            draw.mesh.visible = !reflection;
+        }
+
+        for (const mesh of this.reflectionDraws) {
+            mesh.visible = reflection;
+        }
     }
 
     setCastShadows(cast: boolean): void {
@@ -303,6 +358,7 @@ export class GpuFoliageType {
         this.statsTimer = STATS_INTERVAL;
         this.reading = true;
         const lods = this.config?.lods.length ?? 0;
+        const regions = this.regions;
         const attribute = this.stats.value as THREE.StorageBufferAttribute;
         renderer
             .getArrayBufferAsync(attribute)
@@ -311,7 +367,10 @@ export class GpuFoliageType {
                 this.lastStats = {
                     lodInstances: Array.from(counts.slice(0, lods)),
                     shadowInstances: counts[lods] ?? 0,
-                    occluded: counts[lods + 1] ?? 0,
+                    reflectionInstances: counts
+                        .slice(lods + 1, regions)
+                        .reduce((sum, n) => sum + n, 0),
+                    occluded: counts[regions] ?? 0,
                 };
             })
             .catch(() => {
@@ -441,8 +500,9 @@ export class GpuFoliageType {
 
         this.disposeDraws();
         const lodCount = config.lods.length;
-        // Regions of the visibility list: one per LOD, then the shadow casters.
-        const regions = lodCount + 1;
+        // Regions of the visibility list: one per LOD, the shadow casters, one per reflection LOD.
+        const regions = lodCount + 1 + (config.reflect ? lodCount : 0);
+        this.regions = regions;
         this.visible = instancedArray(this.capacity * regions, 'uint');
         // Counters: one per region, then the occlusion-culled instances.
         this.counters = instancedArray(regions + 1, 'uint').toAtomic();
@@ -476,6 +536,20 @@ export class GpuFoliageType {
             /** Indirect argument offsets per material group (main, shadow). */
             offsets: { main: number; shadow: number | null }[];
         }[] = [];
+        const addMesh = (
+            name: string,
+            geometry: THREE.BufferGeometry,
+            material: THREE.Material | THREE.Material[],
+        ) => {
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.name = name;
+            mesh.frustumCulled = false;
+            mesh.matrixAutoUpdate = false;
+            mesh.receiveShadow = true;
+            this.group.add(mesh);
+
+            return mesh;
+        };
 
         config.lods.forEach(({ geometry, material }, lod) => {
             const base = indexed(geometry);
@@ -495,7 +569,8 @@ export class GpuFoliageType {
             const sources = Array.isArray(material) ? material : [material];
             const proxy = lod === 0 ? config.shadowProxy : null;
             const offsets: { main: number; shadow: number | null }[] = [];
-            const nodeMaterials = new Map<THREE.Material, THREE.Material>();
+            const reflectionOffsets: { main: number; shadow: null }[] = [];
+            const reflectionRegion = lodCount + 1 + lod;
             let triangles = 0;
 
             for (const group of groups) {
@@ -513,43 +588,74 @@ export class GpuFoliageType {
                     shadow = argOffset(entries.length - 1);
                 }
 
+                if (config.reflect) {
+                    entries.push({
+                        region: reflectionRegion,
+                        count,
+                        first: group.start,
+                    });
+                    reflectionOffsets.push({
+                        main: argOffset(entries.length - 1),
+                        shadow: null,
+                    });
+                }
+
                 offsets.push({ main, shadow });
                 triangles += Math.floor(count / 3);
             }
 
             // One node material per source material (groups sharing a material share it too).
-            const nodeMaterial = (src: THREE.Material) => {
-                let m = nodeMaterials.get(src);
+            const nodeMaterials = (
+                instance: InstanceSource,
+                shadowInstance?: InstanceSource,
+            ): THREE.Material | THREE.Material[] => {
+                const built = new Map<THREE.Material, THREE.Material>();
+                const nodeMaterial = (src: THREE.Material) => {
+                    let m = built.get(src);
 
-                if (!m) {
-                    m = createFoliageMaterial(src, {
-                        globals: this.frame.globals,
-                        uniforms: config.uniforms,
-                        stiffness: config.stiffness,
-                        fade: config.fade,
-                        role: 'none',
-                        instance: source(lod),
-                        shadowInstance:
-                            lod === 0 ? source(lodCount) : undefined,
-                    });
-                    nodeMaterials.set(src, m);
-                    this.materials.push(m);
-                }
+                    if (!m) {
+                        m = createFoliageMaterial(src, {
+                            globals: this.frame.globals,
+                            uniforms: config.uniforms,
+                            stiffness: config.stiffness,
+                            fade: config.fade,
+                            role: 'none',
+                            instance,
+                            shadowInstance,
+                        });
+                        built.set(src, m);
+                        this.materials.push(m);
+                    }
 
-                return m;
+                    return m;
+                };
+
+                return multi
+                    ? sources.map(nodeMaterial)
+                    : nodeMaterial(sources[0]);
             };
-            const mesh = new THREE.Mesh(
+            const mesh = addMesh(
+                `Foliage_${config.name}_gpu${lod}`,
                 base,
-                multi ? sources.map(nodeMaterial) : nodeMaterial(sources[0]),
+                nodeMaterials(
+                    source(lod),
+                    lod === 0 ? source(lodCount) : undefined,
+                ),
             );
-            mesh.name = `Foliage_${config.name}_gpu${lod}`;
-            mesh.frustumCulled = false;
-            mesh.matrixAutoUpdate = false;
-            mesh.receiveShadow = true;
             mesh.castShadow = lod === 0 && this.castShadows.value > 0;
             meshes.push({ mesh, offsets });
             this.draws.push({ mesh, lod, triangles, calls: groups.length });
-            this.group.add(mesh);
+
+            if (config.reflect) {
+                const reflection = addMesh(
+                    `Foliage_${config.name}_reflection${lod}`,
+                    base,
+                    nodeMaterials(source(reflectionRegion)),
+                );
+                reflection.visible = false;
+                meshes.push({ mesh: reflection, offsets: reflectionOffsets });
+                this.reflectionDraws.push(reflection);
+            }
         });
 
         const argsArray = new Uint32Array(entries.length * 5);
@@ -563,9 +669,14 @@ export class GpuFoliageType {
             const geometry = mesh.geometry;
             geometry.setIndirect(this.args, offsets[0].main);
 
-            if (offsets.length > 1 || offsets[0].shadow !== null) {
-                // Every material group has its own index range, and LOD0 draws the shadow list (and
-                // the shadow proxy range) in the shadow pass: pick the arguments per draw.
+            if (
+                config.reflect ||
+                offsets.length > 1 ||
+                offsets[0].shadow !== null
+            ) {
+                // Every material group has its own index range, LOD0 draws the shadow list (and the
+                // shadow proxy range) in the shadow pass, and the reflection draws share the LOD
+                // geometry (and its indirect offset): pick the arguments per draw.
                 mesh.onBeforeRender = (
                     _renderer,
                     scene,
@@ -615,7 +726,8 @@ export class GpuFoliageType {
         const capacity = this.capacityNode;
         const lodCount = config.lods.length;
         const shadowRegion = lodCount;
-        const occludedSlot = lodCount + 1;
+        const reflectionRegion = lodCount + 1;
+        const occludedSlot = this.regions;
         const falloff = config.falloff;
         const center = config.center.clone();
         const radius = config.radius;
@@ -673,21 +785,26 @@ export class GpuFoliageType {
                 Return();
             });
 
-            const lod = uint(0).toVar();
-            const lodScale = cullDistance.mul(frame.lodBias);
+            const lodScale = cullDistance.mul(frame.lodBias).toVar();
+            const lodOf = (distance: Node<'float'>, scale: Node<'float'>) => {
+                const lod = uint(0).toVar();
 
-            for (let l = 1; l < lodCount; l++) {
-                If(
-                    dist.greaterThan(
-                        lodScale
-                            .mul(config.lodDistances[l])
-                            .add(config.lodSlack),
-                    ),
-                    () => {
-                        lod.assign(l);
-                    },
-                );
-            }
+                for (let l = 1; l < lodCount; l++) {
+                    If(
+                        distance.greaterThan(
+                            scale
+                                .mul(config.lodDistances[l])
+                                .add(config.lodSlack),
+                        ),
+                        () => {
+                            lod.assign(l);
+                        },
+                    );
+                }
+
+                return lod;
+            };
+            const lod = lodOf(dist, lodScale);
 
             // Shadow casters: LOD0 range (+ the reach the CPU cells had: whole cells / the split
             // slack) within the shadow distance, drawn with the LOD0 shadow geometry.
@@ -717,6 +834,40 @@ export class GpuFoliageType {
                 .add(vec3(dot(r0.xyz, c), dot(r1.xyz, c), dot(r2.xyz, c)))
                 .toVar();
             const r = data.y.mul(radius).add(SWAY_MARGIN).toVar();
+
+            // Water reflection: the mirrored camera's own frustum (its near plane is the water, so
+            // nothing below it), coarser LODs, no occlusion test (the depth pyramid is the main
+            // view's). Trees outside the main view (e.g. above it when looking down at a lake) or
+            // hidden in it still show up in the reflection.
+            if (config.reflect) {
+                If(frame.reflect.greaterThan(0.5), () => {
+                    const inside = uint(1).toVar();
+
+                    for (let p = 0; p < 6; p++) {
+                        const plane = frame.reflectPlanes.element(p);
+
+                        If(
+                            dot(plane.xyz, sphere)
+                                .add(plane.w)
+                                .lessThan(r.negate()),
+                            () => {
+                                inside.assign(0);
+                            },
+                        );
+                    }
+
+                    If(inside.equal(1), () => {
+                        const region = lodOf(
+                            length(pos.sub(frame.reflectCamPos)),
+                            lodScale.mul(REFLECTION_LOD_SCALE),
+                        ).add(reflectionRegion);
+                        const slot = atomicAdd(counters.element(region), 1);
+                        visible
+                            .element(region.mul(capacity).add(slot))
+                            .assign(i);
+                    });
+                });
+            }
 
             for (let p = 0; p < 6; p++) {
                 const plane = frame.planes.element(p);
@@ -771,10 +922,13 @@ export class GpuFoliageType {
     }
 
     private disposeDraws(): void {
-        for (const draw of this.draws) {
-            this.group.remove(draw.mesh);
+        for (const mesh of [
+            ...this.draws.map((draw) => draw.mesh),
+            ...this.reflectionDraws,
+        ]) {
+            this.group.remove(mesh);
             // The geometry belongs to the type (shared LOD); only the indirect draw goes.
-            draw.mesh.geometry.setIndirect(null);
+            mesh.geometry.setIndirect(null);
         }
 
         for (const material of this.materials) {
@@ -782,6 +936,7 @@ export class GpuFoliageType {
         }
 
         this.draws = [];
+        this.reflectionDraws = [];
         this.materials = [];
     }
 }

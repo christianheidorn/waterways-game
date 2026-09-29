@@ -253,6 +253,9 @@ export class Game {
 
         this.input = new Input(renderer.domElement);
         this.scene.background = null;
+        // The scene root never moves; auto-updating it would force every object's world matrix to be
+        // recomputed on each render (static terrain / foliage meshes included).
+        this.scene.matrixAutoUpdate = false;
         this.atmosphere = new Atmosphere(renderer, this.scene);
         this.postFx = new PostFx(renderer, this.scene, this.camera);
         this.postFx.setLightSource(this.atmosphere);
@@ -799,17 +802,20 @@ export class Game {
     private renderFrame(dt: number): void {
         const water = this.world.water;
         const profiler = this.profiler;
-        // GPU foliage culling reads last frame's scene depth (Hi-Z), before any pass draws foliage.
+        const reflection = water.hasWater() ? this.prepareReflection(dt) : null;
+        // GPU foliage culling reads last frame's scene depth (Hi-Z), before any pass draws foliage;
+        // it culls for the reflection camera too when the reflection renders this frame.
         this.world.foliage.cull(
             this.renderer,
             this.camera,
             this.postFx.depthTexture,
             profiler,
+            reflection,
         );
 
         if (water.hasWater()) {
             profiler?.mark('Water reflection');
-            this.renderReflection(dt);
+            this.renderReflection();
         }
 
         this.postFx.render(dt, profiler);
@@ -839,14 +845,15 @@ export class Game {
     private smallFoliagePrefixes: string[] = [];
     private readonly reflectionHidden: THREE.Object3D[] = [];
 
-    /** Planar reflection of the water level closest to what the viewer is looking at. */
-    private renderReflection(dt: number): void {
+    /**
+     * Picks the water level to reflect (closest to what the viewer is looking at) and positions the
+     * reflection camera; returns it when the reflection renders this frame.
+     */
+    private prepareReflection(dt: number): THREE.Camera | null {
         const water = this.world.water;
 
-        if (!this.reflection.enabled || !water.hasWater()) {
-            water.setReflection(null);
-
-            return;
+        if (!this.reflection.enabled) {
+            return null;
         }
 
         this.reflectionLevelTimer -= dt;
@@ -865,6 +872,22 @@ export class Game {
         }
 
         if (this.reflectionLevel === null) {
+            return null;
+        }
+
+        this.reflection.level = this.reflectionLevel;
+
+        return this.reflection.prepare(
+            this.camera,
+            this.renderer.coordinateSystem,
+        );
+    }
+
+    /** Planar reflection of the water level picked by prepareReflection(). */
+    private renderReflection(): void {
+        const water = this.world.water;
+
+        if (!this.reflection.enabled || this.reflectionLevel === null) {
             water.setReflection(null);
 
             return;
@@ -886,13 +909,13 @@ export class Game {
         const hidden = this.reflectionHidden;
         hidden.length = 0;
         const precipitation = this.weather?.precipitation.group;
-        this.reflection.level = this.reflectionLevel;
+        const foliage = this.world.foliage;
         this.reflection.render(
             this.renderer,
             this.scene,
-            this.camera,
             () => {
                 water.group.visible = false;
+                foliage.beginReflection();
 
                 // Rain / snow streaks are invisible in a rippled reflection but cost a full particle draw.
                 if (precipitation?.visible) {
@@ -900,7 +923,7 @@ export class Game {
                     hidden.push(precipitation);
                 }
 
-                for (const child of this.world.foliage.group.children) {
+                for (const child of foliage.group.children) {
                     if (
                         child.visible &&
                         small.some((prefix) => child.name.startsWith(prefix))
@@ -912,6 +935,7 @@ export class Game {
             },
             () => {
                 water.group.visible = true;
+                foliage.endReflection();
 
                 for (const child of hidden) {
                     child.visible = true;

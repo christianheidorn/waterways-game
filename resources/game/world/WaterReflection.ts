@@ -23,6 +23,8 @@ export class WaterReflection {
     /** Render every n-th frame (reused in between). */
     interval = 1;
     private frame = 0;
+    /** Mirrored camera positioned by prepare() for this frame's render(); null when skipped. */
+    private prepared: THREE.PerspectiveCamera | null = null;
     private renderedLevel = Number.NaN;
     private scale = 0.5;
     private readonly plane = new THREE.Plane();
@@ -59,22 +61,21 @@ export class WaterReflection {
     }
 
     /**
-     * Renders the reflection (or keeps last frame's on skipped frames). `hide` is called before
-     * rendering to hide objects that must not be reflected (water itself, dense grass) and `restore`
-     * afterwards.
+     * Decides whether the reflection renders this frame and positions the mirrored camera for it.
+     * Returns that camera (e.g. to cull against its frustum before render()), or null when the frame
+     * keeps the last image or there is no reflection (camera below the water).
      */
-    render(
-        renderer: GameRenderer,
-        scene: THREE.Scene,
+    prepare(
         camera: THREE.PerspectiveCamera,
-        hide: () => void,
-        restore: () => void,
-    ): void {
+        coordinateSystem: THREE.CoordinateSystem,
+    ): THREE.PerspectiveCamera | null {
+        this.prepared = null;
+
         // Camera below the water: no reflection.
         if (camera.position.y <= this.level + 0.05) {
             this.active = false;
 
-            return;
+            return null;
         }
 
         // A skipped frame reuses the last image unless the plane changed or there is none yet.
@@ -85,12 +86,33 @@ export class WaterReflection {
             this.active &&
             this.renderedLevel === this.level
         ) {
-            return;
+            return null;
         }
 
         this.frame = 0;
-        const reflect = this.mirror(camera, renderer.coordinateSystem);
+        this.prepared = this.mirror(camera, coordinateSystem);
 
+        return this.prepared;
+    }
+
+    /**
+     * Renders the reflection prepared this frame (nothing on skipped frames: the last image stays).
+     * `hide` is called before rendering to hide objects that must not be reflected (water itself,
+     * dense grass) and `restore` afterwards.
+     */
+    render(
+        renderer: GameRenderer,
+        scene: THREE.Scene,
+        hide: () => void,
+        restore: () => void,
+    ): void {
+        const reflect = this.prepared;
+
+        if (!reflect) {
+            return;
+        }
+
+        this.prepared = null;
         hide();
         const shadows = this.freezeShadows(scene);
         const prevTarget = renderer.getRenderTarget();

@@ -42,6 +42,7 @@ import { InstanceBatch } from './foliage/InstanceBatch';
 import type { InstanceView } from './foliage/InstanceBatch';
 import { INSTANCE_FLOATS, writeInstance } from './foliage/instances';
 import type { Heightfield } from './Heightfield';
+import type { ShadowCascade } from './SunShadows';
 
 /**
  * Runtime cell size per kind (m). Small, dense foliage uses small cells so frustum culling, LOD and
@@ -378,6 +379,8 @@ export class Foliage {
     readonly group = new THREE.Group();
     /** Called before a cell's instance list changes (used for undo snapshots). */
     onBeforeModify: ((typeId: number, cellKey: string) => void) | null = null;
+    /** Called when shadow casting foliage changed (edits, ground cover growth, type settings). */
+    onShadowCastersChanged: (() => void) | null = null;
     private renderers = new Map<number, TypeRenderer>();
     /** Instances of types that are currently not in the type list (kept for saving / re-adding). */
     private orphaned = new Map<number, number[]>();
@@ -386,6 +389,7 @@ export class Foliage {
     private random = mulberry32(Date.now() & 0xffff);
     private density = 1;
     private shadowDistance = DEFAULT_SHADOW_DISTANCE;
+    private shadowCascade: ShadowCascade | null = null;
     private lodBias = 1;
     /** Forces a full re-evaluation of cells on the next update(). */
     private needsEval = true;
@@ -494,6 +498,14 @@ export class Foliage {
         this.needsEval = true;
     }
 
+    /**
+     * The sun's near shadow cascade (re-rendered every frame): on the GPU path its shadow pass draws
+     * only the casters that reach into it (see cull()).
+     */
+    setShadowCascade(cascade: ShadowCascade | null): void {
+        this.shadowCascade = cascade;
+    }
+
     /** > 1 keeps detailed LODs further away, < 1 switches earlier (GraphicsSettings.foliage_lod_bias). */
     setLodBias(bias: number | null | undefined): void {
         this.lodBias =
@@ -504,6 +516,7 @@ export class Foliage {
     }
 
     setTypes(types: FoliageType[]): void {
+        this.onShadowCastersChanged?.();
         const keep = new Set(types.map((t) => t.id));
         this.types = new Map(types.map((t) => [t.id, t]));
 
@@ -1743,6 +1756,7 @@ export class Foliage {
         this.globals.camPos.value.copy(camera.position);
         frame.setCamera(camera);
         frame.setReflection(reflection ?? null);
+        frame.setShadowCascade(this.shadowCascade);
         frame.lodBias.value = this.lodBias;
         frame.shadowDistance.value = this.shadowDistance;
 
@@ -2992,6 +3006,10 @@ export class Foliage {
     private markDirty(renderer: TypeRenderer, cell: Cell): void {
         cell.dirty = true;
         this.needsEval = true;
+
+        if (renderer.type.cast_shadows) {
+            this.onShadowCastersChanged?.();
+        }
 
         if (renderer.gpu) {
             renderer.gpuDirty.add(cell);

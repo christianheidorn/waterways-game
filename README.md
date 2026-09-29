@@ -196,7 +196,9 @@ about missing or over-budget LODs.
   off for a frame after camera cuts.
 - The survivors are compacted into per-LOD lists, and each LOD draws with **one indirect draw call**. The CPU
   does no per-instance work, however much foliage a map has.
-- Shadow casters get their own list, within the foliage shadow distance.
+- Shadow casters get their own lists, within the foliage shadow distance: all of them for the cached far
+  sun cascade, and the ones that reach into the near cascade for its every-frame pass (see
+  [Sun shadows](#sun-shadows)).
 - The water's planar reflection gets its own cull against the mirrored camera (coarser LODs, no Hi-Z), so
   trees behind or beside the viewer still show in lakes and the sea.
 - Leaves and blades are translucent: sky light passes through the canopy and they glow when backlit, so
@@ -270,6 +272,25 @@ own:
 - Foliage
 - Shading
 - Resolution
+
+### Sun shadows
+
+The sun (or moon) shadow is split into two cascades around the focus point (the player, or the editor's
+cursor / view target), like UE's cascaded and virtual shadow maps (`resources/game/world/SunShadows.ts`):
+
+- **Near cascade**: a quarter of the shadow distance (at least 20 m) at twice the texel density, re-rendered
+  every frame with every caster. The character, swaying grass and trees near the camera keep live
+  shadows. With GPU-driven foliage, its pass draws only the plants that reach into it.
+- **Far cascade**: the whole shadow distance, **cached**. It is only re-rendered when the focus has moved 6 %
+  of the shadow distance, when the sun has turned by more than 0.1° (scrubbing the time of day, weather
+  changes, day to night), or when terrain or shadow-casting foliage is edited (at most every 0.2 s while
+  edits keep coming). Standing still costs nothing; walking re-renders it every few seconds. The character
+  is left out of it, and wind sway is frozen in it, which cannot be seen at that distance.
+- The shader uses the near map inside the near square and cross-fades to the far map at its edge. Both
+  cascades are snapped to their texels in light space, so shadows do not shimmer as you move.
+
+The Shadows setting picks the far map size (Low 1K … Epic 8K) and the distance. The near map is half that
+size. Because the far pass is so rarely drawn, a longer shadow distance now costs little per frame.
 
 **Render pipeline** (`resources/game/core/PostFx.ts`): three.js' node-based `RenderPipeline`, written in
 TSL, the same on WebGPU and WebGL 2. The full pass order is under
@@ -508,7 +529,7 @@ vendor/bin/pint --test      # PHP style
 ## Roadmap ideas
 
 **In progress:** biomes and rule-based procedural trees, height-based terrain layer blending, grass that takes
-the terrain colour at its roots, ground cover generated on the GPU (WebGPU), cached shadows, editor debug views.
+the terrain colour at its roots, ground cover generated on the GPU (WebGPU), editor debug views.
 
 Looks:
 

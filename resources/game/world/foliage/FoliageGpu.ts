@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import {
+    abs,
     atomicAdd,
     atomicLoad,
     atomicStore,
@@ -16,10 +17,12 @@ import {
     uniform,
     uniformArray,
     vec3,
+    vec4,
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
 import type { GameRenderer } from '../../core/renderer';
 import { FOLIAGE_STRIDE } from '../../shared/types';
+import type { ShadowCascade } from '../SunShadows';
 import type {
     FoliageGlobals,
     FoliageTypeUniforms,
@@ -69,6 +72,14 @@ export class GpuCullFrame {
         'vec4',
     );
     readonly reflectCamPos = uniform(new THREE.Vector3());
+    /** World → near sun shadow cascade square ([-1, 1]², see ShadowCascade). */
+    readonly nearShadowBox = uniform(new THREE.Matrix4());
+    /** Metres → box units of nearShadowBox (it scales x and y alike). */
+    readonly nearShadowScale = uniform(1);
+    /** 1 while there is a near cascade (its casters get a list of their own). */
+    readonly nearShadow = uniform(0);
+    /** Shadow camera of the near cascade: its shadow pass draws the near caster list. */
+    nearShadowCamera: THREE.Camera | null = null;
     private readonly frustum = new THREE.Frustum();
     private readonly projScreen = new THREE.Matrix4();
 
@@ -116,6 +127,18 @@ export class GpuCullFrame {
         );
     }
 
+    /** The sun's near shadow cascade of this frame (null: shadows off). */
+    setShadowCascade(cascade: ShadowCascade | null): void {
+        this.nearShadowCamera = cascade?.camera ?? null;
+        this.nearShadow.value = cascade ? 1 : 0;
+
+        if (cascade) {
+            const e = cascade.box.elements;
+            this.nearShadowBox.value.copy(cascade.box);
+            this.nearShadowScale.value = Math.hypot(e[0], e[4], e[8]);
+        }
+    }
+
     /** Remembers the camera the depth pyramid of the next frame is rendered with. */
     setPrevious(camera: THREE.Camera): void {
         this.prevView.value.copy(camera.matrixWorldInverse);
@@ -123,6 +146,13 @@ export class GpuCullFrame {
         this.near.value = (camera as THREE.PerspectiveCamera).near ?? 0.1;
     }
 }
+
+/** Indirect argument offsets of one material group's draw: main pass, far / near shadow pass. */
+type DrawOffsets = {
+    main: number;
+    shadow: number | null;
+    nearShadow: number | null;
+};
 
 /** One LOD (or one material group of it) of a type's draw chain. */
 export type GpuLod = {
@@ -182,11 +212,12 @@ export type GpuTypeStats = {
  * frame a compute pass tests all of them (distance, density, frustum, Hi-Z occlusion), picks the LOD
  * and appends the survivors to per-LOD visibility lists, and a one-thread pass writes the instance
  * counts into `drawIndexedIndirect` arguments. Each LOD (per material group) is then ONE indirect
- * draw whose vertex shader fetches the transform through the visibility list. Shadows use a separate
- * list (LOD0 instances within the shadow distance, not frustum / occlusion culled): LOD0 meshes switch
- * their indirect arguments and instance source in the shadow pass. The water reflection gets lists of
- * its own from the same pass (mirrored camera frustum, coarser LODs, no occlusion), drawn by separate
- * meshes that are only visible while the reflection renders (see setReflectionPass).
+ * draw whose vertex shader fetches the transform through the visibility list. Shadows use separate
+ * lists (LOD0 instances within the shadow distance, not frustum / occlusion culled, for the cached far
+ * sun cascade; the subset inside the near cascade for the one re-rendered every frame): LOD0 meshes
+ * switch their indirect arguments and instance source in the shadow passes. The water reflection gets
+ * lists of its own from the same pass (mirrored camera frustum, coarser LODs, no occlusion), drawn by
+ * separate meshes that are only visible while the reflection renders (see setReflectionPass).
  *
  * Instances are stored per cell in contiguous slot ranges (with headroom), so editing a cell only
  * rewrites its range; freed slots are marked dead and skipped by the culling pass.
@@ -206,7 +237,7 @@ export class GpuFoliageType {
     private draws: Draw[] = [];
     /** Draws of the water reflection pass (hidden otherwise). */
     private reflectionDraws: THREE.Mesh[] = [];
-    /** Visibility lists: one per LOD, the shadow casters, then one per reflection LOD. */
+    /** Visibility lists: one per LOD, the shadow casters (far, near), then one per reflection LOD. */
     private regions = 0;
     private materials: THREE.Material[] = [];
     private computes: THREE.ComputeNode[] = [];
@@ -368,7 +399,7 @@ export class GpuFoliageType {
                     lodInstances: Array.from(counts.slice(0, lods)),
                     shadowInstances: counts[lods] ?? 0,
                     reflectionInstances: counts
-                        .slice(lods + 1, regions)
+                        .slice(lods + 2, regions)
                         .reduce((sum, n) => sum + n, 0),
                     occluded: counts[regions] ?? 0,
                 };
@@ -500,8 +531,11 @@ export class GpuFoliageType {
 
         this.disposeDraws();
         const lodCount = config.lods.length;
-        // Regions of the visibility list: one per LOD, the shadow casters, one per reflection LOD.
-        const regions = lodCount + 1 + (config.reflect ? lodCount : 0);
+        // Regions of the visibility list: one per LOD, the shadow casters of the far and the near
+        // cascade, one per reflection LOD.
+        const shadowRegion = lodCount;
+        const nearShadowRegion = lodCount + 1;
+        const regions = lodCount + 2 + (config.reflect ? lodCount : 0);
         this.regions = regions;
         this.visible = instancedArray(this.capacity * regions, 'uint');
         // Counters: one per region, then the occlusion-culled instances.
@@ -516,11 +550,12 @@ export class GpuFoliageType {
         const instances = this.instances;
         const capacity = this.capacityNode;
         const source =
-            (region: number): InstanceSource =>
+            (region: number | Node<'uint'>): InstanceSource =>
             () => {
-                const index = visible.element(
-                    uint(region).mul(capacity).add(instanceIndex),
-                );
+                const start = (
+                    typeof region === 'number' ? uint(region) : region
+                ).mul(capacity);
+                const index = visible.element(start.add(instanceIndex));
                 const base = index.mul(4);
 
                 return {
@@ -533,8 +568,8 @@ export class GpuFoliageType {
         const argOffset = (entry: number) => entry * 5 * 4;
         const meshes: {
             mesh: THREE.Mesh;
-            /** Indirect argument offsets per material group (main, shadow). */
-            offsets: { main: number; shadow: number | null }[];
+            /** Indirect argument offsets per material group (main, far / near shadow). */
+            offsets: DrawOffsets[];
         }[] = [];
         const addMesh = (
             name: string,
@@ -550,6 +585,17 @@ export class GpuFoliageType {
 
             return mesh;
         };
+
+        // The shadow material of LOD0 reads the near cascade's list in that cascade's pass and the far
+        // list otherwise. An object-scope uniform: the two passes' draws are separate render objects
+        // (one shadow material per cascade), each keeping its own value.
+        const frame = this.frame;
+        const shadowSourceRegion = uniform(shadowRegion, 'uint').onObjectUpdate(
+            ({ camera }) =>
+                camera === frame.nearShadowCamera
+                    ? nearShadowRegion
+                    : shadowRegion,
+        );
 
         config.lods.forEach(({ geometry, material }, lod) => {
             const base = indexed(geometry);
@@ -568,9 +614,9 @@ export class GpuFoliageType {
                   ];
             const sources = Array.isArray(material) ? material : [material];
             const proxy = lod === 0 ? config.shadowProxy : null;
-            const offsets: { main: number; shadow: number | null }[] = [];
-            const reflectionOffsets: { main: number; shadow: null }[] = [];
-            const reflectionRegion = lodCount + 1 + lod;
+            const offsets: DrawOffsets[] = [];
+            const reflectionOffsets: DrawOffsets[] = [];
+            const reflectionRegion = lodCount + 2 + lod;
             let triangles = 0;
 
             for (const group of groups) {
@@ -578,14 +624,19 @@ export class GpuFoliageType {
                 entries.push({ region: lod, count, first: group.start });
                 const main = argOffset(entries.length - 1);
                 let shadow: number | null = null;
+                let nearShadow: number | null = null;
 
                 if (lod === 0) {
-                    entries.push({
-                        region: lodCount,
-                        count: proxy ? proxy.count : group.count,
-                        first: proxy ? proxy.start : group.start,
-                    });
-                    shadow = argOffset(entries.length - 1);
+                    for (const region of [shadowRegion, nearShadowRegion]) {
+                        entries.push({
+                            region,
+                            count: proxy ? proxy.count : group.count,
+                            first: proxy ? proxy.start : group.start,
+                        });
+                    }
+
+                    shadow = argOffset(entries.length - 2);
+                    nearShadow = argOffset(entries.length - 1);
                 }
 
                 if (config.reflect) {
@@ -597,10 +648,11 @@ export class GpuFoliageType {
                     reflectionOffsets.push({
                         main: argOffset(entries.length - 1),
                         shadow: null,
+                        nearShadow: null,
                     });
                 }
 
-                offsets.push({ main, shadow });
+                offsets.push({ main, shadow, nearShadow });
                 triangles += Math.floor(count / 3);
             }
 
@@ -639,7 +691,7 @@ export class GpuFoliageType {
                 base,
                 nodeMaterials(
                     source(lod),
-                    lod === 0 ? source(lodCount) : undefined,
+                    lod === 0 ? source(shadowSourceRegion) : undefined,
                 ),
             );
             mesh.castShadow = lod === 0 && this.castShadows.value > 0;
@@ -730,7 +782,7 @@ export class GpuFoliageType {
                 mesh.onBeforeRender = (
                     _renderer,
                     scene,
-                    _camera,
+                    camera,
                     _geometry,
                     _material,
                     group,
@@ -744,7 +796,10 @@ export class GpuFoliageType {
                     state.scene = scene;
 
                     if (inShadowPass()) {
-                        state.shadow = entry.shadow ?? entry.main;
+                        const near = camera === this.frame.nearShadowCamera;
+                        state.shadow =
+                            (near ? entry.nearShadow : entry.shadow) ??
+                            entry.main;
                     } else {
                         state.main = entry.main;
                     }
@@ -774,7 +829,8 @@ export class GpuFoliageType {
         const capacity = this.capacityNode;
         const lodCount = config.lods.length;
         const shadowRegion = lodCount;
-        const reflectionRegion = lodCount + 1;
+        const nearShadowRegion = lodCount + 1;
+        const reflectionRegion = lodCount + 2;
         const occludedSlot = this.regions;
         const falloff = config.falloff;
         const center = config.center.clone();
@@ -863,18 +919,18 @@ export class GpuFoliageType {
                           .add(config.lodSlack + config.shadowSlack)
                     : cullDistance;
 
-            If(
-                dist
-                    .lessThan(shadowReach)
-                    .and(distH.lessThan(frame.shadowDistance))
-                    .and(castShadows.greaterThan(0.5)),
-                () => {
-                    const slot = atomicAdd(counters.element(shadowRegion), 1);
-                    visible
-                        .element(uint(shadowRegion).mul(capacity).add(slot))
-                        .assign(i);
-                },
-            );
+            const casts = dist
+                .lessThan(shadowReach)
+                .and(distH.lessThan(frame.shadowDistance))
+                .and(castShadows.greaterThan(0.5))
+                .toVar();
+
+            If(casts, () => {
+                const slot = atomicAdd(counters.element(shadowRegion), 1);
+                visible
+                    .element(uint(shadowRegion).mul(capacity).add(slot))
+                    .assign(i);
+            });
 
             // Bounding sphere: model centre through the instance transform, radius × scale.
             const c = vec3(center.x, center.y, center.z);
@@ -882,6 +938,24 @@ export class GpuFoliageType {
                 .add(vec3(dot(r0.xyz, c), dot(r1.xyz, c), dot(r2.xyz, c)))
                 .toVar();
             const r = data.y.mul(radius).add(SWAY_MARGIN).toVar();
+
+            // The near sun cascade's casters: those whose sphere reaches into its square in light
+            // space (its map is re-rendered every frame, so it only draws what can land in it).
+            If(casts.and(frame.nearShadow.greaterThan(0.5)), () => {
+                const box = frame.nearShadowBox;
+                const p = box.mul(vec4(sphere, 1)).xy;
+                const reach = r.mul(frame.nearShadowScale).add(1);
+
+                If(abs(p.x).max(abs(p.y)).lessThan(reach), () => {
+                    const slot = atomicAdd(
+                        counters.element(nearShadowRegion),
+                        1,
+                    );
+                    visible
+                        .element(uint(nearShadowRegion).mul(capacity).add(slot))
+                        .assign(i);
+                });
+            });
 
             // Water reflection: the mirrored camera's own frustum (its near plane is the water, so
             // nothing below it), coarser LODs, no occlusion test (the depth pyramid is the main

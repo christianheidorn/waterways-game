@@ -433,6 +433,11 @@ export class Game {
         );
         this.scene.add(this.player.object);
         this.playerCamera = new ThirdPersonCamera(this.camera, settings.player);
+        // The character moves on its own: only the live near shadow cascade draws it. Edited
+        // casters refresh the cached far cascade.
+        this.atmosphere.sunShadows.addLiveCaster(this.player.object);
+        this.world.foliage.onShadowCastersChanged = () =>
+            this.atmosphere.invalidateShadows();
 
         this.hud = new Hud(this.container, this.config.embedded, {
             setMode: (mode) => this.setMode(mode),
@@ -452,7 +457,13 @@ export class Game {
             this.input,
             this.scene,
             {
-                markDirty: (channel) => this.markDirty(channel),
+                markDirty: (channel) => {
+                    this.markDirty(channel);
+
+                    if (channel === 'heightmap') {
+                        this.atmosphere.invalidateShadows();
+                    }
+                },
                 onHistory: (canUndo, canRedo) => {
                     this.hud.setHistory(canUndo, canRedo);
                     this.bridge.send({ type: 'history', canUndo, canRedo });
@@ -1243,6 +1254,7 @@ export class Game {
         const g = normalizeGraphics(input);
         this.manifest.settings.graphics = g;
         this.atmosphere.setShadowQuality(g.shadow_quality, g.shadow_distance);
+        this.world.foliage.setShadowCascade(this.atmosphere.sunShadows.cascade);
         this.weather?.setQuality(g);
         this.world.terrain.setShadows(
             g.shadow_quality === 'high' || g.shadow_quality === 'ultra',

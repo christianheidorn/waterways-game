@@ -1188,6 +1188,8 @@ export class Game {
         const max = this.renderer.getMaxAnisotropy();
         const value = Math.max(1, Math.min(max, Math.round(requested || 1)));
         const seen = new Set<THREE.Texture>();
+        // Thousands of foliage meshes share a few materials: scan each material once.
+        const materials = new Set<THREE.Material>();
 
         this.scene.traverse((object) => {
             const material = (object as THREE.Mesh).material as
@@ -1200,6 +1202,11 @@ export class Game {
             }
 
             for (const m of Array.isArray(material) ? material : [material]) {
+                if (materials.has(m)) {
+                    continue;
+                }
+
+                materials.add(m);
                 const uniforms = (
                     m as { uniforms?: Record<string, { value: unknown }> }
                 ).uniforms;

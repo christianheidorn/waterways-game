@@ -2,6 +2,15 @@ import * as THREE from 'three/webgpu';
 import { INSTANCE_ATTRIBUTES } from './FoliageMaterial';
 import { INSTANCE_FLOATS } from './instances';
 
+let nextId = 0;
+
+/** Instanced geometry view of a LOD drawing the instances of a batch. */
+export class InstanceView extends THREE.InstancedBufferGeometry {
+    constructor(readonly batch: InstanceBatch) {
+        super();
+    }
+}
+
 /**
  * Instance buffer of one CPU-culled foliage cell (WebGL 2 fallback path) plus one instanced geometry
  * view per LOD geometry: the views share the LOD's vertex data and this batch's per-instance rows
@@ -13,11 +22,11 @@ export class InstanceBatch {
     /** Instance bounds (world space); shared by every view for frustum culling. */
     readonly box = new THREE.Box3();
     readonly sphere = new THREE.Sphere();
+    readonly id = nextId++;
+    /** Incremented by every upload() (merged batches compare it to their copy). */
+    version = 0;
     private readonly attributes: THREE.InterleavedBufferAttribute[];
-    private readonly views = new Map<
-        THREE.BufferGeometry,
-        THREE.InstancedBufferGeometry
-    >();
+    private readonly views = new Map<THREE.BufferGeometry, InstanceView>();
 
     constructor(readonly capacity: number) {
         this.array = new Float32Array(capacity * INSTANCE_FLOATS);
@@ -34,11 +43,11 @@ export class InstanceBatch {
     }
 
     /** Instanced view of a LOD geometry drawing `count` instances of this batch. */
-    view(base: THREE.BufferGeometry): THREE.InstancedBufferGeometry {
+    view(base: THREE.BufferGeometry): InstanceView {
         let view = this.views.get(base);
 
         if (!view) {
-            view = new THREE.InstancedBufferGeometry();
+            view = new InstanceView(this);
             view.setIndex(base.index);
 
             for (const [name, attribute] of Object.entries(base.attributes)) {
@@ -67,6 +76,7 @@ export class InstanceBatch {
         this.buffer.clearUpdateRanges();
         this.buffer.addUpdateRange(0, count * INSTANCE_FLOATS);
         this.buffer.needsUpdate = true;
+        this.version++;
     }
 
     setBounds(box: THREE.Box3): void {

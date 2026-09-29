@@ -1,123 +1,101 @@
-import type * as THREE from 'three';
-import type { Blitter, FrameUniforms } from './common';
-import { FRAME_UNIFORMS, fullscreenMaterial } from './common';
+import * as THREE from 'three/webgpu';
+import { float, Fn, If, Loop, uniform, uv, vec2, vec4 } from 'three/tsl';
+import type { FrameContext, TextureNode, Vec2Node, Vec4Node } from './common';
+import { ScreenPass } from './common';
 
 export type MotionBlurQuality = 'low' | 'high';
 
 /**
- * Per-pixel motion blur from depth reprojection (camera motion: current vs previous un-jittered
- * view-projection) plus the velocity buffer for dynamic objects. The blur vector is the motion during
- * the shutter time (strength 1 = 180° shutter at 24 fps, frame rate independent), clamped to a maximum
- * length. Samples are centred on the pixel and jittered; a sample only contributes where its own motion
- * reaches the centre, so still foreground (the player) never smears into the moving background.
+ * Per-pixel motion blur from the scene pass' motion vectors (camera, skinned and instanced motion); the
+ * sky, which has no geometry, is reprojected with the camera matrices. The blur vector is the motion
+ * during the shutter time (strength 1 = 180° shutter at 24 fps, frame rate independent), clamped to a
+ * maximum length. Samples are centred on the pixel and jittered; a sample only contributes where its own
+ * motion reaches the centre, so still foreground (the player) never smears into the moving background.
  */
-const MotionBlurShader = /* glsl */ `
-    ${FRAME_UNIFORMS}
-    uniform sampler2D tColor;
-    uniform sampler2D tVelocity;
-    uniform float uScale;
-    uniform float uMaxLength;
-    varying vec2 vUv;
-
-    vec2 motionAt(vec2 uv) {
-        #if VELOCITY
-            vec4 v = texture2D(tVelocity, uv);
-
-            if (v.a > 0.5) {
-                return v.xy;
-            }
-        #endif
-
-        float d = rawDepth(uv);
-        vec4 prev = uReproj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
-        return prev.w > 0.0 ? uv - (prev.xy / prev.w * 0.5 + 0.5) : vec2(0.0);
-    }
-
-    /** Motion in pixels scaled to the shutter and clamped. */
-    vec2 blurVector(vec2 uv) {
-        vec2 v = motionAt(uv) * uResolution * uScale;
-        float len = length(v);
-        return len > uMaxLength ? v * (uMaxLength / len) : v;
-    }
-
-    void main() {
-        vec3 center = texture2D(tColor, vUv).rgb;
-        vec2 v = blurVector(vUv);
-        float len = length(v);
-
-        if (len < 0.5) {
-            gl_FragColor = vec4(center, 1.0);
-            return;
-        }
-
-        float jitter = ign(gl_FragCoord.xy) - 0.5;
-        vec3 sum = center;
-        float weight = 1.0;
-
-        for (int i = 0; i < SAMPLES; i++) {
-            float t = (float(i) + 0.5 + jitter) / float(SAMPLES) - 0.5;
-            vec2 uv = vUv + v * t * uTexel;
-            float dist = abs(t) * len;
-            // A sample counts when its own blur reaches back to this pixel.
-            float w = clamp(length(blurVector(uv)) / max(dist, 1e-3), 0.0, 1.0);
-            sum += texture2D(tColor, uv).rgb * w;
-            weight += w;
-        }
-
-        gl_FragColor = vec4(sum / weight, 1.0);
-    }
-`;
-
 export class MotionBlur {
-    private readonly material: THREE.ShaderMaterial;
+    readonly pass = new ScreenPass('Motion blur');
+    /** Previous view-projection × inverse current view-projection (un-jittered). */
+    readonly reprojection = uniform(new THREE.Matrix4());
+    private readonly shutter = uniform(1);
+    private readonly maxLength = uniform(32);
 
     constructor(
         readonly quality: MotionBlurQuality,
-        uniforms: FrameUniforms,
-        private readonly blitter: Blitter,
+        f: FrameContext,
+        input: TextureNode,
+        velocity: TextureNode,
     ) {
-        this.material = fullscreenMaterial({
-            name: 'WaterwaysMotionBlur',
-            uniforms: {
-                ...uniforms,
-                tColor: { value: null },
-                tVelocity: { value: null },
-                uScale: { value: 1 },
-                uMaxLength: { value: 32 },
-            },
-            defines: { SAMPLES: quality === 'high' ? 24 : 10, VELOCITY: 0 },
-            fragmentShader: MotionBlurShader,
-        });
+        const samples = quality === 'high' ? 24 : 10;
+        const pass = this.pass;
+
+        const motionAt = (p: Vec2Node): Vec2Node => {
+            const result = velocity.sample(p).xy.mul(vec2(0.5, -0.5)).toVar();
+
+            If(f.isSky(f.rawDepth(p)), () => {
+                const ndc = vec4(p.x.mul(2).sub(1), p.y.mul(-2).add(1), 1, 1);
+                const prev = this.reprojection.mul(ndc);
+                const prevUv = prev.xy
+                    .div(prev.w)
+                    .mul(vec2(0.5, -0.5))
+                    .add(0.5);
+                result.assign(
+                    prev.w.greaterThan(0).select(p.sub(prevUv), vec2(0)),
+                );
+            });
+
+            return result;
+        };
+
+        /** Motion in pixels scaled to the shutter and clamped. */
+        const blurVector = (p: Vec2Node): Vec2Node => {
+            const v = motionAt(p).mul(pass.resolution).mul(this.shutter);
+            const len = v.length();
+
+            return len
+                .greaterThan(this.maxLength)
+                .select(v.mul(this.maxLength.div(len)), v);
+        };
+
+        pass.fragment = Fn(() => {
+            const vUv = uv();
+            const center = input.sample(vUv).rgb.toVar();
+            const v = blurVector(vUv).toVar();
+            const len = v.length().toVar();
+            const result = vec4(center, 1).toVar();
+
+            If(len.greaterThanEqual(0.5), () => {
+                const texel = pass.resolution.reciprocal();
+                const jitter = f.noise().sub(0.5).toVar();
+                const sum = center.toVar();
+                const weight = float(1).toVar();
+
+                Loop(samples, ({ i }) => {
+                    const t = float(i)
+                        .add(0.5)
+                        .add(jitter)
+                        .div(samples)
+                        .sub(0.5);
+                    const sampleUv = vUv.add(v.mul(t).mul(texel)).toVar();
+                    const dist = t.abs().mul(len);
+                    // A sample counts when its own blur reaches back to this pixel.
+                    const w = blurVector(sampleUv)
+                        .length()
+                        .div(dist.max(1e-3))
+                        .clamp(0, 1);
+                    sum.addAssign(input.sample(sampleUv).rgb.mul(w));
+                    weight.addAssign(w);
+                });
+
+                result.assign(vec4(sum.div(weight), 1));
+            });
+
+            return result;
+        })() as Vec4Node;
     }
 
-    render(
-        input: THREE.Texture,
-        output: THREE.WebGLRenderTarget,
-        params: {
-            strength: number;
-            dt: number;
-            height: number;
-            velocity: THREE.Texture | null;
-        },
-    ): void {
-        const m = this.material;
-        const u = m.uniforms;
-        u.tColor.value = input;
-        u.tVelocity.value = params.velocity;
+    update(strength: number, dt: number, height: number): void {
         // Shutter: strength × 1/48 s, relative to the frame time the motion vectors cover.
-        u.uScale.value = params.strength / 48 / Math.max(1 / 240, params.dt);
-        u.uMaxLength.value = 48 * (params.height / 1080);
-        const vel = params.velocity ? 1 : 0;
-
-        if (m.defines.VELOCITY !== vel) {
-            m.defines.VELOCITY = vel;
-            m.needsUpdate = true;
-        }
-
-        this.blitter.draw(m, output);
-    }
-
-    dispose(): void {
-        this.material.dispose();
+        this.shutter.value = strength / 48 / Math.max(1 / 240, dt);
+        this.maxLength.value = 48 * (height / 1080);
     }
 }

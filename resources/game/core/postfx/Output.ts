@@ -1,318 +1,265 @@
-import * as THREE from 'three';
-import { LUT_SIZE } from './ColorLut';
-import { fullscreenMaterial, setDefine } from './common';
+import * as THREE from 'three/webgpu';
+import {
+    float,
+    Fn,
+    hash,
+    mix,
+    screenCoordinate,
+    sRGBTransferOETF,
+    toneMapping,
+    texture,
+    uniform,
+    uv,
+    vec2,
+    vec3,
+    vec4,
+} from 'three/tsl';
+import { colorGradeLut, LUT_SIZE } from './ColorLut';
+import type {
+    FloatNode,
+    TextureNode,
+    Vec2Node,
+    Vec3Node,
+    Vec4Node,
+} from './common';
+import { luma } from './common';
 
-/**
- * The single display pass: everything between the HDR scene and the final anti-aliasing in one
- * full-screen draw (replaces three's OutputPass + a separate grading pass).
- *
- * Scene-referred (linear HDR): chromatic aberration (radial, per channel lookups), + bloom, + lens flare,
- * × eye adaptation, × white balance → tone mapping (renderer.toneMapping, exposure = base × 2^EV comp)
- * → sRGB. Display-referred: optional CAS-like sharpening (neighbours are tone mapped too), 3D LUT colour
- * grade blended by intensity, saturation / contrast, vignette, luma-weighted animated film grain,
- * letterbox bars, and ±½ LSB dither against banding in the 8-bit output.
- */
-const OutputShader = /* glsl */ `
-    precision highp sampler3D;
-    uniform sampler2D tDiffuse;
-    uniform sampler2D tBloom;
-    uniform sampler2D tFlare;
-    uniform sampler2D tExposure;
-    uniform sampler3D tLut;
-    uniform vec3 uWhiteBalance;
-    uniform float uLutIntensity;
-    uniform float saturation;
-    uniform float contrast;
-    uniform float vignette;
-    uniform float sharpen;
-    uniform float uAberration;
-    uniform float uGrain;
-    uniform vec2 uLetterbox;
-    uniform vec2 texel;
-    uniform float aspect;
-    uniform float uFrame;
-    varying vec2 vUv;
-
-    #include <tonemapping_pars_fragment>
-
-    float hash12(vec2 p) {
-        vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-        p3 += dot(p3, p3.yzx + 33.33);
-        return fract((p3.x + p3.y) * p3.z);
-    }
-
-    vec3 sceneAt(vec2 uv) {
-        vec3 c;
-
-        #if ABERRATION
-            // Lateral chromatic aberration grows towards the edges (r pushed out, b pulled in).
-            vec2 d = uv - 0.5;
-            vec2 o = d * dot(d * vec2(aspect, 1.0), d * vec2(aspect, 1.0)) * uAberration * 0.014;
-            c = vec3(
-                texture2D(tDiffuse, uv - o).r,
-                texture2D(tDiffuse, uv).g,
-                texture2D(tDiffuse, uv + o).b
-            );
-            #if BLOOM
-                c += vec3(texture2D(tBloom, uv - o).r, texture2D(tBloom, uv).g, texture2D(tBloom, uv + o).b);
-            #endif
-        #else
-            c = texture2D(tDiffuse, uv).rgb;
-            #if BLOOM
-                c += texture2D(tBloom, uv).rgb;
-            #endif
-        #endif
-
-        #if FLARE
-            c += texture2D(tFlare, uv).rgb;
-        #endif
-
-        return c;
-    }
-
-    vec3 display(vec3 hdr, float exposure) {
-        vec3 c = max(hdr, vec3(0.0)) * exposure * uWhiteBalance;
-
-        #if defined( LINEAR_TONE_MAPPING )
-            c = LinearToneMapping(c);
-        #elif defined( REINHARD_TONE_MAPPING )
-            c = ReinhardToneMapping(c);
-        #elif defined( CINEON_TONE_MAPPING )
-            c = CineonToneMapping(c);
-        #elif defined( ACES_FILMIC_TONE_MAPPING )
-            c = ACESFilmicToneMapping(c);
-        #elif defined( AGX_TONE_MAPPING )
-            c = AgXToneMapping(c);
-        #elif defined( NEUTRAL_TONE_MAPPING )
-            c = NeutralToneMapping(c);
-        #endif
-
-        #ifdef SRGB_TRANSFER
-            c = sRGBTransferOETF(vec4(c, 1.0)).rgb;
-        #endif
-
-        return clamp(c, 0.0, 1.0);
-    }
-
-    void main() {
-        #if AUTO_EXPOSURE
-            float exposure = texture2D(tExposure, vec2(0.5)).r;
-        #else
-            float exposure = 1.0;
-        #endif
-
-        vec3 col = display(sceneAt(vUv), exposure);
-
-        #if SHARPEN
-            vec3 n = display(texture2D(tDiffuse, vUv + vec2(0.0, texel.y)).rgb, exposure);
-            vec3 s = display(texture2D(tDiffuse, vUv - vec2(0.0, texel.y)).rgb, exposure);
-            vec3 e = display(texture2D(tDiffuse, vUv + vec2(texel.x, 0.0)).rgb, exposure);
-            vec3 w = display(texture2D(tDiffuse, vUv - vec2(texel.x, 0.0)).rgb, exposure);
-            vec3 lo = min(col, min(min(n, s), min(e, w)));
-            vec3 hi = max(col, max(max(n, s), max(e, w)));
-            vec3 blur = (n + s + e + w) * 0.25;
-            col = clamp(col + (col - blur) * sharpen * 2.5, lo, hi);
-        #endif
-
-        #if LUT
-            vec3 graded = texture(tLut, col * ${((LUT_SIZE - 1) / LUT_SIZE).toFixed(6)} + ${(0.5 / LUT_SIZE).toFixed(6)}).rgb;
-            col = mix(col, graded, uLutIntensity);
-        #endif
-
-        #if GRADE
-            float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
-            col = mix(vec3(l), col, saturation);
-            col = (col - 0.5) * contrast + 0.5;
-            vec2 vd = (vUv - 0.5) * vec2(aspect, 1.0);
-            float r = length(vd) / length(vec2(aspect, 1.0) * 0.5);
-            col *= 1.0 - vignette * 0.75 * smoothstep(0.25, 1.0, r);
-        #endif
-
-        #if GRAIN
-            // Monochrome, animated; strongest in the mid-tones like film.
-            float gl = clamp(dot(col, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
-            float g = hash12(gl_FragCoord.xy + fract(uFrame * 0.618034) * 1000.0)
-                + hash12(gl_FragCoord.xy * 1.37 + fract(uFrame * 0.414214) * 1000.0) - 1.0;
-            col += g * uGrain * 0.09 * (0.25 + 3.0 * gl * (1.0 - gl));
-        #endif
-
-        // Dither to break up 8-bit banding in skies and fog.
-        col += (hash12(gl_FragCoord.xy + fract(uFrame * 0.1) * 97.0) - 0.5) / 255.0;
-
-        #if LETTERBOX
-            if (vUv.y < uLetterbox.y || vUv.y > 1.0 - uLetterbox.y || vUv.x < uLetterbox.x || vUv.x > 1.0 - uLetterbox.x) {
-                col = vec3(0.0);
-            }
-        #endif
-
-        gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
-    }
-`;
-
-export type OutputParams = {
-    exposure: number;
-    whiteBalance: THREE.Vector3;
-    lut: THREE.Data3DTexture | null;
-    lutIntensity: number;
-    saturation: number;
-    contrast: number;
-    vignette: number;
-    sharpen: number;
-    aberration: number;
-    grain: number;
-    /** Target aspect ratio (0 = off). */
-    letterbox: number;
-    bloom: THREE.Texture | null;
-    flare: THREE.Texture | null;
-    autoExposure: boolean;
+/** Which optional parts of the display transform exist (a change rebuilds the output graph). */
+export type OutputFeatures = {
+    aberration: boolean;
+    sharpen: boolean;
+    lut: boolean;
+    grade: boolean;
+    grain: boolean;
+    letterbox: boolean;
 };
 
-export class OutputStage {
-    readonly material: THREE.ShaderMaterial;
-    private toneMapping: THREE.ToneMapping | -1 = -1;
-    private colorSpace = '';
+export type OutputInputs = {
+    /** Final HDR image (scene-linear). */
+    hdr: TextureNode;
+    bloom: TextureNode | null;
+    flare: TextureNode | null;
+    /** Eye adaptation multiplier. */
+    eye: FloatNode | null;
+};
 
-    constructor(exposure: THREE.IUniform, frame: THREE.IUniform<number>) {
-        this.material = fullscreenMaterial({
-            name: 'WaterwaysOutput',
-            uniforms: {
-                tDiffuse: { value: null },
-                tBloom: { value: null },
-                tFlare: { value: null },
-                tExposure: exposure,
-                tLut: { value: null },
-                toneMappingExposure: { value: 1 },
-                uWhiteBalance: { value: new THREE.Vector3(1, 1, 1) },
-                uLutIntensity: { value: 1 },
-                saturation: { value: 1 },
-                contrast: { value: 1 },
-                vignette: { value: 0 },
-                sharpen: { value: 0 },
-                uAberration: { value: 0 },
-                uGrain: { value: 0 },
-                uLetterbox: { value: new THREE.Vector2() },
-                texel: { value: new THREE.Vector2(1, 1) },
-                aspect: { value: 1 },
-                uFrame: frame,
-            },
-            defines: {
-                AUTO_EXPOSURE: 0,
-                BLOOM: 0,
-                FLARE: 0,
-                LUT: 0,
-                GRADE: 0,
-                SHARPEN: 0,
-                ABERRATION: 0,
-                GRAIN: 0,
-                LETTERBOX: 0,
-            },
-            fragmentShader: OutputShader,
-        });
+/**
+ * The display transform, split in two so anti-aliasing / spatial upscaling can sit in between:
+ *
+ * - `display`: scene-referred chromatic aberration (radial, per channel lookups), + bloom, + lens flare,
+ *   × eye adaptation × white balance → tone mapping (renderer.toneMapping; base exposure =
+ *   renderer.toneMappingExposure × 2^EV compensation) → sRGB. Display-referred: CAS-like sharpening
+ *   (neighbours are tone mapped too), 3D LUT grade blended by intensity, saturation / contrast, vignette.
+ * - `finish` (at the output resolution): luma-weighted animated film grain, ±½ LSB dither against
+ *   banding in the 8-bit output, letterbox bars.
+ */
+export class OutputStage {
+    readonly exposure = uniform(1);
+    readonly whiteBalance = uniform(new THREE.Vector3(1, 1, 1));
+    readonly lutIntensity = uniform(1);
+    readonly saturation = uniform(1);
+    readonly contrast = uniform(1);
+    readonly vignette = uniform(0);
+    readonly sharpen = uniform(0);
+    readonly aberration = uniform(0);
+    readonly grain = uniform(0);
+    /** Letterbox bar sizes in UV (x: pillarbox, y: letterbox). */
+    readonly letterbox = uniform(new THREE.Vector2());
+    /** Canvas aspect ratio (width / height). */
+    readonly aspect = uniform(1);
+    readonly frame = uniform(0);
+    readonly lut = texture(colorGradeLut('neutral'));
+
+    display(
+        inputs: OutputInputs,
+        features: OutputFeatures,
+        mapping: THREE.ToneMapping,
+        srgb: boolean,
+    ): Vec4Node {
+        const { hdr, bloom, flare, eye } = inputs;
+
+        const sceneAt = (p: Vec2Node): Vec3Node => {
+            let c: Vec3Node;
+
+            if (features.aberration) {
+                // Lateral chromatic aberration grows towards the edges (r pushed out, b pulled in).
+                const d = p.sub(0.5);
+                const da = d.mul(vec2(this.aspect, 1));
+                const o = d.mul(da.dot(da)).mul(this.aberration.mul(0.014));
+                const split = (t: TextureNode) =>
+                    vec3(
+                        t.sample(p.sub(o)).r,
+                        t.sample(p).g,
+                        t.sample(p.add(o)).b,
+                    );
+                c = split(hdr);
+
+                if (bloom) {
+                    c = c.add(split(bloom));
+                }
+            } else {
+                c = hdr.sample(p).rgb;
+
+                if (bloom) {
+                    c = c.add(bloom.sample(p).rgb);
+                }
+            }
+
+            if (flare) {
+                c = c.add(flare.sample(p).rgb);
+            }
+
+            return c;
+        };
+
+        const scale = eye
+            ? this.whiteBalance.mul(eye)
+            : (this.whiteBalance as unknown as Vec3Node);
+
+        const toDisplay = (c: Vec3Node): Vec3Node => {
+            const mapped = toneMapping(
+                mapping,
+                this.exposure,
+                vec4(c.max(0).mul(scale), 1),
+            ) as unknown as Vec4Node;
+            const encoded = srgb
+                ? (sRGBTransferOETF(mapped.rgb) as unknown as Vec3Node)
+                : mapped.rgb;
+
+            return encoded.clamp(0, 1);
+        };
+
+        return Fn(() => {
+            const vUv = uv();
+            const col = toDisplay(sceneAt(vUv)).toVar();
+
+            if (features.sharpen) {
+                const size = hdr.size(
+                    float(0),
+                ) as unknown as THREE.Node<'ivec2'>;
+                const texel = vec2(size).reciprocal();
+                const at = (x: number, y: number) =>
+                    toDisplay(hdr.sample(vUv.add(texel.mul(vec2(x, y)))).rgb);
+                const n = at(0, -1);
+                const s = at(0, 1);
+                const e = at(1, 0);
+                const w = at(-1, 0);
+                const lo = col.min(n.min(s).min(e.min(w)));
+                const hi = col.max(n.max(s).max(e.max(w)));
+                const blur = n.add(s).add(e).add(w).mul(0.25);
+                col.assign(
+                    col
+                        .add(col.sub(blur).mul(this.sharpen.mul(2.5)))
+                        .clamp(lo, hi),
+                );
+            }
+
+            if (features.lut) {
+                // Trilinear lookup in the slice strip: bilinear in red / green, blended between blue slices.
+                const n = LUT_SIZE;
+                const blue = col.b.mul(n - 1);
+                const b0 = blue.floor().min(n - 2);
+                const x = col.r.mul(n - 1).add(0.5);
+                const y = col.g
+                    .mul(n - 1)
+                    .add(0.5)
+                    .div(n);
+                const slice = (b: FloatNode) =>
+                    this.lut.sample(
+                        vec2(
+                            b
+                                .mul(n)
+                                .add(x)
+                                .div(n * n),
+                            y,
+                        ),
+                    ).rgb;
+                const graded = mix(slice(b0), slice(b0.add(1)), blue.sub(b0));
+                col.assign(mix(col, graded, this.lutIntensity));
+            }
+
+            if (features.grade) {
+                col.assign(mix(vec3(luma(col)), col, this.saturation));
+                col.assign(col.sub(0.5).mul(this.contrast).add(0.5));
+                const vd = vUv.sub(0.5).mul(vec2(this.aspect, 1));
+                const r = vd
+                    .length()
+                    .div(vec2(this.aspect, 1).mul(0.5).length());
+                col.mulAssign(
+                    this.vignette
+                        .mul(0.75)
+                        .mul(r.smoothstep(0.25, 1))
+                        .oneMinus(),
+                );
+            }
+
+            return vec4(col, 1);
+        })() as Vec4Node;
     }
 
-    /** Updates uniforms / defines for this frame. `width` / `height`: render resolution (for texel). */
-    update(
-        renderer: THREE.WebGLRenderer,
-        input: THREE.Texture,
-        p: OutputParams,
-        width: number,
-        height: number,
-        canvasAspect: number,
-    ): void {
-        const m = this.material;
-        const u = m.uniforms;
+    finish(input: Vec4Node, features: OutputFeatures): Vec4Node {
+        return Fn(() => {
+            const col = input.rgb.toVar();
+            const px = screenCoordinate.xy;
 
-        if (
-            this.toneMapping !== renderer.toneMapping ||
-            this.colorSpace !== renderer.outputColorSpace
-        ) {
-            this.toneMapping = renderer.toneMapping;
-            this.colorSpace = renderer.outputColorSpace;
-            const d = m.defines;
-
-            for (const key of [
-                'LINEAR_TONE_MAPPING',
-                'REINHARD_TONE_MAPPING',
-                'CINEON_TONE_MAPPING',
-                'ACES_FILMIC_TONE_MAPPING',
-                'AGX_TONE_MAPPING',
-                'NEUTRAL_TONE_MAPPING',
-                'SRGB_TRANSFER',
-            ]) {
-                delete d[key];
+            if (features.grain) {
+                // Monochrome, animated; strongest in the mid-tones like film.
+                const gl = luma(col).clamp(0, 1);
+                const g = hash(
+                    px.add(this.frame.mul(0.618034).fract().mul(1000)),
+                )
+                    .add(
+                        hash(
+                            px
+                                .mul(1.37)
+                                .add(
+                                    this.frame.mul(0.414214).fract().mul(1000),
+                                ),
+                        ),
+                    )
+                    .sub(1);
+                col.addAssign(
+                    g
+                        .mul(this.grain.mul(0.09))
+                        .mul(gl.mul(gl.oneMinus()).mul(3).add(0.25)),
+                );
             }
 
-            const mapping: Partial<Record<THREE.ToneMapping, string>> = {
-                [THREE.LinearToneMapping]: 'LINEAR_TONE_MAPPING',
-                [THREE.ReinhardToneMapping]: 'REINHARD_TONE_MAPPING',
-                [THREE.CineonToneMapping]: 'CINEON_TONE_MAPPING',
-                [THREE.ACESFilmicToneMapping]: 'ACES_FILMIC_TONE_MAPPING',
-                [THREE.AgXToneMapping]: 'AGX_TONE_MAPPING',
-                [THREE.NeutralToneMapping]: 'NEUTRAL_TONE_MAPPING',
-            };
-            const define = mapping[renderer.toneMapping];
+            // Dither to break up 8-bit banding in skies and fog.
+            col.addAssign(
+                hash(px.add(this.frame.mul(0.1).fract().mul(97)))
+                    .sub(0.5)
+                    .div(255),
+            );
 
-            if (define) {
-                d[define] = '';
+            if (features.letterbox) {
+                const p = uv();
+                const bars = this.letterbox;
+                const outside = p.y
+                    .lessThan(bars.y)
+                    .or(p.y.greaterThan(bars.y.oneMinus()))
+                    .or(p.x.lessThan(bars.x))
+                    .or(p.x.greaterThan(bars.x.oneMinus()));
+                col.assign(outside.select(vec3(0), col));
             }
 
-            if (
-                THREE.ColorManagement.getTransfer(renderer.outputColorSpace) ===
-                THREE.SRGBTransfer
-            ) {
-                d.SRGB_TRANSFER = '';
-            }
+            return vec4(col.clamp(0, 1), 1);
+        })() as Vec4Node;
+    }
 
-            m.needsUpdate = true;
-        }
+    /** Letterbox bars for a target aspect ratio (0 = off) on a canvas of `canvasAspect`. */
+    setLetterbox(target: number, canvasAspect: number): boolean {
+        const bars = this.letterbox.value;
 
-        u.tDiffuse.value = input;
-        u.tBloom.value = p.bloom;
-        u.tFlare.value = p.flare;
-        u.tLut.value = p.lut;
-        u.toneMappingExposure.value = p.exposure;
-        (u.uWhiteBalance.value as THREE.Vector3).copy(p.whiteBalance);
-        u.uLutIntensity.value = p.lutIntensity;
-        u.saturation.value = p.saturation;
-        u.contrast.value = p.contrast;
-        u.vignette.value = p.vignette;
-        u.sharpen.value = p.sharpen;
-        u.uAberration.value = p.aberration;
-        u.uGrain.value = p.grain;
-        (u.texel.value as THREE.Vector2).set(1 / width, 1 / height);
-        u.aspect.value = canvasAspect;
-
-        const bars = u.uLetterbox.value as THREE.Vector2;
-
-        if (p.letterbox > 0.1) {
+        if (target > 0.1) {
             bars.set(
-                Math.max(0, (1 - p.letterbox / canvasAspect) / 2),
-                Math.max(0, (1 - canvasAspect / p.letterbox) / 2),
+                Math.max(0, (1 - target / canvasAspect) / 2),
+                Math.max(0, (1 - canvasAspect / target) / 2),
             );
         } else {
             bars.set(0, 0);
         }
 
-        setDefine(m, 'AUTO_EXPOSURE', p.autoExposure ? 1 : 0);
-        setDefine(m, 'BLOOM', p.bloom ? 1 : 0);
-        setDefine(m, 'FLARE', p.flare ? 1 : 0);
-        setDefine(m, 'LUT', p.lut && p.lutIntensity > 0.001 ? 1 : 0);
-        setDefine(
-            m,
-            'GRADE',
-            Math.abs(p.saturation - 1) > 0.001 ||
-                Math.abs(p.contrast - 1) > 0.001 ||
-                p.vignette > 0.001
-                ? 1
-                : 0,
-        );
-        setDefine(m, 'SHARPEN', p.sharpen > 0.001 ? 1 : 0);
-        setDefine(m, 'ABERRATION', p.aberration > 0.001 ? 1 : 0);
-        setDefine(m, 'GRAIN', p.grain > 0.001 ? 1 : 0);
-        setDefine(m, 'LETTERBOX', bars.x > 0.0005 || bars.y > 0.0005 ? 1 : 0);
-    }
-
-    dispose(): void {
-        this.material.dispose();
+        return bars.x > 0.0005 || bars.y > 0.0005;
     }
 }

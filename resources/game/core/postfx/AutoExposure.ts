@@ -1,11 +1,36 @@
-import * as THREE from 'three';
-import type { Blitter } from './common';
-import { colorTarget, fullscreenMaterial } from './common';
+import * as THREE from 'three/webgpu';
+import {
+    array,
+    atomicAdd,
+    atomicLoad,
+    atomicStore,
+    exp2,
+    float,
+    Fn,
+    If,
+    instanceIndex,
+    int,
+    ivec2,
+    Loop,
+    mix,
+    storage,
+    uint,
+    uniform,
+    uv,
+    vec2,
+    vec4,
+} from 'three/tsl';
+import { isWebGpu } from '../renderer';
+import type { FloatNode, TextureNode, Vec2Node, Vec4Node } from './common';
+import { luma, ScreenPass } from './common';
 
-/** Side of the log-luminance target; mip 3 (16×16 = 256 texels) feeds the histogram. */
-const LUM_SIZE = 128;
-const HISTOGRAM_MIP = 3;
-const HISTOGRAM_SIDE = LUM_SIZE >> HISTOGRAM_MIP;
+/** Metering grid (samples per axis) and histogram. */
+const GRID = 64;
+const BINS = 64;
+const LOG_MIN = -16;
+const LOG_MAX = 8;
+/** Side of the reduced log-luminance image the WebGL 2 histogram is built from. */
+const REDUCED = 16;
 
 /**
  * Metering key: log2 of (scene luminance × base exposure) the image is calibrated for. The Atmosphere's
@@ -13,200 +38,298 @@ const HISTOGRAM_SIDE = LUM_SIZE >> HISTOGRAM_MIP;
  */
 const METER_KEY = -2.95;
 
-const LuminanceShader = /* glsl */ `
-    uniform sampler2D tColor;
-    uniform vec2 uSourceTexel;
-    varying vec2 vUv;
-
-    float lum(vec3 c) {
-        float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+/** Mean log2 luminance of four bilinear taps spread over one metering cell. */
+function cellLogLuminance(
+    input: TextureNode,
+    cell: Vec2Node,
+    level: boolean,
+): FloatNode {
+    const o = 0.25 / GRID;
+    const tap = (x: number, y: number) => {
+        const s = input.sample(cell.add(vec2(x * o, y * o)));
         // NaN / Inf / negative guard (one bad pixel must not poison the exposure).
-        return l > 0.0 && l < 65000.0 ? l : 0.0;
-    }
+        const l = luma((level ? s.level(float(0)) : s).rgb.clamp(0, 65000));
 
-    void main() {
-        // Four bilinear taps spread over this texel's footprint (16 source texels).
-        vec2 o = vec2(0.25) / ${LUM_SIZE.toFixed(1)};
-        float l = log2(lum(texture2D(tColor, vUv + vec2(-o.x, -o.y)).rgb) + 1e-5)
-            + log2(lum(texture2D(tColor, vUv + vec2(o.x, -o.y)).rgb) + 1e-5)
-            + log2(lum(texture2D(tColor, vUv + vec2(-o.x, o.y)).rgb) + 1e-5)
-            + log2(lum(texture2D(tColor, vUv + vec2(o.x, o.y)).rgb) + 1e-5);
-        gl_FragColor = vec4(l * 0.25, 0.0, 0.0, 1.0);
-    }
-`;
+        return l.add(1e-5).log2();
+    };
+
+    return tap(-1, -1).add(tap(1, -1)).add(tap(-1, 1)).add(tap(1, 1)).mul(0.25);
+}
+
+/** Centre-weighted metering; the top of the frame (usually sky) counts a little less. */
+function meterWeight(cell: Vec2Node): FloatNode {
+    const p = cell.sub(0.5);
+    const centre = mix(1, 3, p.dot(p).mul(3).clamp(0, 1).oneMinus());
+
+    return centre.mul(p.y.lessThan(-0.25).select(0.75, 1));
+}
+
+function histogramBin(logLuminance: FloatNode) {
+    return int(
+        logLuminance
+            .sub(LOG_MIN)
+            .div(LOG_MAX - LOG_MIN)
+            .clamp(0, 0.9999)
+            .mul(BINS),
+    );
+}
+
+type Params = {
+    dt: THREE.UniformNode<'float', number>;
+    speed: THREE.UniformNode<'float', number>;
+    minEv: THREE.UniformNode<'float', number>;
+    maxEv: THREE.UniformNode<'float', number>;
+    baseEv: THREE.UniformNode<'float', number>;
+    reset: THREE.UniformNode<'float', number>;
+};
 
 /**
- * Eye adaptation, entirely on the GPU (no read-back stalls): the log-luminance target is mip-mapped
- * down to 16×16, a 1×1 pass builds a centre-weighted 64-bin histogram of those 256 samples, averages the
- * 50th-95th percentile (so small dark corners and the sun disc don't drive exposure) and eases the
- * previous frame's value towards the target (ping-pong 1×1 targets).
- *
- * Output texel: r = exposure multiplier applied on top of the base exposure (renderer.toneMappingExposure,
- * set by the Atmosphere from time of day and weather), g = its log2, b = metered log2 luminance.
+ * Averages the 50th-95th percentile of the histogram (so small dark corners and the sun disc don't drive
+ * exposure) and eases the previous exposure towards the target. Returns the new log2 exposure.
  */
-const AdaptShader = /* glsl */ `
-    #define BINS 64
-    uniform sampler2D tLum;
-    uniform sampler2D tPrevious;
-    uniform float uDt;
-    uniform float uSpeed;
-    uniform float uMinEv;
-    uniform float uMaxEv;
-    uniform float uBaseEv;
-    uniform float uReset;
-    varying vec2 vUv;
+function adapt(
+    p: Params,
+    bin: (i: THREE.Node<'int'>) => FloatNode,
+    previous: FloatNode,
+): { ev: FloatNode; metered: FloatNode } {
+    const total = float(0).toVar();
 
-    const float LOG_MIN = -16.0;
-    const float LOG_MAX = 8.0;
+    Loop(BINS, ({ i }) => {
+        total.addAssign(bin(i));
+    });
 
-    void main() {
-        float hist[BINS];
+    const lowCut = total.mul(0.5).toVar();
+    const highCut = total.mul(0.95).toVar();
+    const acc = float(0).toVar();
+    const sum = float(0).toVar();
+    const weight = float(0).toVar();
 
-        for (int i = 0; i < BINS; i++) {
-            hist[i] = 0.0;
-        }
+    Loop(BINS, ({ i }) => {
+        const h = bin(i).toVar();
+        // Portion of this bin inside the [lowCut, highCut] percentile window.
+        const inside = acc.add(h).min(highCut).sub(acc.max(lowCut)).clamp(0, h);
+        const centre = float(i)
+            .add(0.5)
+            .div(BINS)
+            .mul(LOG_MAX - LOG_MIN)
+            .add(LOG_MIN);
+        sum.addAssign(centre.mul(inside));
+        weight.addAssign(inside);
+        acc.addAssign(h);
+    });
 
-        float total = 0.0;
+    const metered = sum.div(weight.max(1e-4)).toVar();
+    // Partial adaptation (0.75): dark places should still feel darker than bright ones.
+    const target = float(METER_KEY)
+        .sub(metered.add(p.baseEv))
+        .mul(0.75)
+        .clamp(p.minEv, p.maxEv)
+        .toVar();
+    const ev = target.toVar();
 
-        for (int y = 0; y < ${HISTOGRAM_SIDE}; y++) {
-            for (int x = 0; x < ${HISTOGRAM_SIDE}; x++) {
-                float l = texelFetch(tLum, ivec2(x, y), ${HISTOGRAM_MIP}).r;
-                vec2 p = (vec2(float(x), float(y)) + 0.5) / ${HISTOGRAM_SIDE.toFixed(1)} - 0.5;
-                // Centre-weighted metering; the top of the frame (usually sky) counts a little less.
-                float w = mix(1.0, 3.0, 1.0 - clamp(dot(p, p) * 3.0, 0.0, 1.0)) * (p.y > 0.25 ? 0.75 : 1.0);
-                int bin = int(clamp((l - LOG_MIN) / (LOG_MAX - LOG_MIN), 0.0, 0.9999) * float(BINS));
-                hist[bin] += w;
-                total += w;
-            }
-        }
+    If(p.reset.lessThan(0.5).and(previous.equal(previous)), () => {
+        // Adapting to brightness (exposure going down) is faster than adapting to the dark.
+        const speed = p.speed.mul(target.lessThan(previous).select(1.6, 1));
+        ev.assign(
+            previous.add(
+                target
+                    .sub(previous)
+                    .mul(p.dt.negate().mul(speed).exp().oneMinus()),
+            ),
+        );
+    });
 
-        float lowCut = total * 0.5;
-        float highCut = total * 0.95;
-        float acc = 0.0;
-        float sum = 0.0;
-        float weight = 0.0;
+    return { ev, metered };
+}
 
-        for (int i = 0; i < BINS; i++) {
-            float h = hist[i];
-            // Portion of this bin inside the [lowCut, highCut] percentile window.
-            float inside = clamp(min(acc + h, highCut) - max(acc, lowCut), 0.0, h);
-            float center = LOG_MIN + (float(i) + 0.5) / float(BINS) * (LOG_MAX - LOG_MIN);
-            sum += center * inside;
-            weight += inside;
-            acc += h;
-        }
-
-        float metered = sum / max(weight, 1e-4);
-        // Partial adaptation (0.75): dark places should still feel darker than bright ones.
-        float target = clamp(0.75 * (${METER_KEY.toFixed(2)} - (metered + uBaseEv)), uMinEv, uMaxEv);
-        float previous = texture2D(tPrevious, vec2(0.5)).g;
-        float ev;
-
-        if (uReset > 0.5 || previous != previous) {
-            ev = target;
-        } else {
-            // Adapting to brightness (exposure going down) is faster than adapting to the dark.
-            float speed = uSpeed * (target < previous ? 1.6 : 1.0);
-            ev = previous + (target - previous) * (1.0 - exp(-uDt * speed));
-        }
-
-        gl_FragColor = vec4(exp2(ev), ev, metered, 1.0);
+/** Runs the metering compute passes once per frame, before the first draw that reads the exposure. */
+class ComputeMeter extends THREE.TempNode {
+    constructor(
+        private readonly kernels: THREE.ComputeNode[],
+        private readonly result: FloatNode,
+    ) {
+        super('float');
+        this.updateBeforeType = THREE.NodeUpdateType.FRAME;
     }
-`;
 
+    override updateBefore(frame: THREE.NodeFrame): boolean | undefined {
+        void (frame.renderer as THREE.Renderer).compute(this.kernels);
+
+        return undefined;
+    }
+
+    override setup(): THREE.Node {
+        return this.result;
+    }
+}
+
+/**
+ * Eye adaptation, entirely on the GPU (no read-back stalls): a centre-weighted 64-bin histogram of the
+ * log luminance of the final HDR image, the 50th-95th percentile mean as the metered value, and a
+ * smoothed exposure multiplier applied on top of the base exposure (renderer.toneMappingExposure, set by
+ * the Atmosphere from time of day and weather).
+ *
+ * - WebGPU: two compute passes: 64×64 metering samples binned with atomics, then one invocation that
+ *   evaluates the histogram, clears it and updates the exposure in a storage buffer.
+ * - WebGL 2: a 64×64 log-luminance image, reduced to 16×16, and a 1×1 feedback pass that builds the
+ *   histogram of those 256 values.
+ */
 export class AutoExposure {
-    private readonly lumTarget: THREE.WebGLRenderTarget;
-    private readonly adapt: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget];
-    private index = 0;
-    private readonly lumMaterial: THREE.ShaderMaterial;
-    private readonly adaptMaterial: THREE.ShaderMaterial;
+    /** Exposure multiplier node (reads the adapted value of this frame). */
+    readonly multiplier: FloatNode;
+    /** WebGL 2 fragment passes (empty on WebGPU). */
+    readonly passes: ScreenPass[] = [];
+    private readonly params: Params = {
+        dt: uniform(0),
+        speed: uniform(1),
+        minEv: uniform(-2),
+        maxEv: uniform(2),
+        baseEv: uniform(0),
+        reset: uniform(1),
+    };
     private needsReset = true;
 
-    constructor(
-        /** Shared uniform all consumers read the multiplier texture from. */
-        private readonly output: THREE.IUniform<THREE.Texture | null>,
-        private readonly blitter: Blitter,
-    ) {
-        this.lumTarget = colorTarget(LUM_SIZE, LUM_SIZE, {
-            generateMipmaps: true,
-            minFilter: THREE.LinearMipmapNearestFilter,
+    constructor(renderer: THREE.Renderer, input: TextureNode) {
+        this.multiplier = isWebGpu(renderer as THREE.WebGPURenderer)
+            ? this.buildCompute(input)
+            : this.buildFragment(input);
+    }
+
+    private buildCompute(input: TextureNode): FloatNode {
+        const p = this.params;
+        const histogram = new THREE.StorageBufferAttribute(
+            new Uint32Array(BINS),
+            1,
+        );
+        // [exposure multiplier, log2 exposure, metered log2 luminance, unused]
+        const state = new THREE.StorageBufferAttribute(
+            new Float32Array([1, 0, 0, 0]),
+            4,
+        );
+        const bins = storage(histogram, 'uint', BINS).toAtomic();
+        const stateRw = storage(state, 'vec4', 1);
+
+        const binKernel = Fn(() => {
+            const x = instanceIndex.mod(GRID);
+            const y = instanceIndex.div(GRID);
+            const cell = vec2(float(x), float(y)).add(0.5).div(GRID).toVar();
+            const l = cellLogLuminance(input, cell, true);
+            // Weights in 1/16 steps: atomics are integer.
+            const w = uint(meterWeight(cell).mul(16).round());
+            atomicAdd(bins.element(histogramBin(l)), w);
+        })().compute(GRID * GRID, [64]);
+        binKernel.name = 'Eye adaptation';
+
+        const adaptKernel = Fn(() => {
+            const previous = stateRw.element(0).y;
+            const { ev, metered } = adapt(
+                p,
+                (i) => float(atomicLoad(bins.element(i))),
+                previous,
+            );
+
+            Loop(BINS, ({ i }) => {
+                atomicStore(bins.element(i), 0);
+            });
+
+            stateRw.element(0).assign(vec4(exp2(ev), ev, metered, 0));
+        })().compute(1, [1]);
+        adaptKernel.name = 'Eye adaptation';
+
+        const read = storage(state, 'vec4', 1).toReadOnly().element(0).x;
+
+        return new ComputeMeter(
+            [binKernel, adaptKernel],
+            read,
+        ) as unknown as FloatNode;
+    }
+
+    private buildFragment(input: TextureNode): FloatNode {
+        const p = this.params;
+        const lum = new ScreenPass('Eye adaptation', { size: [GRID, GRID] });
+        lum.fragment = Fn(() => {
+            const l = cellLogLuminance(input, uv(), false);
+
+            return vec4(l, meterWeight(uv()), 0, 1);
+        })() as Vec4Node;
+
+        const lumTexture = lum.getTextureNode();
+        const reduce = new ScreenPass('Eye adaptation', {
+            size: [REDUCED, REDUCED],
+            filter: THREE.NearestFilter,
         });
-        this.adapt = [
-            colorTarget(1, 1, {
-                minFilter: THREE.NearestFilter,
-                magFilter: THREE.NearestFilter,
-            }),
-            colorTarget(1, 1, {
-                minFilter: THREE.NearestFilter,
-                magFilter: THREE.NearestFilter,
-            }),
-        ];
-        this.lumMaterial = fullscreenMaterial({
-            name: 'WaterwaysLogLuminance',
-            uniforms: {
-                tColor: { value: null },
-                uSourceTexel: { value: new THREE.Vector2() },
-            },
-            fragmentShader: LuminanceShader,
+        const block = GRID / REDUCED;
+        reduce.fragment = Fn(() => {
+            const origin = ivec2(uv().mul(REDUCED).floor()).mul(block);
+            const sum = vec4(0).toVar();
+
+            for (let y = 0; y < block; y++) {
+                for (let x = 0; x < block; x++) {
+                    sum.addAssign(lumTexture.load(origin.add(ivec2(x, y))));
+                }
+            }
+
+            return sum.div(block * block);
+        })() as Vec4Node;
+
+        const reduced = reduce.getTextureNode();
+        const exposure = new ScreenPass('Eye adaptation', {
+            size: [1, 1],
+            filter: THREE.NearestFilter,
+            type: THREE.FloatType,
+            feedback: true,
         });
-        this.adaptMaterial = fullscreenMaterial({
-            name: 'WaterwaysEyeAdaptation',
-            uniforms: {
-                tLum: { value: this.lumTarget.texture },
-                tPrevious: { value: null },
-                uDt: { value: 0 },
-                uSpeed: { value: 1 },
-                uMinEv: { value: -2 },
-                uMaxEv: { value: 2 },
-                uBaseEv: { value: 0 },
-                uReset: { value: 1 },
-            },
-            fragmentShader: AdaptShader,
-        });
+        exposure.fragment = Fn(() => {
+            const hist = array('float', BINS).toVar() as unknown as {
+                element(i: THREE.Node): FloatNode;
+            };
+
+            Loop(BINS, ({ i }) => {
+                hist.element(i).assign(0);
+            });
+
+            Loop(REDUCED * REDUCED, ({ i }) => {
+                const texel = reduced.load(
+                    ivec2(i.mod(REDUCED), i.div(REDUCED)),
+                );
+                hist.element(histogramBin(texel.x)).addAssign(texel.y);
+            });
+
+            const previous = exposure.previous.sample(vec2(0.5)).y;
+            const { ev, metered } = adapt(p, (i) => hist.element(i), previous);
+
+            return vec4(exp2(ev), ev, metered, 1);
+        })() as Vec4Node;
+
+        this.passes.push(lum, reduce, exposure);
+
+        return exposure.getTextureNode().sample(vec2(0.5)).x as FloatNode;
     }
 
     reset(): void {
         this.needsReset = true;
     }
 
-    /** Meters `input` (HDR, before exposure) and updates the shared multiplier texture. */
     update(
-        input: THREE.Texture,
         dt: number,
         baseExposure: number,
         minEv: number,
         maxEv: number,
         speed: number,
     ): void {
-        this.lumMaterial.uniforms.tColor.value = input;
-        this.blitter.draw(this.lumMaterial, this.lumTarget);
-
-        const read = this.adapt[this.index];
-        const write = this.adapt[1 - this.index];
-        const u = this.adaptMaterial.uniforms;
-        u.tPrevious.value = read.texture;
-        u.uDt.value = dt;
-        u.uSpeed.value = Math.max(0.01, speed);
-        u.uMinEv.value = Math.min(minEv, maxEv);
-        u.uMaxEv.value = Math.max(minEv, maxEv);
-        u.uBaseEv.value = Math.log2(Math.max(1e-4, baseExposure));
-        u.uReset.value = this.needsReset ? 1 : 0;
-        this.blitter.draw(this.adaptMaterial, write);
-        this.index = 1 - this.index;
+        const p = this.params;
+        p.dt.value = dt;
+        p.speed.value = Math.max(0.01, speed);
+        p.minEv.value = Math.min(minEv, maxEv);
+        p.maxEv.value = Math.max(minEv, maxEv);
+        p.baseEv.value = Math.log2(Math.max(1e-4, baseExposure));
+        p.reset.value = this.needsReset ? 1 : 0;
         this.needsReset = false;
-        this.output.value = write.texture;
-    }
-
-    /** The current adaptation texture (for debugging / read-back in tests). */
-    get target(): THREE.WebGLRenderTarget {
-        return this.adapt[1 - this.index];
     }
 
     dispose(): void {
-        this.lumTarget.dispose();
-        this.adapt[0].dispose();
-        this.adapt[1].dispose();
-        this.lumMaterial.dispose();
-        this.adaptMaterial.dispose();
+        for (const pass of this.passes) {
+            pass.dispose();
+        }
     }
 }

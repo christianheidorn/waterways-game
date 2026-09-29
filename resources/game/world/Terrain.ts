@@ -203,6 +203,7 @@ export class Terrain {
             if (index !== node.lod) {
                 node.lod = index;
                 node.geometry.setIndex(this.lodIndices[index]);
+                node.mesh.userData.lodStride = node.stride << index;
             }
 
             this.hideBelow(node);
@@ -248,6 +249,8 @@ export class Terrain {
         mesh.receiveShadow = true;
         mesh.castShadow = true;
         mesh.matrixAutoUpdate = false;
+        // Height samples between drawn vertices (the wireframe view draws the triangles from it).
+        mesh.userData.lodStride = stride;
         // Chunks are drawn until the first updateLod() picks nodes.
         mesh.visible = level === 0;
         mesh.name =

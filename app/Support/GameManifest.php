@@ -2,6 +2,7 @@
 
 namespace App\Support;
 
+use App\Models\Biome;
 use App\Models\FoliageType;
 use App\Models\Map;
 use App\Services\Terrain\TerrainStorage;
@@ -31,6 +32,7 @@ final class GameManifest
             'environment' => $map->resolvedEnvironment(),
             'settings' => $this->settings->all(),
             'layers' => $map->layers->map->toGameArray()->values()->all(),
+            'biomes' => Biome::query()->orderBy('name')->get()->map->toStudioArray()->values()->all(),
             'foliage_types' => FoliageType::query()->with('asset')->orderBy('name')->get()->map->toGameArray()->values()->all(),
             'character' => $this->character->get()?->toGameArray(),
             'assets' => [
@@ -50,6 +52,7 @@ final class GameManifest
                 'save_thumbnail' => route('api.maps.thumbnail.store', $map),
                 'update_foliage_type' => url('/api/foliage-types'),
                 'update_layers' => url("/api/maps/{$map->slug}/layers"),
+                'biomes' => url('/api/biomes'),
             ],
         ];
     }

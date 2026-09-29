@@ -41,6 +41,7 @@ import {
     clusterScale,
     expectedTileCount,
     SALT,
+    spreadTileCount,
     tileGrid,
     tilePainted,
     typeSeed,
@@ -325,6 +326,24 @@ export class GroundCoverGenerator implements GpuFiller {
         return Math.min(
             grid.columns * grid.rows,
             Math.ceil(expected + 5 * Math.sqrt(expected) + CAPACITY_SLACK),
+        );
+    }
+
+    /** Spreads a tile's instance count over the tile by its paint (see spreadTileCount). */
+    spread(
+        cell: GpuCell,
+        count: number,
+        add: (x: number, z: number, n: number) => void,
+    ): void {
+        spreadTileCount(
+            this.type,
+            this.size,
+            cell.cx,
+            cell.cz,
+            this.sources,
+            this.field.ctx,
+            count,
+            add,
         );
     }
 

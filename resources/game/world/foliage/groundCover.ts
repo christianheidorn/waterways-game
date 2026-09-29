@@ -256,25 +256,21 @@ export function tileGrid(
 }
 
 /**
- * Expected number of instances of a tile before the placement rules (which only remove more): its
- * area in candidates × the mean keep probability, integrated over the splat samples covering it
- * (trapezoid rule, exact for the bilinear paint weights of a tile on sample lines), with clustering
- * taken at the samples.
+ * Keep probability of a tile's candidates at every splat sample covering it (clustering taken at the
+ * samples), with its trapezoid weight: integrating the bilinear paint weights over a tile on sample
+ * lines this way is exact. Placement rules are left out (they only remove more). Returns the total
+ * weight.
  */
-export function expectedTileCount(
+function forTileSamples(
     type: FoliageType,
+    grid: TileGrid,
     size: number,
     cx: number,
     cz: number,
     sources: GroundCoverSource[],
     ctx: GroundCoverContext,
+    visit: (x: number, z: number, weighted: number) => void,
 ): number {
-    const grid = tileGrid(type, sources, size, cx, cz);
-
-    if (!grid) {
-        return 0;
-    }
-
     const { heights, splat } = ctx;
     const res = splat.resolution;
     const a = heights.toGrid(cx * size, cz * size);
@@ -289,20 +285,14 @@ export function expectedTileCount(
     const edge = (i: number, first: number, last: number) =>
         first < last && (i === first || i === last) ? 0.5 : 1;
     const d = splat.data;
-    let sum = 0;
     let total = 0;
 
     for (let row = z0; row <= z1; row++) {
         for (let col = x0; col <= x1; col++) {
             const w = edge(row, z0, z1) * edge(col, x0, x1);
-            const noise = clustered
-                ? clusterNoise(
-                      seed,
-                      heights.colToX(col),
-                      heights.rowToZ(row),
-                      groves,
-                  )
-                : 0.5;
+            const x = heights.colToX(col);
+            const z = heights.rowToZ(row);
+            const noise = clustered ? clusterNoise(seed, x, z, groves) : 0.5;
             let weight = 0;
 
             for (const s of sources) {
@@ -312,12 +302,74 @@ export function expectedTileCount(
                     clusterFactor(noise, s.clustering);
             }
 
-            sum += w * Math.min(1, weight / grid.peak);
+            visit(x, z, w * Math.min(1, weight / grid.peak));
             total += w;
         }
     }
 
+    return total;
+}
+
+/** Expected number of instances of a tile before the placement rules (which only remove more). */
+export function expectedTileCount(
+    type: FoliageType,
+    size: number,
+    cx: number,
+    cz: number,
+    sources: GroundCoverSource[],
+    ctx: GroundCoverContext,
+): number {
+    const grid = tileGrid(type, sources, size, cx, cz);
+
+    if (!grid) {
+        return 0;
+    }
+
+    let sum = 0;
+    const total = forTileSamples(
+        type,
+        grid,
+        size,
+        cx,
+        cz,
+        sources,
+        ctx,
+        (_x, _z, p) => (sum += p),
+    );
+
     return total > 0 ? ((size / grid.cell) ** 2 * sum) / total : 0;
+}
+
+/**
+ * Spreads `count` instances of a tile over its splat samples in proportion to their keep probability:
+ * where its plants are, without having them (the placement rules are left out).
+ */
+export function spreadTileCount(
+    type: FoliageType,
+    size: number,
+    cx: number,
+    cz: number,
+    sources: GroundCoverSource[],
+    ctx: GroundCoverContext,
+    count: number,
+    add: (x: number, z: number, n: number) => void,
+): void {
+    const grid = tileGrid(type, sources, size, cx, cz);
+
+    if (!grid || count <= 0) {
+        return;
+    }
+
+    const samples: number[] = [];
+    let sum = 0;
+    forTileSamples(type, grid, size, cx, cz, sources, ctx, (x, z, p) => {
+        samples.push(x, z, p);
+        sum += p;
+    });
+
+    for (let i = 0; sum > 0 && i < samples.length; i += 3) {
+        add(samples[i], samples[i + 1], (count * samples[i + 2]) / sum);
+    }
 }
 
 /**

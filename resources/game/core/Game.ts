@@ -2,6 +2,7 @@ import * as THREE from 'three/webgpu';
 import { Editor } from '../editor/Editor';
 import type { DirtyChannel } from '../editor/Editor';
 import { EditorPanel } from '../editor/ui/EditorPanel';
+import { ViewModes } from '../editor/ViewModes';
 import { Player } from '../player/Player';
 import { ThirdPersonCamera } from '../player/ThirdPersonCamera';
 import type {
@@ -16,6 +17,7 @@ import type {
     GameManifest,
     GameSettings,
     GraphicsSettings,
+    BiomeSummary,
     GroundCoverEntry,
     TerrainLayer,
 } from '../shared/types';
@@ -32,6 +34,7 @@ import {
 } from '../ui/GraphicsMenu';
 import { PhotoMode } from '../ui/PhotoMode';
 import { Hud, LoadingScreen } from '../ui/Hud';
+import { ViewModeMenu } from '../ui/ViewModeMenu';
 import { Atmosphere } from '../world/Atmosphere';
 import { Foliage, placementAllowed } from '../world/Foliage';
 import { Heightfield } from '../world/Heightfield';
@@ -106,6 +109,7 @@ export class Game {
     private playerCamera!: ThirdPersonCamera;
     private editor!: Editor;
     private panel!: EditorPanel;
+    private viewModes!: ViewModes;
     private mode: GameMode;
     private timer = new THREE.Timer();
     private dirty = new Set<DirtyChannel>();
@@ -352,7 +356,8 @@ export class Game {
         this.scene.add(water.group);
 
         this.progress(0.9, 'Growing foliage');
-        const foliage = new Foliage();
+        // Grass etc. blend into the terrain colour at their roots.
+        const foliage = new Foliage((xz) => material.groundColor(xz));
         // WebGPU: GPU-driven culling + indirect draws (culled in renderFrame).
         foliage.setRenderer(this.renderer);
         foliage.setTypes(m.foliage_types);
@@ -434,12 +439,25 @@ export class Game {
         );
         this.scene.add(this.player.object);
         this.playerCamera = new ThirdPersonCamera(this.camera, settings.player);
+        // The character moves on its own: only the live near shadow cascade draws it. Edited
+        // casters refresh the cached far cascade.
+        this.atmosphere.sunShadows.addLiveCaster(this.player.object);
+        this.world.foliage.onShadowCastersChanged = () =>
+            this.atmosphere.invalidateShadows();
 
         this.hud = new Hud(this.container, this.config.embedded, {
             setMode: (mode) => this.setMode(mode),
             save: () => void this.save(),
             undo: () => this.editor.undo(),
             redo: () => this.editor.redo(),
+        });
+
+        this.viewModes = new ViewModes({
+            material: this.world.material,
+            foliage: this.world.foliage,
+            postFx: this.postFx,
+            heights: this.world.heights,
+            layers: () => this.manifest.layers,
         });
 
         this.editor = new Editor(
@@ -453,7 +471,13 @@ export class Game {
             this.input,
             this.scene,
             {
-                markDirty: (channel) => this.markDirty(channel),
+                markDirty: (channel) => {
+                    this.markDirty(channel);
+
+                    if (channel === 'heightmap') {
+                        this.atmosphere.invalidateShadows();
+                    }
+                },
                 onHistory: (canUndo, canRedo) => {
                     this.hud.setHistory(canUndo, canRedo);
                     this.bridge.send({ type: 'history', canUndo, canRedo });
@@ -467,6 +491,7 @@ export class Game {
                 requestPlay: (fromCamera) =>
                     this.setMode('play', false, fromCamera),
                 requestSave: () => void this.save(),
+                cycleViewMode: (step) => this.viewModes.cycle(step),
                 isPointerOverUi: () => this.isPointerOverUi(),
             },
             settings.editor,
@@ -491,6 +516,9 @@ export class Game {
             updateFoliageType: (id, patch) => this.updateFoliageType(id, patch),
             updateGroundCover: (id, entries) =>
                 this.updateGroundCover(id, entries),
+            biomes: () => this.manifest.biomes ?? [],
+            applyBiome: (layerId, biomeId) => this.applyBiome(layerId, biomeId),
+            saveBiome: (layerId, name) => this.saveBiome(layerId, name),
         });
         this.hud.panelSlot.append(this.panel.el);
         this.graphicsMenu = new GraphicsMenu(
@@ -507,6 +535,12 @@ export class Game {
             },
             this.config.embedded,
         );
+        const viewModeMenu = new ViewModeMenu(
+            this.hud.el,
+            this.viewModes,
+            this.config.embedded,
+        );
+        this.viewModes.onChange = () => viewModeMenu.sync();
         this.photoMode = new PhotoMode(this.hud.el, {
             environment: () => this.manifest.environment,
             previewEnvironment: (patch) =>
@@ -644,6 +678,7 @@ export class Game {
             this.camera.near = 0.5;
         }
 
+        this.viewModes.setSuspended(mode === 'play');
         this.camera.updateProjectionMatrix();
         this.escapeArmed = false;
         this.hud.setMode(mode, this.pointerLocked);
@@ -698,6 +733,7 @@ export class Game {
             this.updatePlay(dt);
         } else {
             this.editor.update(dt);
+            this.viewModes.update(dt);
         }
 
         const focus =
@@ -1172,6 +1208,73 @@ export class Game {
         );
     }
 
+    /** Applies a library biome to a terrain layer (look + ground cover), live. */
+    private async applyBiome(layerId: number, biomeId: number): Promise<void> {
+        const base = this.manifest.endpoints.update_layers;
+
+        if (!base) {
+            return;
+        }
+
+        try {
+            // Pending ground cover edits of this layer would overwrite the biome's.
+            window.clearTimeout(this.coverSaveTimer);
+            await this.flushCoverPatches();
+            const saved = await this.api.postJson<TerrainLayer>(
+                `${base}/${layerId}/biome`,
+                { biome_id: biomeId },
+            );
+            this.setLayers(
+                this.manifest.layers.map((l) => (l.id === layerId ? saved : l)),
+            );
+            this.bridge.send({ type: 'terrainLayerSaved', layer: saved });
+            this.hud.flash(`Layer ${saved.slot + 1} is now ${saved.name}`);
+        } catch (error) {
+            this.hud.flash(
+                `Could not apply the biome: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+    }
+
+    /** Saves a terrain layer's look and ground cover as a new library biome. */
+    private async saveBiome(layerId: number, name: string): Promise<boolean> {
+        const url = this.manifest.endpoints.biomes;
+
+        if (!url) {
+            return false;
+        }
+
+        try {
+            window.clearTimeout(this.coverSaveTimer);
+            await this.flushCoverPatches();
+            const biome = await this.api.postJson<BiomeSummary>(url, {
+                layer_id: layerId,
+                name,
+            });
+            this.manifest.biomes = [
+                ...(this.manifest.biomes ?? []),
+                biome,
+            ].sort((a, b) => a.name.localeCompare(b.name));
+            this.hud.flash(`Saved ${biome.name} to the biome library`);
+
+            return true;
+        } catch (error) {
+            this.hud.flash(
+                `Could not save the biome: ${error instanceof Error ? error.message : String(error)}`,
+            );
+
+            return false;
+        }
+    }
+
+    /** New terrain layers everywhere they are used (terrain shading, ground cover, editor). */
+    private setLayers(layers: TerrainLayer[]): void {
+        this.manifest.layers = layers;
+        this.world.material.setLayers(layers);
+        this.world.foliage.setGroundCover(layers);
+        this.editor.setLayers(layers);
+    }
+
     private async flushCoverPatches(): Promise<void> {
         const base = this.manifest.endpoints.update_layers;
 
@@ -1244,6 +1347,7 @@ export class Game {
         const g = normalizeGraphics(input);
         this.manifest.settings.graphics = g;
         this.atmosphere.setShadowQuality(g.shadow_quality, g.shadow_distance);
+        this.world.foliage.setShadowCascade(this.atmosphere.sunShadows.cascade);
         this.weather?.setQuality(g);
         this.world.terrain.setShadows(
             g.shadow_quality === 'high' || g.shadow_quality === 'ultra',
@@ -1352,6 +1456,10 @@ export class Game {
     private markDirty(channel: DirtyChannel): void {
         const wasClean = this.dirty.size === 0;
         this.dirty.add(channel);
+
+        if (channel === 'heightmap') {
+            this.viewModes.invalidateHeights();
+        }
 
         if (wasClean) {
             this.hud.setSaveState('dirty');
@@ -1640,10 +1748,7 @@ export class Game {
                 break;
             }
             case 'updateLayers':
-                this.manifest.layers = message.layers;
-                this.world.material.setLayers(message.layers);
-                this.world.foliage.setGroundCover(message.layers);
-                this.editor.setLayers(message.layers);
+                this.setLayers(message.layers);
                 break;
             case 'updateFoliageTypes':
                 this.manifest.foliage_types = message.foliageTypes;

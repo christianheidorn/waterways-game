@@ -261,6 +261,18 @@ export type TerrainLayer = {
     ground_cover?: GroundCoverEntry[];
 };
 
+/** A biome of the library (App\\Models\\Biome::toStudioArray). */
+export type BiomeSummary = {
+    id: number;
+    name: string;
+    description: string | null;
+    starter: boolean;
+    color: string;
+    color_secondary: string;
+    material: { id: number; name: string; thumbnail_url: string | null } | null;
+    ground_cover: (Required<GroundCoverEntry> & { name: string | null })[];
+};
+
 export type GroundCoverEntry = {
     foliage_type_id: number;
     /** Multiplier on the type's density at full paint weight (0-4). */
@@ -384,6 +396,8 @@ export type GameManifest = {
     environment: EnvironmentSettings;
     settings: GameSettings;
     layers: TerrainLayer[];
+    /** The biome library (reusable layer look + ground cover). */
+    biomes?: BiomeSummary[];
     foliage_types: FoliageType[];
     /** The player character from the studio library (settings.player.character_id), if any. */
     character?: CharacterRef | null;
@@ -399,6 +413,8 @@ export type GameManifest = {
         update_foliage_type?: string;
         /** PATCH a terrain layer's ground cover: `${update_layers}/{id}/ground-cover`. */
         update_layers?: string;
+        /** POST a new biome from a layer ({layer_id, name}); apply: `${update_layers}/{id}/biome`. */
+        biomes?: string;
     };
 };
 

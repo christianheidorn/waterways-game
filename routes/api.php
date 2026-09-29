@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\AiController;
+use App\Http\Controllers\Api\BiomeApiController;
 use App\Http\Controllers\Api\FoliageAiController;
 use App\Http\Controllers\Api\FoliageAssetApiController;
 use App\Http\Controllers\Api\FoliageTypeApiController;
@@ -16,6 +17,7 @@ Route::prefix('maps/{map}')->name('api.maps.')->group(function () {
     Route::get('assets/{asset}', [MapDataController::class, 'show'])->name('assets.show');
     Route::put('assets/{asset}', [MapDataController::class, 'update'])->name('assets.update');
     Route::patch('meta', [MapDataController::class, 'updateMeta'])->name('meta.update');
+    Route::post('layers/{layer}/biome', [BiomeApiController::class, 'apply'])->name('layers.biome');
     Route::patch('layers/{layer}/ground-cover', [TerrainLayerApiController::class, 'groundCover'])->name('layers.ground-cover');
     Route::post('thumbnail', [MapDataController::class, 'storeThumbnail'])->name('thumbnail.store');
 
@@ -23,6 +25,8 @@ Route::prefix('maps/{map}')->name('api.maps.')->group(function () {
     Route::post('ai/review', [MapAiController::class, 'review'])->name('ai.review');
     Route::post('ai/apply-changes', [MapAiController::class, 'applyChanges'])->name('ai.apply-changes');
 });
+
+Route::post('biomes', [BiomeApiController::class, 'store'])->name('api.biomes.store');
 
 Route::get('materials/browse/{source}', [MaterialApiController::class, 'browse'])->name('api.materials.browse');
 Route::get('materials/{material}', [MaterialApiController::class, 'show'])->name('api.materials.show');

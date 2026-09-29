@@ -19,7 +19,11 @@ import {
 } from 'lucide';
 import type { IconNode } from 'lucide';
 import type { EditorToolGroup } from '../../shared/protocol';
-import type { FoliageType, GroundCoverEntry } from '../../shared/types';
+import type {
+    BiomeSummary,
+    FoliageType,
+    GroundCoverEntry,
+} from '../../shared/types';
 import {
     button,
     h,
@@ -187,6 +191,12 @@ export class EditorPanel {
                 layerId: number,
                 entries: GroundCoverEntry[],
             ) => void;
+            /** The biome library. */
+            biomes: () => BiomeSummary[];
+            /** Apply a biome to a layer (look + ground cover); resolves once applied. */
+            applyBiome: (layerId: number, biomeId: number) => Promise<void>;
+            /** Save a layer as a new biome; resolves to whether it was saved. */
+            saveBiome: (layerId: number, name: string) => Promise<boolean>;
         },
     ) {
         this.groupSeg = segmented(
@@ -780,6 +790,31 @@ export class EditorPanel {
                             ),
                         ),
                 });
+                const patch = (change: Partial<GroundCoverEntry>) =>
+                    save(
+                        current().map((e, i) =>
+                            i === index ? { ...e, ...change } : e,
+                        ),
+                    );
+                const clustering = slider({
+                    label: 'Groves',
+                    min: 0,
+                    max: 1,
+                    step: 0.05,
+                    value: entry.clustering ?? 0,
+                    format: (v) =>
+                        v < 0.05 ? 'even' : `${Math.round(v * 100)}%`,
+                    onInput: (v) => patch({ clustering: v }),
+                });
+                const spacing = slider({
+                    label: 'Min spacing',
+                    min: 0,
+                    max: 30,
+                    step: 0.5,
+                    value: entry.spacing ?? 0,
+                    format: (v) => (v < 0.5 ? 'off' : formatMetres(v)),
+                    onInput: (v) => patch({ spacing: v }),
+                });
                 const edit = button(
                     'Settings',
                     () => {
@@ -801,6 +836,8 @@ export class EditorPanel {
                     'div',
                     { class: 'ww-ground-cover-row' },
                     density.el,
+                    clustering.el,
+                    spacing.el,
                     h('div', { class: 'ww-row' }, edit, remove),
                 );
             });
@@ -843,13 +880,90 @@ export class EditorPanel {
                 ? this.foliageSettings(true)
                 : null;
 
+            const biomes = this.actions.biomes();
+            const pick = h('select', {
+                class: 'ww-input ww-select',
+                style: { width: '100%', textAlign: 'left' },
+                'aria-label': 'Apply a biome to this layer',
+            });
+            pick.append(
+                h(
+                    'option',
+                    { value: '' },
+                    biomes.length ? 'Apply biome…' : 'No biomes yet',
+                ),
+            );
+
+            for (const b of biomes) {
+                const plants = b.ground_cover
+                    .map((e) => e.name)
+                    .filter(Boolean)
+                    .join(', ');
+                pick.append(
+                    h(
+                        'option',
+                        {
+                            value: String(b.id),
+                            title: [b.description, plants]
+                                .filter(Boolean)
+                                .join(' — '),
+                        },
+                        b.name,
+                    ),
+                );
+            }
+
+            pick.addEventListener('change', () => {
+                const id = Number(pick.value);
+
+                if (id) {
+                    pick.disabled = true;
+                    void this.actions.applyBiome(layer.id, id).then(build);
+                }
+            });
+
+            const name = h('input', {
+                class: 'ww-input',
+                type: 'text',
+                maxlength: '60',
+                placeholder: 'Biome name',
+                'aria-label': 'Name of the new biome',
+            });
+            name.value = layer.name;
+            const saveBiome = button(
+                'Save as biome',
+                () => {
+                    const value = name.value.trim();
+
+                    if (value) {
+                        void this.actions
+                            .saveBiome(layer.id, value)
+                            .then((ok) => ok && build());
+                    }
+                },
+                {
+                    icon: Sparkles,
+                    title: 'Add this layer’s look and ground cover to the biome library',
+                },
+            );
+
             wrap.replaceChildren(
+                section(
+                    'Biome',
+                    h(
+                        'p',
+                        { class: 'ww-muted' },
+                        'A biome is a ground material plus everything that grows on it. Apply one to this layer, then paint the layer to paint the whole biome.',
+                    ),
+                    pick,
+                    h('div', { class: 'ww-row' }, name, saveBiome),
+                ),
                 section(
                     `Ground cover · ${layer.name}`,
                     h(
                         'p',
                         { class: 'ww-muted' },
-                        'Grows by itself wherever this layer is painted, following the paint and each type’s slope, altitude and water rules. Nothing to place or erase: repaint the layer or tweak the settings and it regrows instantly.',
+                        'Grass, flowers, rocks or trees that grow by themselves wherever this layer is painted, following the paint and each type’s slope, altitude and water rules. Groves clusters plants into patches and clearings. Nothing to place or erase: repaint the layer or tweak the settings and it regrows instantly.',
                     ),
                     ...rows,
                     available.length && entries.length < 8 ? add : null,

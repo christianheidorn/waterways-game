@@ -37,6 +37,8 @@ export class Composite {
     readonly pass = new ScreenPass('Composite');
     readonly contactStrength = uniform(0);
     readonly rayColor = uniform(new THREE.Vector3());
+    /** 0 leaves the scene colour untouched (the editor's unlit view modes). */
+    readonly enabled = uniform(1);
 
     constructor(f: FrameContext, inputs: CompositeInputs) {
         const { ao, contact, ssr, rays } = inputs;
@@ -90,6 +92,7 @@ export class Composite {
             // alone they shade the sky with the dome's box normals (a faint box around the world).
             const surface = float(1)
                 .sub(isSkyDepth(f.rawDepth(vUv)).select(float(1), float(0)))
+                .mul(this.enabled)
                 .toVar();
 
             if (ao) {
@@ -123,7 +126,12 @@ export class Composite {
             if (rays) {
                 // In-scattering builds up with the distance travelled through the air: close surfaces
                 // (a trunk or foliage right in front of the camera) get little of it.
-                const air = f.linearDepth(vUv).div(-25).exp().oneMinus();
+                const air = f
+                    .linearDepth(vUv)
+                    .div(-25)
+                    .exp()
+                    .oneMinus()
+                    .mul(this.enabled);
                 c.addAssign(rays.sample(vUv).rgb.mul(this.rayColor).mul(air));
             }
 

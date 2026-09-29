@@ -190,6 +190,9 @@ export class PostFx {
     private look: Look = { ...DEFAULT_LOOK };
     private light: LightSource | null = null;
     private focusPoint: THREE.Vector2 | null = null;
+    /** An unlit editor view mode is shown (see setUnlitView). */
+    private unlitView = false;
+    private readonly savedWhiteBalance = new THREE.Vector3();
     /** Scene resolution relative to the output resolution. */
     private inputScale = 1;
     private readonly bufferSize = new THREE.Vector2();
@@ -273,6 +276,18 @@ export class PostFx {
         return dof
             ? dof.readFocusDistance(this.renderer)
             : Promise.resolve(null);
+    }
+
+    /**
+     * The editor shows an unlit view mode (flat visualisation colours): the output keeps them readable
+     * by bypassing exposure (base and eye adaptation), white balance, grading, bloom, lens effects and
+     * the screen-space lighting composite. Uniforms only, so switching never rebuilds a shader.
+     */
+    setUnlitView(enabled: boolean): void {
+        if (enabled !== this.unlitView) {
+            this.unlitView = enabled;
+            this.effects?.exposure?.reset();
+        }
     }
 
     /** Drop temporal history (TAA, eye adaptation, focus) after a camera cut. */
@@ -459,11 +474,12 @@ export class PostFx {
         }
 
         // ---- eye adaptation, bloom, lens flare
+        const unlit = this.unlitView;
         e.exposure?.update(
             dt,
-            baseExposure,
-            look.autoExposureMinEv,
-            look.autoExposureMaxEv,
+            unlit ? 1 : baseExposure,
+            unlit ? 0 : look.autoExposureMinEv,
+            unlit ? 0 : look.autoExposureMaxEv,
             look.autoExposureSpeed,
         );
         this.bloomThreshold.value = look.bloomThreshold / baseExposure;
@@ -471,7 +487,7 @@ export class PostFx {
         if (e.flare) {
             let brightness = 0;
 
-            if (light && !night && this.locateFlare(e.flare)) {
+            if (light && !night && !unlit && this.locateFlare(e.flare)) {
                 const sunUp = THREE.MathUtils.smoothstep(
                     light.sunDirection.y,
                     -0.02,
@@ -492,9 +508,13 @@ export class PostFx {
         }
 
         // ---- output
-        this.output.exposure.value = baseExposure;
+        this.output.exposure.value = unlit ? 1 : baseExposure;
         this.updateOutputKey();
         profiler?.mark('Post-processing');
+
+        if (e.composite) {
+            e.composite.enabled.value = unlit ? 0 : 1;
+        }
 
         if (e.taa) {
             this.renderer.getDrawingBufferSize(this.bufferSize);
@@ -504,7 +524,12 @@ export class PostFx {
             );
         }
 
-        this.pipeline.render();
+        if (unlit) {
+            this.renderNeutral();
+        } else {
+            this.pipeline.render();
+        }
+
         e.taa?.end();
 
         // ---- history
@@ -515,6 +540,31 @@ export class PostFx {
     }
 
     // ---------------------------------------------------------------- internals
+
+    /**
+     * Renders the frame with the look's display adjustments neutral (unlit view modes). The values are
+     * swapped for this render only: the output graph's feature key keeps seeing the real ones.
+     */
+    private renderNeutral(): void {
+        const o = this.output;
+        const scalars = [
+            o.lutIntensity,
+            o.saturation,
+            o.contrast,
+            o.vignette,
+            o.grain,
+            o.aberration,
+            this.bloomStrength,
+        ];
+        const neutral = [0, 1, 1, 0, 0, 0, 0];
+        const saved = scalars.map((u) => u.value);
+        this.savedWhiteBalance.copy(o.whiteBalance.value);
+        scalars.forEach((u, i) => (u.value = neutral[i]));
+        o.whiteBalance.value.set(1, 1, 1);
+        this.pipeline.render();
+        scalars.forEach((u, i) => (u.value = saved[i]));
+        o.whiteBalance.value.copy(this.savedWhiteBalance);
+    }
 
     /** Projects the sun to the screen for the flare; false when it is behind or far off-screen. */
     private locateFlare(flare: LensFlare): boolean {

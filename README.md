@@ -71,6 +71,27 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
   is previewed on the terrain.
 - **Undo:** tile-based copy-on-write undo/redo covers heights, splat, water and foliage.
 - **Viewport:** Unreal-style camera controls and an optional 100 m grid.
+- **View modes** (like Unreal's viewport _View Mode_ menu): the eye button at the top right (next to the
+  graphics button) or V / Shift+V switch how the viewport draws the world, to see why something looks or
+  performs the way it does. A legend under the button explains the colours.
+
+    | View mode       | Shows                                                                                                                  |
+    | --------------- | ---------------------------------------------------------------------------------------------------------------------- |
+    | Lit             | The final rendering (default)                                                                                          |
+    | Lighting only   | Terrain and foliage with a neutral grey albedo: judge sun, sky light, shadows and AO without the materials             |
+    | Layers          | Each terrain layer in its own colour (legend with the layer names), blended by paint weight so transitions show        |
+    | Slope           | Steepness: green (flat) → yellow (30°) → red (45°) → purple (60°+); handy with the foliage slope rules                 |
+    | Height          | Hypsometric bands with contour lines; the interval follows the map's height range (1, 2 or 5 × 10ⁿ m, bold every 5th)  |
+    | Foliage density | Heat map of instances per 100 m² (8 m cells, log scale) of placed foliage and the ground cover grown around the camera |
+    | Wireframe       | The terrain triangles at their current LOD (drawn in the shader from each chunk's vertex spacing)                      |
+
+    The visualisations are unlit (readable at night) and skip fog, exposure, colour grading, bloom and the
+    screen-space lighting (AO, contact shadows, SSR, light shafts), so the colours match the legend; foliage
+    and water stay visible and lit. Every mode is built into the terrain shader behind a uniform, so switching
+    is instant (no shader compile). View modes are an editor tool: Play always renders lit (the mode comes back
+    in Build mode) and nothing is saved with the map. The density grid is refreshed at most twice a second
+    while foliage changes (painting, ground cover growing as the camera moves).
+
 - **Saving:** Ctrl+S saves, with an optional autosave. Each save also stores a thumbnail for the studio.
 
 ## Terrain materials, AI and land cover
@@ -149,11 +170,16 @@ Changes apply live and are saved to the studio library after a short pause (`PAT
 Visibility and shadows update at once; density, size and placement rules apply to new painting, and
 _Re-scatter_ regenerates a type.
 
-**Ground cover** (like Unreal's landscape grass): foliage that grows by itself wherever a terrain layer is
-painted, so you never have to place, erase and repaint grass to try out a setting.
+**Ground cover** (like Unreal's landscape grass and procedural foliage): foliage that grows by itself
+wherever a terrain layer is painted, from grass and flowers to rocks and whole forests, so you never have to
+place, erase and repaint plants to try out a setting.
 
-- Each terrain layer lists foliage types with a density multiplier. Set them in the editor's Paint tool
-  (_Ground cover_ under the layer tiles) or on the studio's Terrain layers page.
+- Each terrain layer lists foliage types, each with a density multiplier, **Groves** (0 = an even spread;
+  higher values gather plants into groves and clearings, trees in larger groves than grass, and each type
+  in its own patches) and **Min spacing** (metres between instances, e.g. for trees). Set them in the
+  editor's Paint tool (_Ground cover_ under the layer tiles) or on the studio's Terrain layers page.
+- Placement is stratified: one candidate per grid cell sized for the density, so plants are spread evenly
+  but naturally instead of clumping by chance. Every candidate comes from a stateless hash of its cell.
 - Near the camera, tiles grow instances in proportion to the layer's paint weight (a half-painted border
   gets half the grass). They follow each type's slope, altitude and underwater rules.
 - Nothing is stored. Each tile is seeded, so it always grows the same plants, and tiles the camera leaves
@@ -170,6 +196,31 @@ painted, so you never have to place, erase and repaint grass to try out a settin
   so both backends grow the same plants.
 - Hand-painted instances of the same type are unaffected, and ground cover is never written to `foliage.json`.
 - Editor changes are saved after a short pause (`PATCH /api/maps/{map}/layers/{layer}/ground-cover`).
+
+**Biomes** turn painting a layer into painting a whole landscape. A biome is a ground material (or
+procedural colours) plus everything that grows on it. The library starts with seven starter biomes: Meadow,
+Temperate forest, Conifer forest, Alpine pasture, Beach, Wetland and Rocky slope. Their plants are picked
+from your foliage library by kind, and their ground from the starter materials.
+
+- **Apply** a biome to a terrain layer in the editor's Paint tool (_Biome_, above the ground cover) or on
+  the studio's Terrain layers page. The layer takes the biome's name, look and ground cover; its slot,
+  paint and auto-paint rules stay. Painting the layer then paints the biome: ground, grass, flowers,
+  shrubs, rocks and trees.
+- **Save as biome** stores the selected layer's look and ground cover in the library, for use on any map.
+- The _Biome library_ on the Terrain layers page lists what each biome grows. You can delete biomes there,
+  and _Add starter biomes_ brings back missing starters, which is also how to get them on an existing
+  install.
+
+**Roots take the terrain's colour** (what Unreal does with runtime virtual texturing). Grass fades into the
+ground at its base instead of standing on it like a carpet, whether it is ground cover or painted. The terrain
+keeps one average colour per layer: the material's mean albedo × tint, or the procedural colour pair
+(`TerrainMaterial.groundColor`). Each foliage vertex reads the splat map at its instance's root and blends those
+colours, darkened on wet shores and after rain and whitened by snow cover. Near the ground the blade also
+turns as rough as soil and gets less sky light, as if the blades around it shaded it. Without that, the
+roots would come out paler and bluer than the ground next to them. The blade's own colour takes over
+towards ~40% of its height. Grass takes the most, then flowers, reeds, bushes and a hint at the foot of rocks;
+trees are left alone. It costs three texture samples per vertex on both backends and both foliage paths. It
+never runs in the shadow pass, and layer, material and weather changes apply without rebuilding a shader.
 
 **AI foliage palette** (✨ _AI palette_ on the foliage page):
 
@@ -202,7 +253,9 @@ about missing or over-budget LODs.
   off for a frame after camera cuts.
 - The survivors are compacted into per-LOD lists, and each LOD draws with **one indirect draw call**. The CPU
   does no per-instance work, however much foliage a map has.
-- Shadow casters get their own list, within the foliage shadow distance.
+- Shadow casters get their own lists, within the foliage shadow distance: all of them for the cached far
+  sun cascade, and the ones that reach into the near cascade for its every-frame pass (see
+  [Sun shadows](#sun-shadows)).
 - The water's planar reflection gets its own cull against the mirrored camera (coarser LODs, no Hi-Z), so
   trees behind or beside the viewer still show in lakes and the sea.
 - Leaves and blades are translucent: sky light passes through the canopy and they glow when backlit, so
@@ -276,6 +329,25 @@ own:
 - Foliage
 - Shading
 - Resolution
+
+### Sun shadows
+
+The sun (or moon) shadow is split into two cascades around the focus point (the player, or the editor's
+cursor / view target), like UE's cascaded and virtual shadow maps (`resources/game/world/SunShadows.ts`):
+
+- **Near cascade**: a quarter of the shadow distance (at least 20 m) at twice the texel density, re-rendered
+  every frame with every caster. The character, swaying grass and trees near the camera keep live
+  shadows. With GPU-driven foliage, its pass draws only the plants that reach into it.
+- **Far cascade**: the whole shadow distance, **cached**. It is only re-rendered when the focus has moved 6 %
+  of the shadow distance, when the sun has turned by more than 0.1° (scrubbing the time of day, weather
+  changes, day to night), or when terrain or shadow-casting foliage is edited (at most every 0.2 s while
+  edits keep coming). Standing still costs nothing; walking re-renders it every few seconds. The character
+  is left out of it, and wind sway is frozen in it, which cannot be seen at that distance.
+- The shader uses the near map inside the near square and cross-fades to the far map at its edge. Both
+  cascades are snapped to their texels in light space, so shadows do not shimmer as you move.
+
+The Shadows setting picks the far map size (Low 1K … Epic 8K) and the distance. The near map is half that
+size. Because the far pass is so rarely drawn, a longer shadow distance now costs little per frame.
 
 **Render pipeline** (`resources/game/core/PostFx.ts`): three.js' node-based `RenderPipeline`, written in
 TSL, the same on WebGPU and WebGL 2. The full pass order is under
@@ -452,6 +524,7 @@ Open <http://localhost:8000>. The dashboard shows the seeded **Waterways Valley*
 | Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) | Undo / redo                                                 |
 | Ctrl+S                         | Save                                                        |
 | G                              | Toggle grid                                                 |
+| V / Shift+V                    | Next / previous view mode (Lit, Lighting only, Layers, …)   |
 | P / Alt+P                      | Play from the camera / from the player start                |
 | F10                            | Graphics menu (presets, scalability, frame rate)            |
 
@@ -479,7 +552,8 @@ resources/game/            The game (TypeScript + Three.js WebGPURenderer with T
                            GPU culling, Hi-Z, impostors)
   tools/FoliageBaker.ts    In-browser foliage asset optimiser (LODs, impostor, cards, thumbnail)
   player/                  Character controller, third-person camera, procedural / glTF character
-  editor/                  Editor (tools, strokes), Brush, History (undo), FlyCamera, terrainOps, UI panel
+  editor/                  Editor (tools, strokes), Brush, History (undo), FlyCamera, terrainOps, UI panel,
+                           ViewModes (view modes; their shader side is world/TerrainDebugView)
 ```
 
 **Studio ↔ game communication**
@@ -513,12 +587,10 @@ vendor/bin/pint --test      # PHP style
 
 ## Roadmap ideas
 
-**In progress:** biomes and rule-based procedural trees, height-based terrain layer blending, grass that takes
-the terrain colour at its roots, cached shadows, editor debug views.
-
 Looks:
 
-- Macro colour variation across the terrain, to hide texture tiling from above.
+- Stronger large-scale colour variation for PBR terrain materials (procedural layers have it; the
+  layer blend is already height-based, with triplanar cliffs and far-distance detail blending).
 - Smooth (dithered) crossfades between foliage LODs instead of hard switches.
 - Visible wind gusts travelling across grass fields and tree canopies.
 - Grass that bends around the player.
@@ -526,7 +598,6 @@ Looks:
 - Bounce light: a coarse irradiance grid (green light under a canopy, warm light off sand).
 - Water: shoreline foam, rivers flowing along their course, caustics on shallow beds.
 - Weather traces: footprints in snow, puddles collecting in hollows during rain.
-- Triplanar mapping for cliffs.
 
 Performance:
 

@@ -68,6 +68,8 @@ export type EditorCallbacks = {
     onSpawnChanged: (spawn: { x: number; z: number; yaw: number }) => void;
     requestPlay: (fromCamera: boolean) => void;
     requestSave: () => void;
+    /** Next (+1) or previous (-1) view mode. */
+    cycleViewMode: (step: number) => void;
     isPointerOverUi: () => boolean;
 };
 
@@ -539,6 +541,10 @@ export class Editor {
             this.state.showGrid = !this.state.showGrid;
             this.world.material.setGridVisible(this.state.showGrid);
             this.notify();
+        }
+
+        if (input.wasPressed('KeyV') && !input.ctrl) {
+            this.callbacks.cycleViewMode(input.shift ? -1 : 1);
         }
 
         if (input.wasPressed('KeyP') && !input.ctrl) {

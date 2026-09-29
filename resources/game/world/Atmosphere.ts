@@ -10,14 +10,7 @@ import {
 } from './HeightFog';
 import { extinction, SkyDome, skyRadiance } from './SkyDome';
 import type { CloudQuality, SkyParams } from './SkyDome';
-
-const SHADOW_MAP_SIZES: Record<ShadowQuality, number> = {
-    off: 0,
-    low: 1024,
-    medium: 2048,
-    high: 4096,
-    ultra: 8192,
-};
+import { SunShadows } from './SunShadows';
 
 /** Seconds for weather-driven values to cover ~63 % of a change (≈ 3 s to settle). */
 const TRANSITION_TAU = 0.9;
@@ -82,11 +75,13 @@ export function withWeatherDefaults(
 /**
  * Sky dome (clouds, stars, moon), sun / moon + ambient lighting, image-based lighting from the sky,
  * distance + valley (height) fog and a sun shadow that follows the focus point (player or editor
- * camera target). Weather changes blend over a few seconds; lightning flashes come from Weather.
+ * camera target; a live near cascade over a cached far one, see SunShadows). Weather changes blend
+ * over a few seconds; lightning flashes come from Weather.
  */
 export class Atmosphere {
     readonly sky: SkyDome;
     readonly sun: THREE.DirectionalLight;
+    readonly sunShadows: SunShadows;
     readonly hemi: THREE.HemisphereLight;
     readonly fog: THREE.FogExp2;
     /** Direction towards the sun (below the horizon at night). */
@@ -115,7 +110,6 @@ export class Atmosphere {
     private readonly skies: SkyDome[];
     private envDirty = true;
     private envTimer = 0;
-    private shadowDistance = 220;
     private underwater = false;
     private env: EnvironmentSettings | null = null;
     private current = emptyLook();
@@ -133,11 +127,6 @@ export class Atmosphere {
     private readonly tmpColor2 = new THREE.Color();
     private readonly zenithColor = new THREE.Color();
     private readonly tmpDir = new THREE.Vector3();
-    private readonly tmpCenter = new THREE.Vector3();
-    private readonly lightRot = new THREE.Matrix4();
-    private readonly lightRotInv = new THREE.Matrix4();
-    private readonly origin = new THREE.Vector3();
-    private readonly up = new THREE.Vector3(0, 1, 0);
     private readonly skyParams: SkyParams = {
         turbidity: 2,
         rayleigh: 1,
@@ -163,9 +152,9 @@ export class Atmosphere {
         this.sun = new THREE.DirectionalLight(0xffffff, 3);
         this.sun.name = 'Sun';
         this.sun.castShadow = true;
-        // Biases follow the shadow map resolution (setShadowQuality).
         scene.add(this.sun);
         scene.add(this.sun.target);
+        this.sunShadows = new SunShadows(this.sun, scene);
 
         this.flashLight = new THREE.DirectionalLight(0xc8d4ff, 0);
         this.flashLight.name = 'Lightning';
@@ -259,33 +248,18 @@ export class Atmosphere {
     }
 
     setShadowQuality(quality: ShadowQuality, distance: number): void {
-        const size = SHADOW_MAP_SIZES[quality];
-        this.shadowDistance = distance;
-        this.renderer.shadowMap.enabled = size > 0;
-        this.sun.castShadow = size > 0;
-
-        // The shadow node resizes its map to mapSize on the next shadow update.
-        if (size > 0) {
-            this.sun.shadow.mapSize.set(size, size);
-        }
-
-        const cam = this.sun.shadow.camera;
-        cam.left = cam.bottom = -distance;
-        cam.right = cam.top = distance;
-        cam.near = 1;
-        cam.far = distance * 6 + 4000;
-        cam.updateProjectionMatrix();
-
-        // Biases in shadow-map texels, not fixed values: the depth bias is normalised to the (km-long)
-        // depth range, so a constant one pushed shadows ~2 m away from their casters and small objects
-        // (the player, rocks, bushes) cast no shadow on the ground or themselves. Half a texel of depth
-        // bias plus 1.5 texels along the normal keep flat ground at a grazing sun free of acne.
-        const texel = (distance * 2) / Math.max(1, size);
-        this.sun.shadow.bias = -(texel * 0.5) / (cam.far - cam.near);
-        this.sun.shadow.normalBias = texel * 1.5;
+        this.sunShadows.configure(quality, distance);
+        const on = this.sunShadows.cascade !== null;
+        this.renderer.shadowMap.enabled = on;
+        this.sun.castShadow = on;
     }
 
-    /** Blend weather, relight, and keep the shadow frustum centred on the focus point. */
+    /** Shadow casters changed (terrain or foliage edits): refreshes the cached far shadow. */
+    invalidateShadows(): void {
+        this.sunShadows.invalidate();
+    }
+
+    /** Blend weather, relight, and keep the shadow cascades centred on the focus point. */
     update(dt: number, focus: THREE.Vector3): void {
         this.blend(dt);
 
@@ -305,27 +279,12 @@ export class Atmosphere {
             this.relight();
         }
 
-        // Snap the shadow centre to texels in light space to avoid shimmering.
-        const texel =
-            (this.shadowDistance * 2) / Math.max(1, this.sun.shadow.mapSize.x);
+        // Only the direction matters for the lighting; the shadow cascades are placed separately.
         const lightDir = this.lightDirection();
-        const center = this.tmpCenter.copy(focus);
-        this.lightRot.lookAt(
-            this.origin,
-            this.tmpDir.copy(lightDir).negate(),
-            this.up,
-        );
-        this.lightRotInv.copy(this.lightRot).invert();
-        center.applyMatrix4(this.lightRotInv);
-        center.x = Math.round(center.x / texel) * texel;
-        center.y = Math.round(center.y / texel) * texel;
-        center.applyMatrix4(this.lightRot);
-
-        this.sun.target.position.copy(center);
-        this.sun.position
-            .copy(center)
-            .addScaledVector(lightDir, this.shadowDistance * 3 + 1500);
+        this.sun.target.position.copy(focus);
+        this.sun.position.copy(focus).add(lightDir);
         this.sun.target.updateMatrixWorld();
+        this.sunShadows.update(dt, focus, lightDir);
 
         this.envTimer -= dt;
 

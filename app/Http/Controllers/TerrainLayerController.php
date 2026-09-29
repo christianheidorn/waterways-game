@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Biome;
 use App\Models\FoliageType;
 use App\Models\Map;
 use App\Models\Material;
@@ -24,6 +25,7 @@ class TerrainLayerController extends Controller
             'map' => MapController::summary($map),
             'layers' => $map->layers->map->toGameArray()->values(),
             'maxLayers' => TerrainLayer::MAX_LAYERS,
+            'biomes' => Biome::query()->orderBy('name')->get()->map->toStudioArray()->values(),
             // For the ground cover picker.
             'foliageTypes' => FoliageType::query()->orderBy('name')->get(['id', 'name', 'kind'])
                 ->map(fn (FoliageType $t) => ['id' => $t->id, 'name' => $t->name, 'kind' => $t->kind->value])->values(),

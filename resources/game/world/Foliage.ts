@@ -28,9 +28,16 @@ import {
     createFoliageGlobals,
     createFoliageMaterial,
     RANK_FADE,
+    rootTintFor,
     windStiffness,
 } from './foliage/FoliageMaterial';
-import type { FoliageTypeUniforms, LodRole } from './foliage/FoliageMaterial';
+import type {
+    FoliageGlobals,
+    FoliageTypeUniforms,
+    GroundColorSource,
+    LodRole,
+    RootTint,
+} from './foliage/FoliageMaterial';
 import { generateGroundCoverTile } from './foliage/groundCover';
 import {
     GroundCoverField,
@@ -46,6 +53,7 @@ import { InstanceBatch } from './foliage/InstanceBatch';
 import type { InstanceView } from './foliage/InstanceBatch';
 import { INSTANCE_FLOATS, writeInstance } from './foliage/instances';
 import type { Heightfield } from './Heightfield';
+import type { ShadowCascade } from './SunShadows';
 
 /**
  * Runtime cell size per kind (m). Small, dense foliage uses small cells so frustum culling, LOD and
@@ -384,14 +392,17 @@ export class Foliage {
     readonly group = new THREE.Group();
     /** Called before a cell's instance list changes (used for undo snapshots). */
     onBeforeModify: ((typeId: number, cellKey: string) => void) | null = null;
+    /** Called when shadow casting foliage changed (edits, ground cover growth, type settings). */
+    onShadowCastersChanged: (() => void) | null = null;
     private renderers = new Map<number, TypeRenderer>();
     /** Instances of types that are currently not in the type list (kept for saving / re-adding). */
     private orphaned = new Map<number, number[]>();
-    private readonly globals = createFoliageGlobals();
+    private readonly globals: FoliageGlobals;
     private gltf = new GLTFLoader();
     private random = mulberry32(Date.now() & 0xffff);
     private density = 1;
     private shadowDistance = DEFAULT_SHADOW_DISTANCE;
+    private shadowCascade: ShadowCascade | null = null;
     private lodBias = 1;
     /** Forces a full re-evaluation of cells on the next update(). */
     private needsEval = true;
@@ -418,8 +429,12 @@ export class Foliage {
     /** Re-check the ground cover tiles on the next update (else only after the camera moved). */
     private coverScan = true;
     private readonly lastCoverPos = new THREE.Vector3(Infinity, 0, 0);
+    /** Bumped whenever instance data changes (see revision). */
+    private dataRevision = 0;
 
-    constructor() {
+    /** `groundColor`: terrain colour the roots of grass etc. blend into (none: they keep their own). */
+    constructor(groundColor: GroundColorSource | null = null) {
+        this.globals = createFoliageGlobals(groundColor);
         this.group.name = 'Foliage';
         // Static: an auto-updated group would recompute every cell mesh's world matrix each frame.
         this.group.matrixAutoUpdate = false;
@@ -502,6 +517,14 @@ export class Foliage {
         this.needsEval = true;
     }
 
+    /**
+     * The sun's near shadow cascade (re-rendered every frame): on the GPU path its shadow pass draws
+     * only the casters that reach into it (see cull()).
+     */
+    setShadowCascade(cascade: ShadowCascade | null): void {
+        this.shadowCascade = cascade;
+    }
+
     /** > 1 keeps detailed LODs further away, < 1 switches earlier (GraphicsSettings.foliage_lod_bias). */
     setLodBias(bias: number | null | undefined): void {
         this.lodBias =
@@ -512,6 +535,7 @@ export class Foliage {
     }
 
     setTypes(types: FoliageType[]): void {
+        this.onShadowCastersChanged?.();
         const keep = new Set(types.map((t) => t.id));
         this.types = new Map(types.map((t) => [t.id, t]));
 
@@ -746,6 +770,12 @@ export class Foliage {
                 renderer.type,
             );
             renderer.gpu.setFiller(cover.generator);
+            // Fills and counts land on the GPU / arrive later than the cells change.
+            renderer.gpu.onFill = (cell) => {
+                this.dataRevision++;
+                this.castersChanged(renderer, cell);
+            };
+            renderer.gpu.onCounts = () => this.dataRevision++;
 
             for (const cell of renderer.cells.values()) {
                 if (cell.data.length) {
@@ -931,6 +961,7 @@ export class Foliage {
         }
 
         this.needsEval = true;
+        this.dataRevision++;
     }
 
     load(file: FoliageFile | null): void {
@@ -1021,6 +1052,62 @@ export class Foliage {
         }
 
         return count;
+    }
+
+    /**
+     * Changes whenever instances are added, removed or moved (painting, loading, ground cover growing
+     * or dropped behind the camera), so readers of countInstances() know when to refresh.
+     */
+    get revision(): number {
+        return this.dataRevision;
+    }
+
+    /**
+     * Adds the number of instances per cell of a square world grid to `out` (`res`² cells of `cell` m
+     * from the north-west corner x0, z0; row-major, rows along +z). Counts hand-placed foliage and the
+     * ground cover grown so far (around the camera; tiles grown on the GPU by their read-back count,
+     * spread over the tile by the paint); instances outside the grid are ignored. Read-only and
+     * proportional to the instance count (a few ms for a million instances), so call it on demand.
+     */
+    countInstances(
+        x0: number,
+        z0: number,
+        cell: number,
+        res: number,
+        out: Float32Array,
+    ): void {
+        const inv = 1 / cell;
+        const add = (x: number, z: number, n: number) => {
+            const col = Math.floor((x - x0) * inv);
+            const row = Math.floor((z - z0) * inv);
+
+            if (col >= 0 && row >= 0 && col < res && row < res) {
+                out[row * res + col] += n;
+            }
+        };
+
+        for (const renderer of this.renderers.values()) {
+            const generator = renderer.cover?.generator;
+
+            for (const c of renderer.cells.values()) {
+                if (generator && renderer.gpu) {
+                    // Grown on the GPU: its read-back count, spread over the tile by the paint.
+                    generator.spread(c, renderer.gpu.cellCount(c), add);
+                    continue;
+                }
+
+                const data = c.data;
+
+                for (let i = 0; i < data.length; i += FOLIAGE_STRIDE) {
+                    add(data[i], data[i + 2], 1);
+                }
+            }
+        }
+    }
+
+    /** Editor lighting-only view: every foliage type shaded with a neutral grey albedo. */
+    setLightingOnly(enabled: boolean): void {
+        this.globals.lightingOnly.value = enabled ? 1 : 0;
     }
 
     setWind(strength: number, dirX?: number, dirZ?: number): void {
@@ -1822,6 +1909,7 @@ export class Foliage {
         this.globals.camPos.value.copy(camera.position);
         frame.setCamera(camera);
         frame.setReflection(reflection ?? null);
+        frame.setShadowCascade(this.shadowCascade);
         frame.lodBias.value = this.lodBias;
         frame.shadowDistance.value = this.shadowDistance;
 
@@ -2047,6 +2135,7 @@ export class Foliage {
             fade: renderer.fade,
             falloff: renderer.falloff,
             stiffness: windStiffness(renderer.type.kind),
+            root: rootTint(renderer),
             uniforms: renderer.uniforms,
             // Split kinds switch LOD0 → LOD1 per instance (+ shadow slack as the near subset had);
             // the others switched per cell (nearest point), so their LODs reach about half a cell
@@ -3091,6 +3180,8 @@ export class Foliage {
     private markDirty(renderer: TypeRenderer, cell: Cell): void {
         cell.dirty = true;
         this.needsEval = true;
+        this.dataRevision++;
+        this.castersChanged(renderer, cell);
 
         if (renderer.gpu) {
             renderer.gpuDirty.add(cell);
@@ -3140,6 +3231,31 @@ export class Foliage {
      * Writes the cell's instances into its instance batch, reusing the existing buffers when they
      * are large enough (painting grows cells a few instances at a time).
      */
+
+    /**
+     * Shadow casters of a cell changed. Ground cover keeps growing tiles around the camera while it
+     * moves: only those that can cast into the shadow maps refresh the cached far shadow (edits always
+     * do; the shadow may be centred on a distant brush).
+     */
+    private castersChanged(
+        renderer: TypeRenderer,
+        cell: { cx: number; cz: number },
+    ): void {
+        if (
+            renderer.type.cast_shadows &&
+            (!renderer.cover ||
+                rectDistance(
+                    this.globals.camPos.value,
+                    cell.cx,
+                    cell.cz,
+                    renderer.cellSize,
+                ) <=
+                    this.shadowDistance + renderer.radius * 4)
+        ) {
+            this.onShadowCastersChanged?.();
+        }
+    }
+
     private buildCellMesh(renderer: TypeRenderer, cell: Cell): void {
         const count = cell.data.length / FOLIAGE_STRIDE;
         cell.dirty = false;
@@ -3439,6 +3555,7 @@ export class Foliage {
             fade: renderer.fade,
             role,
             instance: attributeInstance,
+            root: rootTint(renderer),
         });
     }
 
@@ -3651,6 +3768,7 @@ export class Foliage {
 
     private disposeRenderer(renderer: TypeRenderer): void {
         renderer.disposed = true;
+        this.dataRevision++;
 
         for (const cell of [
             ...renderer.cells.values(),
@@ -4412,6 +4530,17 @@ function batchOf(mesh: THREE.Mesh): InstanceBatch {
 /** Instances a cell / near mesh draws (its instanced geometry view). */
 function instanceCountOf(mesh: THREE.Mesh): number {
     return (mesh.geometry as THREE.InstancedBufferGeometry).instanceCount;
+}
+
+/** Root tint of a type, measured on its LOD0 (procedural mesh or model). */
+function rootTint(renderer: TypeRenderer): RootTint | null {
+    const lod0 = renderer.lods[0];
+
+    if (!lod0.boundingBox) {
+        lod0.computeBoundingBox();
+    }
+
+    return rootTintFor(renderer.type.kind, lod0.boundingBox!.max.y);
 }
 
 /** Bounding sphere around every LOD (instance space, scale 1): the GPU culling bound. */

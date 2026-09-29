@@ -876,6 +876,8 @@ export class Game {
         }
 
         this.reflection.level = this.reflectionLevel;
+        // Mirrored from this frame's view (the camera moved during the update).
+        this.camera.updateMatrixWorld();
 
         return this.reflection.prepare(
             this.camera,

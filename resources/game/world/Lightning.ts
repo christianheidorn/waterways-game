@@ -1,4 +1,16 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import {
+    abs,
+    attribute,
+    cameraPosition,
+    cross,
+    length,
+    max,
+    mix,
+    normalize,
+    uniform,
+    vec3,
+} from 'three/tsl';
 
 const MAX_SEGMENTS = 700;
 const MAX_PULSES = 6;
@@ -18,8 +30,10 @@ export class Lightning {
     private starts: Float32Array;
     private ends: Float32Array;
     private widths: Float32Array;
-    private core: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
-    private glow: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
+    private core: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial>;
+    private glow: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial>;
+    /** Flash intensity shared by the core and glow ribbons. */
+    private readonly intensity = uniform(0);
     private segments = 0;
     private age = 99;
     private pulses = new Float32Array(MAX_PULSES * 2);
@@ -130,9 +144,7 @@ export class Lightning {
         this.group.visible = showBolt && level > 0.02;
 
         if (this.group.visible) {
-            const intensity = Math.min(1.5, level);
-            this.core.material.uniforms.uIntensity.value = intensity;
-            this.glow.material.uniforms.uIntensity.value = intensity;
+            this.intensity.value = Math.min(1.5, level);
         }
     }
 
@@ -234,20 +246,34 @@ export class Lightning {
         this.segments++;
     }
 
+    /** Camera-facing ribbons along the segments: `widthScale` × channel width, additive glow. */
     private createMesh(widthScale: number, brightness: number, order: number) {
-        const material = new THREE.ShaderMaterial({
-            uniforms: {
-                uIntensity: { value: 0 },
-                uWidthScale: { value: widthScale },
-                uBrightness: { value: brightness },
-            },
-            vertexShader: BOLT_VERTEX,
-            fragmentShader: BOLT_FRAGMENT,
+        const corner = attribute<'vec2'>('aCorner', 'vec2');
+        const start = attribute<'vec3'>('aStart', 'vec3');
+        const end = attribute<'vec3'>('aEnd', 'vec3');
+        const p = mix(start, end, corner.y);
+        const side = normalize(
+            cross(normalize(end.sub(start)), normalize(cameraPosition.sub(p))),
+        );
+        // At least ~1.5 px wide at any distance.
+        const dist = length(cameraPosition.sub(p));
+        const width = max(
+            attribute<'float'>('aWidth', 'float').mul(widthScale),
+            dist.mul(0.0012 * widthScale),
+        );
+        const core = abs(corner.x).oneMinus();
+
+        const material = new THREE.MeshBasicNodeMaterial({
             transparent: true,
             depthWrite: false,
             blending: THREE.AdditiveBlending,
             side: THREE.DoubleSide,
+            fog: false,
         });
+        material.positionNode = p.add(side.mul(corner.x.mul(width)));
+        material.colorNode = vec3(0.78, 0.84, 1).mul(
+            this.intensity.mul(core.mul(core)).mul(12 * brightness),
+        );
         const mesh = new THREE.Mesh(this.geometry, material);
         mesh.frustumCulled = false;
         mesh.renderOrder = order;
@@ -257,37 +283,3 @@ export class Lightning {
 }
 
 const POINTS = new Float32Array(((1 << 8) + 1) * 3);
-
-const BOLT_VERTEX = /* glsl */ `
-attribute vec2 aCorner;
-attribute vec3 aStart;
-attribute vec3 aEnd;
-attribute float aWidth;
-uniform float uWidthScale;
-varying float vSide;
-void main() {
-    vec3 p = mix(aStart, aEnd, aCorner.y);
-    vec3 dir = normalize(aEnd - aStart);
-    vec3 toCam = normalize(cameraPosition - p);
-    vec3 side = normalize(cross(dir, toCam));
-    // At least ~1.5 px wide at any distance.
-    float dist = length(cameraPosition - p);
-    float w = max(aWidth * uWidthScale, dist * 0.0012 * uWidthScale);
-    vSide = aCorner.x;
-    gl_Position = projectionMatrix * viewMatrix * vec4(p + side * aCorner.x * w, 1.0);
-}
-`;
-
-const BOLT_FRAGMENT = /* glsl */ `
-uniform float uIntensity;
-uniform float uBrightness;
-varying float vSide;
-void main() {
-    float core = 1.0 - abs(vSide);
-    core = core * core;
-    vec3 color = vec3(0.78, 0.84, 1.0) * 12.0 * uBrightness * uIntensity * core;
-    gl_FragColor = vec4(color, 1.0);
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-}
-`;

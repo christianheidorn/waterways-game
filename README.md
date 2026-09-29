@@ -41,7 +41,10 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
 - **Water.**
     - Rivers and lakes are built from a water-surface grid. Flow-mapped normals make rivers visibly flow
       downhill.
-    - Colour depends on depth, which is computed per pixel from the terrain heightmap.
+    - Colour, absorption, refraction and soft shorelines follow the water thickness, which the water reads per
+      pixel from the scene depth of the same render pass (no extra refraction pass).
+    - Planar reflection of the water level nearest to the focus point (`water_quality` high: 60 % resolution;
+      medium: 40 %, redrawn every other frame; low: sky reflection only).
     - Shorelines and rapids get foam.
     - An ocean ring extends to the horizon, and the view tints when the camera goes underwater.
 - **Atmosphere & weather.** Physical sky with lit clouds, stars and a moon; valley (height) fog; rain, snow,

@@ -665,7 +665,7 @@ export class Game {
                   : this.cameraGroundPoint();
         this.atmosphere.update(dt, focus);
         this.world.terrain.updateLod(this.camera);
-        this.world.water.update(dt, this.camera);
+        this.world.water.update(dt);
         this.world.wetness.update(dt);
         this.world.foliage.update(dt, this.camera);
 
@@ -799,7 +799,6 @@ export class Game {
     private renderFrame(dt: number): void {
         const water = this.world.water;
         const profiler = this.profiler;
-        water.setSceneTextures(null);
         // GPU foliage culling reads last frame's scene depth (Hi-Z), before any pass draws foliage.
         this.world.foliage.cull(
             this.renderer,
@@ -886,6 +885,7 @@ export class Game {
         const small = this.smallFoliagePrefixes;
         const hidden = this.reflectionHidden;
         hidden.length = 0;
+        const precipitation = this.weather?.precipitation.group;
         this.reflection.level = this.reflectionLevel;
         this.reflection.render(
             this.renderer,
@@ -893,6 +893,12 @@ export class Game {
             this.camera,
             () => {
                 water.group.visible = false;
+
+                // Rain / snow streaks are invisible in a rippled reflection but cost a full particle draw.
+                if (precipitation?.visible) {
+                    precipitation.visible = false;
+                    hidden.push(precipitation);
+                }
 
                 for (const child of this.world.foliage.group.children) {
                     if (
@@ -933,6 +939,9 @@ export class Game {
             size.y,
             quality === 'high' ? 0.6 : quality === 'medium' ? 0.4 : 0,
         );
+        // Medium redraws the reflection every other frame; the water projects it through the matrix
+        // of the frame it was drawn in, so it stays in place while the camera moves.
+        this.reflection.interval = quality === 'medium' ? 2 : 1;
     }
 
     /**

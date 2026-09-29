@@ -131,10 +131,18 @@ export class Weather {
             this.soaked = Math.max(this.rain, this.soaked - dt / 150);
         }
 
+        // Snow settles within ~12 s of snowfall. It melts at a steady rate once the snowfall eases
+        // (~75 s from full cover, ~3× faster in rain), so it is really gone afterwards: an exponential
+        // approach would leave a thin white layer on the ground for many minutes.
         const snowTarget = this.snow * 0.9;
-        this.snowCover +=
-            (snowTarget - this.snowCover) *
-            (1 - Math.exp(-dt / (snowTarget > this.snowCover ? 12 : 90)));
+
+        if (snowTarget > this.snowCover) {
+            this.snowCover +=
+                (snowTarget - this.snowCover) * (1 - Math.exp(-dt / 12));
+        } else {
+            const melt = (1 / 75 + this.rain / 25) * dt;
+            this.snowCover = Math.max(snowTarget, this.snowCover - melt);
+        }
 
         // ---- wind with gusts (stronger and more erratic in storms)
         const storm = THREE.MathUtils.clamp(this.lightningRate / 5, 0, 1);

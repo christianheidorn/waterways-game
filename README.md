@@ -162,11 +162,12 @@ painted, so you never have to place, erase and repaint grass to try out a settin
   are ready, so nothing flickers.
 - Ground cover uses the same renderer as painted foliage: wind, LODs, the distance density falloff, GPU
   culling on WebGPU and CPU cells on WebGL 2. The F10 foliage table lists it as "‹type› · ground cover".
-- On WebGPU the tiles grow on the GPU (like Unreal's GPU grass): a compute pass writes each tile straight
-  into the foliage instance buffer, one thread per candidate, reading the heights, water and splat map from
-  GPU copies that terrain, water and paint edits keep up to date. The CPU only picks the tiles to grow and
-  drop, so ground cover costs it next to nothing. WebGL 2 grows the tiles on the CPU (a few milliseconds per
-  frame while new tiles appear). Placement is hash-based, so both backends grow the same plants.
+- On WebGPU the tiles grow on the GPU (like Unreal's GPU grass): a compute pass, one thread per candidate,
+  packs each tile's plants straight into the foliage instance buffer. It reads the heights, water and splat
+  map from GPU copies that terrain, water and paint edits keep up to date. The CPU only picks the tiles to
+  grow and drop and sizes their slot ranges from the paint, so ground cover costs it next to nothing. WebGL 2
+  grows the tiles on the CPU (a few milliseconds per frame while new tiles appear). Placement is hash-based,
+  so both backends grow the same plants.
 - Hand-painted instances of the same type are unaffected, and ground cover is never written to `foliage.json`.
 - Editor changes are saved after a short pause (`PATCH /api/maps/{map}/layers/{layer}/ground-cover`).
 

@@ -256,6 +256,71 @@ export function tileGrid(
 }
 
 /**
+ * Expected number of instances of a tile before the placement rules (which only remove more): its
+ * area in candidates × the mean keep probability, integrated over the splat samples covering it
+ * (trapezoid rule, exact for the bilinear paint weights of a tile on sample lines), with clustering
+ * taken at the samples.
+ */
+export function expectedTileCount(
+    type: FoliageType,
+    size: number,
+    cx: number,
+    cz: number,
+    sources: GroundCoverSource[],
+    ctx: GroundCoverContext,
+): number {
+    const grid = tileGrid(type, sources, size, cx, cz);
+
+    if (!grid) {
+        return 0;
+    }
+
+    const { heights, splat } = ctx;
+    const res = splat.resolution;
+    const a = heights.toGrid(cx * size, cz * size);
+    const b = heights.toGrid((cx + 1) * size, (cz + 1) * size);
+    const x0 = Math.max(0, Math.floor(a.gx));
+    const z0 = Math.max(0, Math.floor(a.gz));
+    const x1 = Math.min(res - 1, Math.ceil(b.gx));
+    const z1 = Math.min(res - 1, Math.ceil(b.gz));
+    const seed = typeSeed(type.id);
+    const groves = clusterScale(type.kind);
+    const clustered = sources.some((s) => s.clustering > 0);
+    const edge = (i: number, first: number, last: number) =>
+        first < last && (i === first || i === last) ? 0.5 : 1;
+    const d = splat.data;
+    let sum = 0;
+    let total = 0;
+
+    for (let row = z0; row <= z1; row++) {
+        for (let col = x0; col <= x1; col++) {
+            const w = edge(row, z0, z1) * edge(col, x0, x1);
+            const noise = clustered
+                ? clusterNoise(
+                      seed,
+                      heights.colToX(col),
+                      heights.rowToZ(row),
+                      groves,
+                  )
+                : 0.5;
+            let weight = 0;
+
+            for (const s of sources) {
+                weight +=
+                    (d[(row * res + col) * 8 + s.slot] / 255) *
+                    s.density *
+                    clusterFactor(noise, s.clustering);
+            }
+
+            sum += w * Math.min(1, weight / grid.peak);
+            total += w;
+        }
+    }
+
+    return total > 0 ? ((size / grid.cell) ** 2 * sum) / total : 0;
+}
+
+/**
  * Instances of one tile (`size` m square at cx, cz), in the foliage file layout
  * ([x, y, z, yaw, scale, tiltX, tiltZ] per instance). Every grid cell whose candidate falls in the
  * tile is kept with probability (paint weight × density × clustering) / peak, so the count follows

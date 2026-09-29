@@ -178,21 +178,33 @@ type Range = {
  */
 export type GpuCell = { data: number[]; cx: number; cz: number };
 
-/** A slot range a GpuFiller writes; `cell` null clears it (every slot dead). */
-export type GpuFill = { cell: GpuCell | null; start: number; length: number };
+/** A slot range of the store. */
+export type GpuSlots = { start: number; length: number };
+
+/** A cell's range for a GpuFiller to fill. */
+export type GpuFill = GpuSlots & { cell: GpuCell };
 
 /**
- * Fills slot ranges of a type's store on the GPU (ground cover tiles, see GroundCoverGpu): one
- * compute pass per frame, run before the culling pass, writes every slot of the queued ranges (live
- * or dead) and counts the live instances of each range.
+ * Fills slot ranges of a type's store on the GPU (ground cover tiles, see GroundCoverGpu): each frame
+ * that has work, before the culling pass, a pass clears ranges (every slot dead), then one grows the
+ * queued cells, packing their live instances at the start of their ranges.
  */
 export interface GpuFiller {
-    /** Ranges / slots one pass handles at most (the rest waits for the next frame). */
+    /** Ranges one frame's passes handle at most, and threads they run (the rest waits a frame). */
     readonly maxFills: number;
-    readonly maxSlots: number;
-    /** The pass writing `fills` into `instances`. */
-    pass(instances: Storage<'vec4'>, fills: GpuFill[]): THREE.ComputeNode;
-    /** Live instances per fill of the last pass (read back asynchronously). */
+    readonly maxThreads: number;
+    /** Threads the fill of a cell runs. */
+    threads(cell: GpuCell): number;
+    /** This frame's passes: clear `clears`, then grow `fills`. */
+    pass(
+        instances: Storage<'vec4'>,
+        clears: GpuSlots[],
+        fills: GpuFill[],
+    ): THREE.ComputeNode[];
+    /**
+     * Instances each fill of the last pass grew, read back asynchronously; more than its range holds
+     * when it overflowed (the rest were dropped).
+     */
     readCounts(renderer: GameRenderer): Promise<Uint32Array>;
     dispose(): void;
 }
@@ -250,7 +262,7 @@ export class GpuFoliageType {
     private filler: GpuFiller | null = null;
     /** Cells whose ranges the next fill pass writes, and freed filled ranges it clears. */
     private readonly pendingFills = new Set<GpuCell>();
-    private pendingClears: GpuFill[] = [];
+    private pendingClears: GpuSlots[] = [];
     /** Filled ranges of this frame's fill pass (their counts are read back after it ran). */
     private passFills: { cell: GpuCell; range: Range; fill: number }[] = [];
     /** Last read-back counters (null until the first result). */
@@ -284,7 +296,10 @@ export class GpuFoliageType {
     fillCell(cell: GpuCell, capacity: number): void {
         let range = this.ranges.get(cell);
 
-        if (range && (!capacity || capacity > range.capacity)) {
+        if (
+            range &&
+            (capacity > range.capacity || capacity < range.capacity / 2)
+        ) {
             this.freeRange(range);
             this.ranges.delete(cell);
             range = undefined;
@@ -449,9 +464,10 @@ export class GpuFoliageType {
             (this.instances.value as THREE.BufferAttribute).needsUpdate = true;
         }
 
-        const fill = this.fillPass();
+        // Slots past the allocated ranges are never live.
+        this.computes[0].count = Math.max(1, this.top);
 
-        return fill ? [fill, ...this.computes] : this.computes;
+        return [...this.fillPasses(), ...this.computes];
     }
 
     /**
@@ -467,9 +483,20 @@ export class GpuFoliageType {
                 .then((counts) =>
                     fills.forEach(({ cell, range, fill }) => {
                         // Ranges freed or refilled since are skipped (a later read-back counts them).
-                        if (this.ranges.get(cell) === range) {
-                            this.live += counts[fill] - range.count;
-                            range.count = counts[fill];
+                        if (this.ranges.get(cell) !== range) {
+                            return;
+                        }
+
+                        const count = Math.min(counts[fill], range.capacity);
+                        this.live += count - range.count;
+                        range.count = count;
+
+                        if (
+                            counts[fill] > range.capacity &&
+                            !this.pendingFills.has(cell)
+                        ) {
+                            // Overflowed: grow it again into a range that holds all of it.
+                            this.fillCell(cell, counts[fill]);
                         }
                     }),
                 )
@@ -528,8 +555,11 @@ export class GpuFoliageType {
         this.setFiller(null);
     }
 
-    /** This frame's fill pass: queued clears first, then fills, within the filler's limits. */
-    private fillPass(): THREE.ComputeNode | null {
+    /**
+     * This frame's fill passes: freed ranges are cleared, then queued cells grown (their ranges cleared
+     * first too), within the filler's limits.
+     */
+    private fillPasses(): THREE.ComputeNode[] {
         const filler = this.filler;
 
         if (
@@ -537,38 +567,42 @@ export class GpuFoliageType {
             !this.instances ||
             (!this.pendingFills.size && !this.pendingClears.length)
         ) {
-            return null;
+            return [];
         }
 
+        const clears: GpuSlots[] = [];
         const fills: GpuFill[] = [];
-        let slots = 0;
-        const fits = (length: number) =>
-            fills.length < filler.maxFills &&
-            (!fills.length || slots + length <= filler.maxSlots);
+        let threads = 0;
+        const fits = (n: number) =>
+            clears.length < filler.maxFills &&
+            (!threads || threads + n <= filler.maxThreads);
 
         while (
             this.pendingClears.length &&
             fits(this.pendingClears[0].length)
         ) {
             const clear = this.pendingClears.shift()!;
-            fills.push(clear);
-            slots += clear.length;
+            clears.push(clear);
+            threads += clear.length;
         }
 
         for (const cell of this.pendingFills) {
             const range = this.ranges.get(cell)!;
+            const n = range.capacity + filler.threads(cell);
 
-            if (!fits(range.capacity)) {
+            if (!fits(n)) {
                 break;
             }
 
+            const slots = { start: range.start, length: range.capacity };
             this.pendingFills.delete(cell);
             this.passFills.push({ cell, range, fill: fills.length });
-            fills.push({ cell, start: range.start, length: range.capacity });
-            slots += range.capacity;
+            clears.push(slots);
+            fills.push({ ...slots, cell });
+            threads += n;
         }
 
-        return fills.length ? filler.pass(this.instances, fills) : null;
+        return filler.pass(this.instances, clears, fills);
     }
 
     private freeRange(range: Range): void {
@@ -578,7 +612,6 @@ export class GpuFoliageType {
 
         if (range.filled) {
             this.pendingClears.push({
-                cell: null,
                 start: range.start,
                 length: range.capacity,
             });

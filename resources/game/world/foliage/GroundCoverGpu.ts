@@ -4,6 +4,7 @@ import {
     acos,
     atan,
     atomicAdd,
+    bool,
     clamp,
     cos,
     degrees,
@@ -18,7 +19,6 @@ import {
     ivec2,
     min,
     normalize,
-    Return,
     round,
     sin,
     storage,
@@ -26,6 +26,7 @@ import {
     uint,
     uniform,
     uniformArray,
+    vec2,
     vec3,
     vec4,
 } from 'three/tsl';
@@ -34,10 +35,11 @@ import type { GameRenderer } from '../../core/renderer';
 import type { FoliageType } from '../../shared/types';
 import { NO_WATER, SPLAT_CHANNELS } from '../../shared/types';
 import type { Heightfield } from '../Heightfield';
-import type { GpuFill, GpuFiller } from './FoliageGpu';
+import type { GpuCell, GpuFill, GpuFiller, GpuSlots } from './FoliageGpu';
 import type { GroundCoverContext, GroundCoverSource } from './groundCover';
 import {
     clusterScale,
+    expectedTileCount,
     SALT,
     tileGrid,
     tilePainted,
@@ -48,12 +50,17 @@ type Float = Node<'float'>;
 type Int = Node<'int'>;
 type Uint = Node<'uint'>;
 
-/** Tiles (fills) one pass generates at most; the rest waits for the next frame. */
+/** Ranges one pass clears / tiles it grows at most; the rest waits for the next frame. */
 const MAX_FILLS = 512;
-/** Slots one pass writes at most (a dispatch of 32k workgroups). */
-const MAX_SLOTS = 1 << 21;
-/** u32 per fill in the job list: end, begin, first slot, candidates, g0, h0, columns, cx, cz. */
-const JOB = 9;
+/** Threads a frame's passes run at most (32k workgroups). */
+const MAX_THREADS = 1 << 21;
+/**
+ * u32 per tile in the fill job list: end and first thread (one per candidate), first slot and slots
+ * of its range, first grid cell (g0, h0), columns of the candidate grid, tile (cx, cz).
+ */
+const FILL_JOB = 9;
+/** Slots a tile gets beyond its expected count and five standard deviations. */
+const CAPACITY_SLACK = 16;
 /** Binary search steps over the fills of a pass (2^10 > MAX_FILLS). */
 const SEARCH_STEPS = 10;
 /** Sources per type (one per terrain layer at most). */
@@ -173,12 +180,13 @@ class GridBuffer {
 }
 
 /**
- * Ground cover tiles grown on the GPU (WebGPU): the compute port of generateGroundCoverTile. Each
- * tile is a slot range of the type's GPU store with one slot per candidate grid cell; one thread per
- * slot evaluates its candidate with the same integer hashes (bit-exact), clustering noise, splat
- * weights and placement rules as the CPU, and writes the instance, or a dead slot where it is
- * rejected (the culling pass skips those after one load). The CPU does no per-instance work: it only
- * decides which tiles to (re)grow and drop, and reads each tile's instance count back for the stats.
+ * Ground cover tiles grown on the GPU (WebGPU): the compute port of generateGroundCoverTile. One thread
+ * per candidate grid cell of a tile evaluates its candidate with the same integer hashes (bit-exact),
+ * clustering noise, splat weights and placement rules as the CPU and appends the instance to the
+ * tile's slot range (atomic counter per tile). A range is sized from the tile's expected count plus
+ * a margin (expectedTileCount), so rejected candidates cost the culling pass nothing; a tile that
+ * grows more than its range holds (read back) is grown again into an exact one. The CPU does no
+ * per-instance work: it decides which tiles to (re)grow and drop, and reads their counts back.
  *
  * Floating point runs in f32 instead of f64, so positions differ by well under a millimetre and a
  * candidate right at a threshold (keep probability, slope or height limit, tile edge) can rarely fall
@@ -186,17 +194,19 @@ class GridBuffer {
  */
 export class GroundCoverGenerator implements GpuFiller {
     readonly maxFills = MAX_FILLS;
-    readonly maxSlots = MAX_SLOTS;
+    readonly maxThreads = MAX_THREADS;
     private type: FoliageType;
     private readonly seed: number;
     private sources: GroundCoverSource[] = [];
     private size = 0;
-    private readonly jobs = instancedArray(MAX_FILLS * JOB, 'uint');
-    private readonly jobArray = (this.jobs.value as THREE.BufferAttribute)
-        .array as Uint32Array;
-    /** Live instances per fill of the last pass. */
+    /** Ranges to clear: end (exclusive thread index), first slot − first thread (wrapping). */
+    private readonly clearJobs = instancedArray(MAX_FILLS * 2, 'uint');
+    /** Tiles to grow: see FILL_JOB. */
+    private readonly fillJobs = instancedArray(MAX_FILLS * FILL_JOB, 'uint');
+    private readonly clearCount = uniform(0, 'uint');
+    private readonly fillCount = uniform(0, 'uint');
+    /** Instances each tile of the last pass grew (also the append cursor). */
     private readonly counts = instancedArray(MAX_FILLS, 'uint').toAtomic();
-    private readonly jobCount = uniform(0, 'uint');
     private readonly u = {
         cell: uniform(1),
         margin: uniform(0),
@@ -229,8 +239,11 @@ export class GroundCoverGenerator implements GpuFiller {
             'vec4',
         ),
     };
-    private node: THREE.ComputeNode | null = null;
-    private nodeInstances: THREE.StorageBufferNode<'vec4'> | null = null;
+    private passes: {
+        clear: THREE.ComputeNode;
+        fill: THREE.ComputeNode;
+    } | null = null;
+    private passInstances: THREE.StorageBufferNode<'vec4'> | null = null;
 
     constructor(
         readonly field: GroundCoverField,
@@ -288,68 +301,111 @@ export class GroundCoverGenerator implements GpuFiller {
         }
     }
 
-    /** Slots a tile needs (its candidate grid cells); 0 when nothing can grow there. */
+    /**
+     * Slots for a tile: its expected count plus five standard deviations (and a few), at most one per
+     * candidate; 0 when no source layer is painted there.
+     */
     capacity(cx: number, cz: number): number {
-        const grid = tileGrid(this.type, this.sources, this.size, cx, cz);
+        const { type, sources, size } = this;
+        const grid = tileGrid(type, sources, size, cx, cz);
 
-        if (
-            !grid ||
-            !tilePainted(this.size, cx, cz, this.sources, this.field.ctx)
-        ) {
+        if (!grid || !tilePainted(size, cx, cz, sources, this.field.ctx)) {
             return 0;
         }
 
-        return grid.columns * grid.rows;
+        const expected = expectedTileCount(
+            type,
+            size,
+            cx,
+            cz,
+            sources,
+            this.field.ctx,
+        );
+
+        return Math.min(
+            grid.columns * grid.rows,
+            Math.ceil(expected + 5 * Math.sqrt(expected) + CAPACITY_SLACK),
+        );
+    }
+
+    threads(cell: GpuCell): number {
+        const grid = tileGrid(
+            this.type,
+            this.sources,
+            this.size,
+            cell.cx,
+            cell.cz,
+        );
+
+        return grid ? grid.columns * grid.rows : 0;
     }
 
     pass(
         instances: THREE.StorageBufferNode<'vec4'>,
+        clears: GpuSlots[],
         fills: GpuFill[],
-    ): THREE.ComputeNode {
-        if (!this.node || this.nodeInstances !== instances) {
-            this.disposeNode();
-            this.node = this.build(instances);
-            this.nodeInstances = instances;
+    ): THREE.ComputeNode[] {
+        if (!this.passes || this.passInstances !== instances) {
+            this.disposePasses();
+            this.passes = this.build(instances);
+            this.passInstances = instances;
         }
 
-        const jobs = this.jobArray;
-        let end = 0;
+        const { clear, fill } = this.passes;
+        const nodes: THREE.ComputeNode[] = [];
 
-        fills.forEach((fill, i) => {
-            const o = i * JOB;
-            const grid = fill.cell
-                ? tileGrid(
-                      this.type,
-                      this.sources,
-                      this.size,
-                      fill.cell.cx,
-                      fill.cell.cz,
-                  )
-                : null;
-            jobs[o + 1] = end;
-            end += fill.length;
-            jobs[o] = end;
-            jobs[o + 2] = fill.start;
-            // A range allocated for an older, larger grid is filled up with dead slots.
-            jobs[o + 3] = grid
-                ? Math.min(fill.length, grid.columns * grid.rows)
-                : 0;
-            jobs[o + 4] = grid ? grid.g0 >>> 0 : 0;
-            jobs[o + 5] = grid ? grid.h0 >>> 0 : 0;
-            jobs[o + 6] = grid ? grid.columns : 1;
-            jobs[o + 7] = fill.cell ? fill.cell.cx >>> 0 : 0;
-            jobs[o + 8] = fill.cell ? fill.cell.cz >>> 0 : 0;
-        });
+        if (clears.length) {
+            const jobs = (this.clearJobs.value as THREE.BufferAttribute)
+                .array as Uint32Array;
+            let end = 0;
 
-        const attribute = this.jobs.value as THREE.BufferAttribute;
-        attribute.addUpdateRange(0, fills.length * JOB);
-        attribute.needsUpdate = true;
-        // Counters start at zero (the CPU copy never changes).
-        (this.counts.value as THREE.BufferAttribute).needsUpdate = true;
-        this.jobCount.value = fills.length;
-        this.node!.count = end;
+            clears.forEach((range, i) => {
+                jobs[i * 2 + 1] = (range.start - end) >>> 0;
+                end += range.length;
+                jobs[i * 2] = end;
+            });
 
-        return this.node!;
+            this.upload(this.clearJobs, clears.length * 2);
+            this.clearCount.value = clears.length;
+            clear.count = end;
+            nodes.push(clear);
+        }
+
+        if (fills.length) {
+            const jobs = (this.fillJobs.value as THREE.BufferAttribute)
+                .array as Uint32Array;
+            let end = 0;
+
+            fills.forEach((f, i) => {
+                const o = i * FILL_JOB;
+                const grid = tileGrid(
+                    this.type,
+                    this.sources,
+                    this.size,
+                    f.cell.cx,
+                    f.cell.cz,
+                )!;
+                jobs[o + 1] = end;
+                end += grid.columns * grid.rows;
+                jobs[o] = end;
+                jobs[o + 2] = f.start;
+                jobs[o + 3] = f.length;
+                jobs[o + 4] = grid.g0 >>> 0;
+                jobs[o + 5] = grid.h0 >>> 0;
+                jobs[o + 6] = grid.columns;
+                jobs[o + 7] = f.cell.cx >>> 0;
+                jobs[o + 8] = f.cell.cz >>> 0;
+            });
+
+            this.upload(this.fillJobs, fills.length * FILL_JOB);
+            // The counters start at zero (their CPU copy never changes).
+            (this.counts.value as THREE.BufferAttribute).needsUpdate = true;
+            this.fillCount.value = fills.length;
+            fill.count = end;
+            nodes.push(fill);
+        }
+
+        return nodes;
     }
 
     async readCounts(renderer: GameRenderer): Promise<Uint32Array> {
@@ -361,100 +417,128 @@ export class GroundCoverGenerator implements GpuFiller {
     }
 
     dispose(): void {
-        this.disposeNode();
+        this.disposePasses();
     }
 
-    private disposeNode(): void {
-        this.node?.dispose();
-        this.node = null;
-        this.nodeInstances = null;
+    private upload(jobs: THREE.StorageBufferNode<'uint'>, count: number): void {
+        const attribute = jobs.value as THREE.BufferAttribute;
+        attribute.addUpdateRange(0, count);
+        attribute.needsUpdate = true;
     }
 
-    private build(
-        instances: THREE.StorageBufferNode<'vec4'>,
-    ): THREE.ComputeNode {
+    private disposePasses(): void {
+        this.passes?.clear.dispose();
+        this.passes?.fill.dispose();
+        this.passes = null;
+        this.passInstances = null;
+    }
+
+    private build(instances: THREE.StorageBufferNode<'vec4'>): {
+        clear: THREE.ComputeNode;
+        fill: THREE.ComputeNode;
+    } {
+        const clearJobs = this.clearJobs;
+        const fillJobs = this.fillJobs;
+
+        // Every slot of the ranges dead (freed ranges, and the ranges about to be grown again).
+        const clear = Fn(() => {
+            const job = findJob(clearJobs, 2, this.clearCount);
+            const slot = instanceIndex.add(
+                clearJobs.element(job.mul(2).add(1)),
+            );
+            instances.element(slot.mul(4).add(3)).assign(vec4(0));
+        })().compute(1);
+
+        const fill = Fn(() => {
+            const job = findJob(fillJobs, FILL_JOB, this.fillCount);
+            const base = job.mul(FILL_JOB).toVar();
+            const local = instanceIndex
+                .sub(fillJobs.element(base.add(1)))
+                .toVar();
+            // Candidate of this thread (generateGroundCoverTile's loops, row by row).
+            const columns = fillJobs.element(base.add(6));
+            const gx = int(fillJobs.element(base.add(4)))
+                .add(int(local.mod(columns)))
+                .toVar();
+            const gz = int(fillJobs.element(base.add(5)))
+                .add(int(local.div(columns)))
+                .toVar();
+            const origin = vec2(
+                float(int(fillJobs.element(base.add(7)))),
+                float(int(fillJobs.element(base.add(8)))),
+            ).mul(this.u.size);
+            const instance = this.candidate(gx, gz, origin);
+
+            If(instance.kept, () => {
+                // Append to the tile's range; a tile growing more than it holds is grown again.
+                const n = atomicAdd(this.counts.element(job), 1).toVar();
+
+                If(n.lessThan(fillJobs.element(base.add(3))), () => {
+                    const slot = fillJobs
+                        .element(base.add(2))
+                        .add(n)
+                        .mul(4)
+                        .toVar();
+
+                    instance.rows.forEach((row, i) => {
+                        instances.element(slot.add(i)).assign(row);
+                    });
+                });
+            });
+        })().compute(1);
+
+        return { clear, fill };
+    }
+
+    /**
+     * Evaluates the candidate of grid cell gx, gz for the tile at `origin` (m): whether it is kept and
+     * its instance rows (writeInstance() of [x, y, z, yaw, scale, tiltX, tiltZ], then rank, scale, live).
+     */
+    private candidate(
+        gx: Int,
+        gz: Int,
+        origin: Node<'vec2'>,
+    ): { kept: Node<'bool'>; rows: Node<'vec4'>[] } {
         const u = this.u;
-        const jobs = this.jobs;
-        const counts = this.counts;
         const field = this.field;
         const seed = this.seed;
         // cellRandom(): hash of a grid cell and a salt → [0, 1) with 24 bits (exact in f32).
-        const random = (gx: Int, gz: Int, salt: number): Float =>
+        const random = (cx: Int, cz: Int, salt: number): Float =>
             float(
                 hash32(
                     uint(seed).bitXor(
                         hash32(
-                            uint(gx).bitXor(
-                                hash32(uint(gz).bitXor(uint(salt))),
+                            uint(cx).bitXor(
+                                hash32(uint(cz).bitXor(uint(salt))),
                             ),
                         ),
                     ),
                 ).shiftRight(uint(8)),
             ).div(16777216);
         const smooth = (t: Float) => t.mul(t).mul(float(3).sub(t.mul(2)));
+        const kept = bool(false).toVar();
+        const rows = [vec4(0), vec4(0), vec4(0), vec4(0)].map((r) => r.toVar());
+        const x = float(gx)
+            .mul(u.cell)
+            .add(u.margin)
+            .add(random(gx, gz, SALT.x).mul(u.span))
+            .toVar();
+        const z = float(gz)
+            .mul(u.cell)
+            .add(u.margin)
+            .add(random(gx, gz, SALT.z).mul(u.span))
+            .toVar();
+        const half = field.heights.grid.half;
+        // Each candidate belongs to exactly one tile (the one it lands in), inside the map.
+        const inside = x
+            .greaterThanEqual(origin.x)
+            .and(x.lessThan(origin.x.add(u.size)))
+            .and(z.greaterThanEqual(origin.y))
+            .and(z.lessThan(origin.y.add(u.size)))
+            .and(abs(x).lessThanEqual(half))
+            .and(abs(z).lessThanEqual(half));
 
-        return Fn(() => {
-            const t = instanceIndex;
-            // The fill of this slot: the first whose end lies past it.
-            const lo = uint(0).toVar();
-            const hi = this.jobCount.toVar();
-
-            for (let k = 0; k < SEARCH_STEPS; k++) {
-                If(lo.lessThan(hi), () => {
-                    const mid = lo.add(hi).div(2).toVar();
-
-                    If(jobs.element(mid.mul(JOB)).greaterThan(t), () => {
-                        hi.assign(mid);
-                    }).Else(() => {
-                        lo.assign(mid.add(1));
-                    });
-                });
-            }
-
-            const job = lo.toVar();
-            const base = job.mul(JOB).toVar();
-            const local = t.sub(jobs.element(base.add(1))).toVar();
-            const slot = jobs.element(base.add(2)).add(local).mul(4).toVar();
-            const dead = () => {
-                instances.element(slot.add(3)).assign(vec4(0));
-                Return();
-            };
-
-            If(local.greaterThanEqual(jobs.element(base.add(3))), dead);
-
-            // Candidate of this slot (generateGroundCoverTile's loops, row by row).
-            const columns = jobs.element(base.add(6));
-            const gx = int(jobs.element(base.add(4)))
-                .add(int(local.mod(columns)))
-                .toVar();
-            const gz = int(jobs.element(base.add(5)))
-                .add(int(local.div(columns)))
-                .toVar();
-            const x = float(gx)
-                .mul(u.cell)
-                .add(u.margin)
-                .add(random(gx, gz, SALT.x).mul(u.span))
-                .toVar();
-            const z = float(gz)
-                .mul(u.cell)
-                .add(u.margin)
-                .add(random(gx, gz, SALT.z).mul(u.span))
-                .toVar();
-            const x0 = float(int(jobs.element(base.add(7)))).mul(u.size);
-            const z0 = float(int(jobs.element(base.add(8)))).mul(u.size);
-            const half = field.heights.grid.half;
-
-            If(
-                x
-                    .lessThan(x0)
-                    .or(x.greaterThanEqual(x0.add(u.size)))
-                    .or(z.lessThan(z0))
-                    .or(z.greaterThanEqual(z0.add(u.size)))
-                    .or(abs(x).greaterThan(half))
-                    .or(abs(z).greaterThan(half)),
-                dead,
-            );
-
+        If(inside, () => {
             // Paint weight × density × clustering of every source, against the keep probability.
             const noise = float(0.5).toVar();
 
@@ -492,79 +576,69 @@ export class GroundCoverGenerator implements GpuFiller {
                 );
             }
 
-            If(
-                random(gx, gz, SALT.keep).greaterThanEqual(weight.div(u.peak)),
-                dead,
-            );
+            If(random(gx, gz, SALT.keep).lessThan(weight.div(u.peak)), () => {
+                // placementAllowed(): slope, altitude, water.
+                const heights = field.heights;
+                const y = heights.sample(x, z).toVar();
+                const e = heights.grid.cell;
+                const normal = normalize(
+                    vec3(
+                        heights
+                            .sample(x.sub(e), z)
+                            .sub(heights.sample(x.add(e), z)),
+                        2 * e,
+                        heights
+                            .sample(x, z.sub(e))
+                            .sub(heights.sample(x, z.add(e))),
+                    ),
+                ).toVar();
+                const slope = degrees(acos(clamp(normal.y, -1, 1)));
+                const dry = u.underwater
+                    .greaterThan(0.5)
+                    .or(
+                        waterLevel(field.water, x, z).lessThanEqual(
+                            y.sub(0.05),
+                        ),
+                    );
 
-            // placementAllowed(): slope, altitude, water.
-            const y = field.heights.sample(x, z).toVar();
-            const e = field.heights.grid.cell;
-            const normal = normalize(
-                vec3(
-                    field.heights
-                        .sample(x.sub(e), z)
-                        .sub(field.heights.sample(x.add(e), z)),
-                    2 * e,
-                    field.heights
-                        .sample(x, z.sub(e))
-                        .sub(field.heights.sample(x, z.add(e))),
-                ),
-            ).toVar();
-            const slope = degrees(acos(clamp(normal.y, -1, 1)));
+                kept.assign(
+                    slope
+                        .greaterThanEqual(u.minSlope)
+                        .and(slope.lessThanEqual(u.maxSlope))
+                        .and(y.greaterThanEqual(u.minHeight))
+                        .and(y.lessThanEqual(u.maxHeight))
+                        .and(dry),
+                );
 
-            If(
-                slope
-                    .lessThan(u.minSlope)
-                    .or(slope.greaterThan(u.maxSlope))
-                    .or(y.lessThan(u.minHeight))
-                    .or(y.greaterThan(u.maxHeight)),
-                dead,
-            );
-
-            If(u.underwater.lessThan(0.5), () => {
-                const level = waterLevel(field.water, x, z);
-
-                If(level.greaterThan(y.sub(0.05)), dead);
-            });
-
-            // The instance: writeInstance() of [x, y, z, yaw, scale, tiltX, tiltZ].
-            const scale = u.minScale
-                .add(random(gx, gz, SALT.scale).mul(u.scaleRange))
-                .toVar();
-            const yaw = random(gx, gz, SALT.yaw)
-                .mul(Math.PI * 2)
-                .mul(u.randomYaw);
-            const tiltX = atan(normal.z, normal.y).mul(u.align);
-            const tiltZ = atan(normal.x, normal.y).negate().mul(u.align);
-            // Rotation of Euler(tiltX, yaw, tiltZ, 'XZY') × scale, row by row.
-            const a = cos(tiltX).toVar();
-            const b = sin(tiltX).toVar();
-            const c = cos(yaw).toVar();
-            const d = sin(yaw).toVar();
-            const ce = cos(tiltZ).toVar();
-            const f = sin(tiltZ).toVar();
-            const posY = y.sub(scale.mul(0.05));
-            instances
-                .element(slot)
-                .assign(
+                const scale = u.minScale
+                    .add(random(gx, gz, SALT.scale).mul(u.scaleRange))
+                    .toVar();
+                const yaw = random(gx, gz, SALT.yaw)
+                    .mul(Math.PI * 2)
+                    .mul(u.randomYaw);
+                const tiltX = atan(normal.z, normal.y).mul(u.align);
+                const tiltZ = atan(normal.x, normal.y).negate().mul(u.align);
+                // Rotation of Euler(tiltX, yaw, tiltZ, 'XZY') × scale, row by row.
+                const a = cos(tiltX).toVar();
+                const b = sin(tiltX).toVar();
+                const c = cos(yaw).toVar();
+                const d = sin(yaw).toVar();
+                const ce = cos(tiltZ).toVar();
+                const f = sin(tiltZ).toVar();
+                rows[0].assign(
                     vec4(vec3(c.mul(ce), f.negate(), d.mul(ce)).mul(scale), x),
                 );
-            instances
-                .element(slot.add(1))
-                .assign(
+                rows[1].assign(
                     vec4(
                         vec3(
                             a.mul(c).mul(f).add(b.mul(d)),
                             a.mul(ce),
                             a.mul(d).mul(f).sub(b.mul(c)),
                         ).mul(scale),
-                        posY,
+                        y.sub(scale.mul(0.05)),
                     ),
                 );
-            instances
-                .element(slot.add(2))
-                .assign(
+                rows[2].assign(
                     vec4(
                         vec3(
                             b.mul(c).mul(f).sub(a.mul(d)),
@@ -574,13 +648,37 @@ export class GroundCoverGenerator implements GpuFiller {
                         z,
                     ),
                 );
-            // Rank (density thinning, the same order the CPU sorts by), scale, live.
-            instances
-                .element(slot.add(3))
-                .assign(vec4(random(gx, gz, SALT.rank), scale, 1, 0));
-            atomicAdd(counts.element(job), 1);
-        })().compute(1);
+                // Rank (distance thinning, the order the CPU sorts by), scale, live.
+                rows[3].assign(vec4(random(gx, gz, SALT.rank), scale, 1, 0));
+            });
+        });
+
+        return { kept, rows };
     }
+}
+
+/** Index of the job a thread belongs to: the first whose end (first u32 of `stride`) lies past it. */
+function findJob(
+    jobs: THREE.StorageBufferNode<'uint'>,
+    stride: number,
+    count: Uint,
+): Uint {
+    const lo = uint(0).toVar();
+    const hi = count.toVar();
+
+    for (let k = 0; k < SEARCH_STEPS; k++) {
+        If(lo.lessThan(hi), () => {
+            const mid = lo.add(hi).div(2).toVar();
+
+            If(jobs.element(mid.mul(stride)).greaterThan(instanceIndex), () => {
+                hi.assign(mid);
+            }).Else(() => {
+                lo.assign(mid.add(1));
+            });
+        });
+    }
+
+    return lo;
 }
 
 /** lowbias32 (groundCover.ts hash32): u32 multiplies wrap and shifts are logical, as with Math.imul / >>>. */

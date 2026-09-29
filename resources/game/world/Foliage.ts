@@ -1338,6 +1338,8 @@ export class Foliage {
             if (this.queue.length) {
                 this.processQueue(camera);
             }
+
+            this.cullMerged(camera);
         }
 
         if (this.gl) {
@@ -1433,7 +1435,45 @@ export class Foliage {
         this.setReflectionPass(false);
     }
 
+    /**
+     * CPU path: merged batches span 256 m or more, and three culls them with the bounding sphere of
+     * that whole square, so batches next to the camera drew even when looking at the sky. Batches
+     * that cast no shadow are culled here against their (much tighter) instance box instead; shadow
+     * casters stay to three, whose shadow pass culls against the light (their shadows may fall into
+     * view from outside it). The water reflection sees them all again (setReflectionPass).
+     */
+    private cullMerged(camera: THREE.Camera): void {
+        camera.updateMatrixWorld();
+        _projScreen.multiplyMatrices(
+            camera.projectionMatrix,
+            camera.matrixWorldInverse,
+        );
+        _frustum.setFromProjectionMatrix(_projScreen);
+        this.frustumHidden.length = 0;
+
+        for (const renderer of this.renderers.values()) {
+            for (const { mesh, batch } of renderer.merged.values()) {
+                if (mesh.castShadow) {
+                    continue;
+                }
+
+                mesh.visible = _frustum.intersectsBox(batch.box);
+
+                if (!mesh.visible) {
+                    this.frustumHidden.push(mesh);
+                }
+            }
+        }
+    }
+
+    /** Merged batches hidden by cullMerged this frame. */
+    private readonly frustumHidden: THREE.Mesh[] = [];
+
     private setReflectionPass(reflection: boolean): void {
+        for (const mesh of this.frustumHidden) {
+            mesh.visible = reflection;
+        }
+
         if (!this.gpuFrame) {
             return;
         }

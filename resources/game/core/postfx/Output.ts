@@ -200,23 +200,23 @@ export class OutputStage {
     finish(input: Vec4Node, features: OutputFeatures): Vec4Node {
         return Fn(() => {
             const col = input.rgb.toVar();
-            const px = screenCoordinate.xy;
+            // three's hash() takes ONE float seed: a pixel coordinate (vec2) would hash its x only and
+            // draw moving vertical stripes. Seeds are the integer pixel index (rows wrap after 2048,
+            // within float's exact integer range) plus a per-frame offset.
+            const px = screenCoordinate.xy.floor();
+            const pixel = px.x.add(px.y.mod(2048).mul(4099));
+            const frameSeed = (k: number) =>
+                this.frame
+                    .mod(509)
+                    .mul(8191)
+                    .add(k * 7919);
 
             if (features.grain) {
                 // Monochrome, animated; strongest in the mid-tones like film.
                 const gl = luma(col).clamp(0, 1);
-                const g = hash(
-                    px.add(this.frame.mul(0.618034).fract().mul(1000)),
-                )
-                    .add(
-                        hash(
-                            px
-                                .mul(1.37)
-                                .add(
-                                    this.frame.mul(0.414214).fract().mul(1000),
-                                ),
-                        ),
-                    )
+                // Sum of two uniform samples: a triangular distribution, closer to film grain.
+                const g = hash(pixel.add(frameSeed(1)))
+                    .add(hash(pixel.add(frameSeed(2)).add(1048573)))
                     .sub(1);
                 col.addAssign(
                     g
@@ -227,7 +227,7 @@ export class OutputStage {
 
             // Dither to break up 8-bit banding in skies and fog.
             col.addAssign(
-                hash(px.add(this.frame.mul(0.1).fract().mul(97)))
+                hash(pixel.add(frameSeed(3)))
                     .sub(0.5)
                     .div(255),
             );

@@ -16,11 +16,17 @@ export const surfaceWetness = uniform(0);
  * like the wet terrain. Upward-facing surfaces get wet first, overhangs stay drier. The material's own
  * colour, textures and roughness stay the base, so it works on any standard node material.
  */
-export function applyWetness(material: THREE.MeshStandardNodeMaterial): void {
+export function applyWetness(
+    material: THREE.MeshStandardNodeMaterial,
+    base: {
+        color: THREE.Node<'vec3'> | THREE.Node<'color'>;
+        roughness: THREE.Node<'float'>;
+    } = { color: materialColor, roughness: materialRoughness },
+): void {
     const exposure = smoothstep(-0.6, 0.6, normalWorld.y).mul(0.5).add(0.5);
     const wet = surfaceWetness.mul(exposure);
-    material.colorNode = materialColor.mul(mix(1, 0.58, wet));
-    material.roughnessNode = mix(materialRoughness, 0.28, wet.mul(0.75));
+    material.colorNode = base.color.mul(mix(1, 0.58, wet));
+    material.roughnessNode = mix(base.roughness, 0.28, wet.mul(0.75));
 }
 
 /**

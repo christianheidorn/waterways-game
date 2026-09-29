@@ -1,5 +1,7 @@
 import * as THREE from 'three/webgpu';
+import { attribute, int, uniformArray } from 'three/tsl';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { applyWetness } from '../world/SurfaceWetness';
 
 /**
@@ -84,11 +86,14 @@ function wrapAngle(a: number): number {
 export class CharacterModel {
     readonly root: THREE.Group;
 
-    private readonly joints: THREE.Group[] = [];
+    /** Joint transforms (bones of the baked skinned mesh), indexed by J. */
+    private readonly joints: THREE.Object3D[] = [];
     private readonly geometries: THREE.BufferGeometry[] = [];
     private readonly materials: THREE.MeshStandardNodeMaterial[] = [];
     private readonly jacket: THREE.MeshStandardNodeMaterial;
     private readonly jacketTrim: THREE.MeshStandardNodeMaterial;
+    /** Part colours of the baked mesh (index = authoring material), updated by setColor. */
+    private palette: THREE.Color[] = [];
 
     private readonly scratch: Pose = new Float32Array(POSE_SIZE);
     private readonly target: Pose = new Float32Array(POSE_SIZE);
@@ -109,12 +114,12 @@ export class CharacterModel {
             roughness = 0.85,
             metalness = 0,
         ): THREE.MeshStandardNodeMaterial => {
+            // Authoring material: becomes a palette entry of the baked mesh.
             const m = new THREE.MeshStandardNodeMaterial({
                 color: c,
                 roughness,
                 metalness,
             });
-            applyWetness(m);
             this.materials.push(m);
 
             return m;
@@ -453,12 +458,173 @@ export class CharacterModel {
             add(foot, rbox(0.108, 0.026, 0.255, 0.01), sole, 0, -0.068, -0.045);
         }
 
+        this.bake();
         this.applyPose(this.target);
     }
 
     setColor(color: THREE.ColorRepresentation): void {
         this.jacket.color.set(color);
         this.jacketTrim.color.set(color).multiplyScalar(0.62);
+        const jacket = this.materials.indexOf(this.jacket);
+        const trim = this.materials.indexOf(this.jacketTrim);
+
+        if (this.palette.length) {
+            this.palette[jacket].copy(this.jacket.color);
+            this.palette[trim].copy(this.jacketTrim.color);
+        }
+    }
+
+    /**
+     * Turns the authored parts (~55 meshes under joint groups, 15 materials) into ONE skinned mesh with
+     * one material: every part is rigidly bound to its joint (weight 1), and colour / roughness /
+     * metalness come from a per-vertex palette index. One draw (plus one in the shadow pass) instead of
+     * ~110, with the same look and animation.
+     */
+    private bake(): void {
+        this.root.updateMatrixWorld(true);
+        const jointIndex = new Map<THREE.Object3D, number>(
+            this.joints.map((joint, i) => [joint, i]),
+        );
+        const parts: THREE.BufferGeometry[] = [];
+
+        this.root.traverse((object) => {
+            const mesh = object as THREE.Mesh;
+
+            if (!mesh.isMesh) {
+                return;
+            }
+
+            let owner = mesh.parent;
+
+            while (owner && !jointIndex.has(owner)) {
+                owner = owner.parent;
+            }
+
+            const source = mesh.geometry;
+            const part = source.index ? source.toNonIndexed() : source.clone();
+
+            for (const name of Object.keys(part.attributes)) {
+                if (name !== 'position' && name !== 'normal') {
+                    part.deleteAttribute(name);
+                }
+            }
+
+            // Rest pose in model space (the root is at the origin while building).
+            part.applyMatrix4(mesh.matrixWorld);
+            const count = part.attributes.position.count;
+            const joint = owner ? jointIndex.get(owner)! : 0;
+            const skinIndex = new Uint16Array(count * 4);
+            const skinWeight = new Float32Array(count * 4);
+            const palette = new Float32Array(count).fill(
+                this.materials.indexOf(
+                    mesh.material as THREE.MeshStandardNodeMaterial,
+                ),
+            );
+
+            for (let i = 0; i < count; i++) {
+                skinIndex[i * 4] = joint;
+                skinWeight[i * 4] = 1;
+            }
+
+            part.setAttribute(
+                'skinIndex',
+                new THREE.BufferAttribute(skinIndex, 4),
+            );
+            part.setAttribute(
+                'skinWeight',
+                new THREE.BufferAttribute(skinWeight, 4),
+            );
+            part.setAttribute('palette', new THREE.BufferAttribute(palette, 1));
+            parts.push(part);
+        });
+
+        const geometry = mergeGeometries(parts);
+
+        for (const part of parts) {
+            part.dispose();
+        }
+
+        if (!geometry) {
+            throw new Error(
+                'CharacterModel: could not merge the character parts',
+            );
+        }
+
+        // Bones mirroring the joint hierarchy and rest transforms.
+        const bones = this.joints.map((joint) => {
+            const bone = new THREE.Bone();
+            bone.name = joint.name;
+            bone.position.copy(joint.position);
+            bone.quaternion.copy(joint.quaternion);
+            bone.scale.copy(joint.scale);
+
+            return bone;
+        });
+        let rootBone: THREE.Bone | null = null;
+
+        this.joints.forEach((joint, i) => {
+            const parent = joint.parent
+                ? jointIndex.get(joint.parent)
+                : undefined;
+
+            if (parent === undefined) {
+                rootBone = bones[i];
+            } else {
+                bones[parent].add(bones[i]);
+            }
+        });
+
+        this.palette = this.materials.map((m) => m.color.clone());
+        const colors = uniformArray(this.palette, 'color');
+        const roughness = uniformArray(
+            this.materials.map((m) => m.roughness),
+            'float',
+        );
+        const metalness = uniformArray(
+            this.materials.map((m) => m.metalness),
+            'float',
+        );
+        const index = int(attribute('palette', 'float').add(0.5));
+        const material = new THREE.MeshStandardNodeMaterial();
+        material.name = 'Character';
+        applyWetness(material, {
+            color: colors.element(index) as unknown as THREE.Node<'color'>,
+            roughness: roughness.element(
+                index,
+            ) as unknown as THREE.Node<'float'>,
+        });
+        material.metalnessNode = metalness.element(
+            index,
+        ) as unknown as THREE.Node<'float'>;
+
+        const mesh = new THREE.SkinnedMesh(geometry, material);
+        mesh.name = 'Character';
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        // Animated bounds change every frame; the player is always near the camera anyway.
+        mesh.frustumCulled = false;
+        mesh.add(rootBone!);
+        mesh.updateMatrixWorld(true);
+        mesh.bind(new THREE.Skeleton(bones));
+
+        // Drop the authoring objects; the joints become the bones.
+        for (const g of this.geometries) {
+            g.dispose();
+        }
+
+        this.geometries.length = 0;
+        this.geometries.push(geometry);
+
+        for (const m of this.materials) {
+            m.dispose();
+        }
+
+        this.materials.push(material);
+        this.root.clear();
+        this.root.add(mesh);
+        bones.forEach((bone, i) => {
+            this.joints[i] = bone;
+        });
     }
 
     update(dt: number, state: CharacterAnimState): void {

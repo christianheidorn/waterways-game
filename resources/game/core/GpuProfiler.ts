@@ -1,5 +1,6 @@
 import { InspectorBase, TimestampQuery } from 'three/webgpu';
 import type { Object3D, RenderTarget } from 'three/webgpu';
+import { isWebGpu } from './renderer';
 import type { GameRenderer } from './renderer';
 
 export type ProfileSection = {
@@ -11,6 +12,13 @@ export type ProfileSection = {
 };
 
 const SMOOTHING = 0.15;
+/**
+ * On WebGL 2, without the per-pass breakdown, only every n-th frame is measured (for dynamic
+ * resolution): every render call of a measured frame costs a query, and the backend polls each
+ * query's result on a 1 ms timer. (WebGPU resolves a frame's queries in one go; its render pass
+ * descriptors also keep their timestamp writes once set, so tracking is not toggled there.)
+ */
+const SAMPLE_INTERVAL = 8;
 
 type QueryPools = Record<
     string,
@@ -133,7 +141,8 @@ function createInspector(profiler: {
  *   which all run inside one `render()`), otherwise to the section opened with `mark()`.
  * - CPU: performance.now() between `mark`s (not available per pipeline pass).
  *
- * With `detailed` off, the frame is a single section; its GPU total still drives dynamic resolution.
+ * With `detailed` off, the frame is a single section (on WebGL 2 measured every SAMPLE_INTERVAL
+ * frames); its GPU total still drives dynamic resolution.
  */
 export class GpuProfiler {
     private readonly state = {
@@ -152,11 +161,20 @@ export class GpuProfiler {
     private order: string[] = [];
     private frameOrder: string[] = [];
     private resolving = false;
+    /** The backend measures GPU time (timestamp queries requested and available). */
+    private readonly timestamps: boolean;
+    /** Undetailed frames are only measured every SAMPLE_INTERVAL frames (WebGL 2). */
+    private readonly sampled: boolean;
+    /** Timestamps are recorded for the current frame. */
+    private measuring = false;
+    private frameIndex = 0;
     /** Total GPU time of the most recent measured frame in ms (null until the first result / unsupported). */
     lastMs: number | null = null;
 
     constructor(private readonly renderer: GameRenderer) {
         renderer.inspector = createInspector(this.state);
+        this.timestamps = !!this.backend.trackTimestamp;
+        this.sampled = !isWebGpu(renderer);
     }
 
     /** Per-pass sections (true) or a single whole-frame measurement (false). */
@@ -169,14 +187,25 @@ export class GpuProfiler {
     }
 
     get supported(): boolean {
-        const backend = this.renderer.backend as { trackTimestamp?: boolean };
+        return this.timestamps;
+    }
 
-        return !!backend.trackTimestamp;
+    private get backend(): { trackTimestamp?: boolean } {
+        return this.renderer.backend as { trackTimestamp?: boolean };
     }
 
     /** Starts a frame with its first section. */
     begin(name: string): void {
         this.frameOrder = [];
+        this.frameIndex = (this.frameIndex + 1) % SAMPLE_INTERVAL;
+        this.measuring =
+            this.timestamps &&
+            (this.detailed || !this.sampled || this.frameIndex === 0);
+
+        if (this.sampled) {
+            // Checked per render call.
+            this.backend.trackTimestamp = this.measuring;
+        }
         this.start(this.detailed ? name : 'Frame');
     }
 
@@ -199,7 +228,10 @@ export class GpuProfiler {
         this.stop();
         this.order = this.frameOrder;
         this.state.section = 'Frame';
-        void this.resolve();
+
+        if (this.measuring) {
+            void this.resolve();
+        }
     }
 
     /** Sections of the last frame, in order. */
@@ -224,7 +256,7 @@ export class GpuProfiler {
     }
 
     private async resolve(): Promise<void> {
-        if (this.resolving || !this.supported) {
+        if (this.resolving) {
             return;
         }
 

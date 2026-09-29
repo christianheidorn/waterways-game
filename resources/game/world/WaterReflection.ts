@@ -89,7 +89,11 @@ export class WaterReflection {
         }
 
         this.frame = 0;
-        const reflect = this.mirror(camera, renderer.coordinateSystem);
+        const reflect = this.mirror(
+            camera,
+            renderer.coordinateSystem,
+            renderer.reversedDepthBuffer,
+        );
 
         hide();
         const shadows = this.freezeShadows(scene);
@@ -122,6 +126,7 @@ export class WaterReflection {
     private mirror(
         camera: THREE.PerspectiveCamera,
         coordinateSystem: THREE.CoordinateSystem,
+        reversedDepth: boolean,
     ): THREE.PerspectiveCamera {
         const reflect = this.camera;
 
@@ -146,9 +151,11 @@ export class WaterReflection {
         reflect.fov = camera.fov;
         reflect.aspect = camera.aspect;
         reflect.layers.mask = camera.layers.mask;
-        // The renderer rebuilds the projection when the coordinate system differs, which would drop
-        // the oblique clip plane below.
+        // The renderer rebuilds the projection when the coordinate system or the depth direction
+        // differs, which would drop the oblique clip plane below.
         reflect.coordinateSystem = coordinateSystem;
+        (reflect as unknown as { _reversedDepth: boolean })._reversedDepth =
+            reversedDepth;
         reflect.updateMatrixWorld();
         reflect.updateProjectionMatrix();
 
@@ -188,19 +195,32 @@ export class WaterReflection {
             plane.constant,
         );
         const p = reflect.projectionMatrix.elements;
+        // View-space frustum corner opposite the clip plane on the far plane (clip z = 1, or 0 when
+        // reversed): the new far plane passes through it, so the frustum loses as little as possible.
         this.q.x = (Math.sign(this.clipPlane.x) + p[8]) / p[0];
         this.q.y = (Math.sign(this.clipPlane.y) + p[9]) / p[5];
         this.q.z = -1;
-        this.q.w = (1 + p[10]) / p[14];
-        const webGpuDepth = coordinateSystem === THREE.WebGPUCoordinateSystem;
-        // WebGPU clip depth is 0..1 (OpenGL: -1..1), which halves the scale of the new third row.
-        this.clipPlane.multiplyScalar(
-            (webGpuDepth ? 1 : 2) / this.clipPlane.dot(this.q),
-        );
-        p[2] = this.clipPlane.x;
-        p[6] = this.clipPlane.y;
-        p[10] = this.clipPlane.z + (webGpuDepth ? 0 : 1) - 0.003;
-        p[14] = this.clipPlane.w;
+        this.q.w = ((reversedDepth ? 0 : 1) + p[10]) / p[14];
+
+        if (reversedDepth) {
+            // Reversed (0..1, near = 1): the near plane is row 4 − row 3, so row 3 = row 4 − C·s.
+            this.clipPlane.multiplyScalar(1 / this.clipPlane.dot(this.q));
+            p[2] = -this.clipPlane.x;
+            p[6] = -this.clipPlane.y;
+            p[10] = -1 - this.clipPlane.z + 0.003;
+            p[14] = -this.clipPlane.w;
+        } else {
+            const webGpuDepth =
+                coordinateSystem === THREE.WebGPUCoordinateSystem;
+            // WebGPU clip depth is 0..1 (OpenGL: -1..1), which halves the scale of the new third row.
+            this.clipPlane.multiplyScalar(
+                (webGpuDepth ? 1 : 2) / this.clipPlane.dot(this.q),
+            );
+            p[2] = this.clipPlane.x;
+            p[6] = this.clipPlane.y;
+            p[10] = this.clipPlane.z + (webGpuDepth ? 0 : 1) - 0.003;
+            p[14] = this.clipPlane.w;
+        }
         reflect.projectionMatrixInverse.copy(reflect.projectionMatrix).invert();
 
         return reflect;

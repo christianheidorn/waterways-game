@@ -32,7 +32,12 @@ export class MotionBlur {
             const result = velocity.sample(p).xy.mul(vec2(0.5, -0.5)).toVar();
 
             If(f.isSky(f.rawDepth(p)), () => {
-                const ndc = vec4(p.x.mul(2).sub(1), p.y.mul(-2).add(1), 1, 1);
+                const ndc = vec4(
+                    p.x.mul(2).sub(1),
+                    p.y.mul(-2).add(1),
+                    f.farDepth,
+                    1,
+                );
                 const prev = this.reprojection.mul(ndc);
                 const prevUv = prev.xy
                     .div(prev.w)

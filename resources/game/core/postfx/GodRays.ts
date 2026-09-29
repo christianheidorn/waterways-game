@@ -48,15 +48,20 @@ export class GodRays {
             const vUv = uv();
             // 2×2 depth taps over this texel's footprint so thin occluders (branches) survive.
             const o = mask.resolution.reciprocal().mul(0.25);
-            const d = f
-                .rawDepth(vUv.add(vec2(o.x.negate(), o.y.negate())))
-                .min(f.rawDepth(vUv.add(vec2(o.x, o.y.negate()))))
-                .min(f.rawDepth(vUv.add(vec2(o.x.negate(), o.y))))
-                .min(f.rawDepth(vUv.add(o)));
+            const d = f.nearer(
+                f.nearer(
+                    f.rawDepth(vUv.add(vec2(o.x.negate(), o.y.negate()))),
+                    f.rawDepth(vUv.add(vec2(o.x, o.y.negate()))),
+                ),
+                f.nearer(
+                    f.rawDepth(vUv.add(vec2(o.x.negate(), o.y))),
+                    f.rawDepth(vUv.add(o)),
+                ),
+            );
             const result = vec4(0).toVar();
 
             If(f.isSky(d), () => {
-                const dir = f.viewPosition(vUv, float(1)).normalize();
+                const dir = f.viewPosition(vUv, f.farDepth).normalize();
                 const c = dir.dot(this.lightDirView).max(0);
                 const window = c.pow(24).add(c.pow(256));
                 const sky = sceneColor.sample(vUv).rgb.mul(this.exposure);

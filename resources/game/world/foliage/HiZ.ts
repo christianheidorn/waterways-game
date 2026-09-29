@@ -22,6 +22,7 @@ import {
     vec4,
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
+import { depthPrecision, fartherDepth, isSkyDepth } from '../../core/depth';
 import type { GameRenderer } from '../../core/renderer';
 
 /** Pyramid levels kept (level 1 = half the depth resolution; 12 levels cover 8k). */
@@ -38,7 +39,8 @@ export type HiZNodes = {
  *
  * Built each frame by compute from the scene pass depth of the PREVIOUS frame: level 1 is the depth at
  * half resolution, every further level halves again; each texel keeps the FARTHEST depth of the texels
- * it covers (non-power-of-two sizes round up, so a texel always covers all of its children). The
+ * it covers (the larger value, or the smaller with reversed depth; non-power-of-two sizes round up, so a
+ * texel always covers all of its children). The
  * levels live in one float storage buffer; `occludedNode()` tests a bounding sphere, reprojected with the
  * previous frame's camera, against 2×2 texels of the level where its screen rectangle spans ≤ 2 texels.
  *
@@ -163,9 +165,9 @@ export class HiZ {
                               buffer.element(
                                   uint(py.mul(source.x).add(px).add(src)),
                               );
-                const d = max(
-                    max(at(sx, sy), at(x1, sy)),
-                    max(at(sx, y1), at(x1, y1)),
+                const d = fartherDepth(
+                    fartherDepth(at(sx, sy), at(x1, sy)),
+                    fartherDepth(at(sx, y1), at(x1, y1)),
                 );
                 buffer.element(uint(offset).add(instanceIndex)).assign(d);
             })().compute(capacities[i]);
@@ -277,18 +279,27 @@ export function occludedNode(
                     nodes.buffer.element(
                         uint(info.x.add(ty.mul(info.y)).add(tx)),
                     );
-                const farthest = max(
-                    max(at(tx0, ty0), at(tx1, ty0)),
-                    max(at(tx0, ty1), at(tx1, ty1)),
-                );
-                // Depth of the sphere's nearest point.
-                const nearClip = prevProj.mul(
-                    vec4(0, 0, viewCenter.z.add(radius), 1),
-                );
-                const nearest = nearClip.z.div(nearClip.w);
+                const farthest = fartherDepth(
+                    fartherDepth(at(tx0, ty0), at(tx1, ty0)),
+                    fartherDepth(at(tx0, ty1), at(tx1, ty1)),
+                ).toVar();
 
-                If(nearest.greaterThan(farthest), () => {
-                    occluded.assign(1);
+                // Compared as distances along the view axis (clip z / w = depth on WebGPU, standard or
+                // reversed: distance = P[3][2] / (depth + P[2][2])), with a margin: a few depth buffer
+                // steps plus 0.2 % for sub-pixel silhouettes that TAA jitter moves between frames.
+                // Without it, trees just behind a distant ridge flicker between culled and drawn.
+                If(isSkyDepth(farthest).not(), () => {
+                    const p22 = prevProj.mul(vec4(0, 0, 1, 0)).z;
+                    const p32 = prevProj.mul(vec4(0, 0, 0, 1)).z;
+                    const occluder = p32.div(farthest.add(p22)).toVar();
+                    const margin = depthPrecision(occluder, near)
+                        .mul(8)
+                        .add(occluder.mul(0.002));
+                    const nearest = viewCenter.z.negate().sub(radius);
+
+                    If(nearest.greaterThan(occluder.add(margin)), () => {
+                        occluded.assign(1);
+                    });
                 });
             },
         );

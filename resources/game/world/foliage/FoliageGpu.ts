@@ -72,6 +72,7 @@ export class GpuCullFrame {
         this.frustum.setFromProjectionMatrix(
             this.projScreen,
             camera.coordinateSystem,
+            camera.reversedDepth,
         );
         const values = this.planes.array as THREE.Vector4[];
         this.frustum.planes.forEach((plane, i) =>
@@ -561,11 +562,29 @@ export class GpuFoliageType {
 
         for (const { mesh, offsets } of meshes) {
             const geometry = mesh.geometry;
+            // Drop the per-pass offset of an earlier chain (see below) before assigning a plain one.
+            Reflect.deleteProperty(geometry, 'indirectOffset');
             geometry.setIndirect(this.args, offsets[0].main);
 
             if (offsets.length > 1 || offsets[0].shadow !== null) {
                 // Every material group has its own index range, and LOD0 draws the shadow list (and
-                // the shadow proxy range) in the shadow pass: pick the arguments per draw.
+                // the shadow proxy range) in the shadow pass: pick the arguments per draw. The offset
+                // is resolved when the draw is encoded, not stored in onBeforeRender: the main pass
+                // renders the shadow map from within the node updates of a draw (after its
+                // onBeforeRender), which would leave the shadow offset behind for that main draw: the
+                // shadow list's instance count of main-list instances, in a different order every
+                // frame (whole trees flickering in and out).
+                const pass = {
+                    scene: null as THREE.Scene | null,
+                    main: offsets[0].main,
+                    shadow: offsets[0].shadow ?? offsets[0].main,
+                };
+                const inShadowPass = () =>
+                    !!(
+                        pass.scene?.overrideMaterial as {
+                            isShadowPassMaterial?: boolean;
+                        } | null
+                    )?.isShadowPassMaterial;
                 mesh.onBeforeRender = (
                     _renderer,
                     scene,
@@ -580,16 +599,20 @@ export class GpuFoliageType {
                           )
                         : 0;
                     const entry = offsets[Math.max(0, index)];
-                    const shadow = (
-                        scene.overrideMaterial as {
-                            isShadowPassMaterial?: boolean;
-                        } | null
-                    )?.isShadowPassMaterial;
-                    geometry.indirectOffset =
-                        shadow && entry.shadow !== null
-                            ? entry.shadow
-                            : entry.main;
+                    pass.scene = scene;
+
+                    if (inShadowPass()) {
+                        pass.shadow = entry.shadow ?? entry.main;
+                    } else {
+                        pass.main = entry.main;
+                    }
                 };
+                Object.defineProperty(geometry, 'indirectOffset', {
+                    configurable: true,
+                    get: () => (inShadowPass() ? pass.shadow : pass.main),
+                    // setIndirect(null) on dispose: the property is replaced on the next build.
+                    set: () => undefined,
+                });
             }
         }
 
@@ -774,6 +797,7 @@ export class GpuFoliageType {
         for (const draw of this.draws) {
             this.group.remove(draw.mesh);
             // The geometry belongs to the type (shared LOD); only the indirect draw goes.
+            Reflect.deleteProperty(draw.mesh.geometry, 'indirectOffset');
             draw.mesh.geometry.setIndirect(null);
         }
 

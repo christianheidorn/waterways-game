@@ -15,6 +15,7 @@ import {
     If,
     max,
     mix,
+    nodeObject,
     normalize,
     normalWorldGeometry,
     positionView,
@@ -27,7 +28,6 @@ import {
     smoothstep,
     sqrt,
     step,
-    texture,
     uniform,
     uniformArray,
     vec2,
@@ -63,6 +63,25 @@ type Vec2 = THREE.Node<'vec2'>;
 type Vec3 = THREE.Node<'vec3'>;
 type Vec4 = THREE.Node<'vec4'>;
 
+/**
+ * Texture node that is never updated per draw. The terrain samples its data textures hundreds of
+ * times per shader, and every sample is a texture node that three updates on each draw (UV
+ * transform matrix, and on WebGL 2 a y-flip uniform) — the bulk of a terrain draw's CPU cost. None
+ * of that changes here: the UVs are the shader's own and the y-flip of a data texture is always
+ * off (the uniform's default). Samples (`.sample()` clones) keep the class.
+ */
+class FixedTextureNode extends THREE.TextureNode {}
+
+Object.defineProperty(FixedTextureNode.prototype, 'updateType', {
+    get: () => THREE.NodeUpdateType.NONE,
+    // Assigned by the node constructor and set up; ignored.
+    set: () => {},
+});
+
+function fixedTexture(value: THREE.Texture): THREE.TextureNode {
+    return nodeObject(new FixedTextureNode(value));
+}
+
 function createUniforms(
     splat: SplatMap,
     size: number,
@@ -88,12 +107,12 @@ function createUniforms(
     const tint = Array.from({ length: 8 }, () => new THREE.Color(1, 1, 1));
 
     return {
-        uSplat0: texture(splat.textures[0]),
-        uSplat1: texture(splat.textures[1]),
-        uNoise: texture(noise),
-        uAlbedoArr: texture(textures.albedoRough),
-        uDetailArr: texture(textures.normalAoHeight),
-        uWet: texture(wet),
+        uSplat0: fixedTexture(splat.textures[0]),
+        uSplat1: fixedTexture(splat.textures[1]),
+        uNoise: fixedTexture(noise),
+        uAlbedoArr: fixedTexture(textures.albedoRough),
+        uDetailArr: fixedTexture(textures.normalAoHeight),
+        uWet: fixedTexture(wet),
         uMapHalf: uniform(size / 2),
         uCell: uniform(size / (resolution - 1)),
         uRes: uniform(resolution),
@@ -134,6 +153,8 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
     private layers: TerrainLayer[] = [];
     private readonly noise: THREE.DataTexture;
     private readonly blankWet: THREE.DataTexture;
+    /** Albedo of the splat surface (see setupDiffuseColor). */
+    private surfaceColor!: THREE.Node<'vec4'>;
 
     constructor(
         splat: SplatMap,
@@ -286,6 +307,17 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
     }
 
     /**
+     * The surface colour is set up here rather than as `colorNode`: three's shadow pass multiplies
+     * the depth output by `colorNode.a`, which would run the whole splat shading (hundreds of texture
+     * samples, and as many per-draw texture node updates on the CPU) for an opaque shadow caster.
+     */
+    override setupDiffuseColor(builder: THREE.NodeBuilder): void {
+        this.colorNode = this.surfaceColor;
+        super.setupDiffuseColor(builder);
+        this.colorNode = null;
+    }
+
+    /**
      * The surface is evaluated once, in the colour node, and handed to the normal / roughness / AO
      * nodes through shader-global properties (so the lighting and MRT outputs never re-run it).
      */
@@ -296,7 +328,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
         const surfaceAO = property('float', 'terrainAO');
         const surfaceBump = property('float', 'terrainBump');
 
-        this.colorNode = Fn(() => {
+        this.surfaceColor = Fn(() => {
             const s = terrainSurface(u);
             surfaceNormal.assign(s.normal);
             surfaceRoughness.assign(s.roughness);

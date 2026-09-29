@@ -165,7 +165,7 @@ export class Game {
             this.loading.hide();
             this.running = true;
             this.timer.connect(document);
-            this.renderer.setAnimationLoop(() => this.frame());
+            void this.renderer.setAnimationLoop(() => this.frame());
             this.bridge.send({
                 type: 'ready',
                 mapId: this.manifest.map.id,

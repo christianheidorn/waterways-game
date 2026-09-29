@@ -48,6 +48,7 @@ export async function installWebGpuCompat(): Promise<void> {
             texture.createView({ swizzle: 'rgba' } as GPUTextureViewDescriptor);
         } catch {
             const proto = GPUTexture.prototype;
+            // eslint-disable-next-line typescript/unbound-method -- re-bound with .call below
             const createView = proto.createView;
             proto.createView = function (
                 this: GPUTexture,

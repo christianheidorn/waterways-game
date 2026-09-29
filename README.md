@@ -507,7 +507,41 @@ vendor/bin/pint --test      # PHP style
 
 ## Roadmap ideas
 
-- A terrain texture library (PBR albedo, normal and roughness) plus triplanar mapping for cliffs.
+**In progress:** biomes and rule-based procedural trees, height-based terrain layer blending, grass that takes
+the terrain colour at its roots, ground cover generated on the GPU (WebGPU), cached shadows, editor debug views.
+
+Looks:
+
+- Macro colour variation across the terrain, to hide texture tiling from above.
+- Smooth (dithered) crossfades between foliage LODs instead of hard switches.
+- Visible wind gusts travelling across grass fields and tree canopies.
+- Grass that bends around the player.
+- Cloud shadows moving over the landscape, and light shafts through trees in fog.
+- Bounce light: a coarse irradiance grid (green light under a canopy, warm light off sand).
+- Water: shoreline foam, rivers flowing along their course, caustics on shallow beds.
+- Weather traces: footprints in snow, puddles collecting in hollows during rain.
+- Triplanar mapping for cliffs.
+
+Performance:
+
+- Two-phase occlusion culling (no one-frame-late reveal when turning quickly past obstacles).
+- Dynamic resolution that holds the display's refresh rate instead of fixed presets.
+- Compressed textures (KTX2 / Basis) and compressed models: less video memory, faster loading.
+- Octahedral impostors for distant trees (correct from every angle, so the far LOD can start closer).
+- Editor work in web workers on the WebGL fallback (erosion, scatter, ground cover).
+
+Building:
+
+- A path / road tool (flattens, paints a layer, clears foliage, blends edges); rivers editable after creation.
+- Landscape stamps (mountain, crater, dune and ridge shapes).
+- Prop placement: individual models (huts, bridges, rocks) with snapping, rotation and scale.
+- All layer, material and weather settings editable in the editor instead of the studio.
+- An undo history panel, and automatic map snapshots.
+- A walk mode inside the editor to judge scale without switching to Play.
+- Map templates ("coastal village", "alpine lake") and AI-described starting maps.
+
+Further out:
+
 - Streaming and multi-tile worlds beyond 1025².
 - Terrain holes, and foliage collision for the player.
 - Gameplay entities: NPCs, boats, quests.

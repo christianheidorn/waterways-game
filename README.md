@@ -181,10 +181,16 @@ about missing or over-budget LODs.
 - The survivors are compacted into per-LOD lists, and each LOD draws with **one indirect draw call**. The CPU
   does no per-instance work, however much foliage a map has.
 - Shadow casters get their own list, within the foliage shadow distance.
+- The water's planar reflection gets its own cull against the mirrored camera (coarser LODs, no Hi-Z), so
+  trees behind or beside the viewer still show in lakes and the sea.
+- Leaves and blades are translucent: sky light passes through the canopy and they glow when backlit, so
+  foliage keeps its colour under overcast skies.
 - The F10 foliage table shows the instances drawn per LOD and the occluded count; "Foliage culling" in the pass
   table is the compute cost.
 
-On the WebGL 2 backend (no compute shaders), foliage uses CPU culling of 32–128 m cells with instanced meshes.
+On the WebGL 2 backend (no compute shaders), foliage uses CPU culling of 32–128 m cells with instanced meshes;
+sparse cells are merged into 256 m batches and distant terrain is drawn by quadtree nodes, so the fallback
+needs about as many draw calls as the pre-WebGPU renderer.
 
 ## Player characters
 
@@ -260,6 +266,11 @@ value is neutral, and the light-shaft passes are skipped while the sun is off-sc
 rebuilt only when that set of passes changes; other changes only update uniforms. Every change applies
 live, without a reload.
 
+**Depth precision.** On WebGPU the depth buffer is reversed-Z floating point, which keeps distant
+geometry, water and occlusion culling stable out to the far plane. WebGL 2 keeps a standard 24-bit depth
+buffer: three.js r186's view-position reconstruction doesn't support reversed depth there yet. The game's
+own depth code handles both.
+
 **Graphics API.** `renderer_backend` picks WebGPU (Metal / D3D12 / Vulkan; compute shaders, GPU-driven
 foliage culling), WebGL 2, or Automatic (WebGPU when the browser supports it). It applies after a reload;
 the in-game menu has a Reload button and shows the backend the game is running on.
@@ -307,7 +318,8 @@ only when it is enabled.
 3. Screen-space reflections where the material is glossy (wet ground: the terrain's roughness).
 4. Light shafts (radial blur of the bright sky around the sun or moon).
 5. HDR lighting composite of 2-4 at the scene resolution.
-6. TAA, or TAAU below 1× render scale (see Graphics quality). Everything after this runs at the output
+6. TAA (un-jittered reconstruction, closest-depth reprojection, Catmull-Rom history, YCoCg variance
+   clipping), or TAAU below 1× render scale (see Graphics quality). Everything after this runs at the output
    resolution.
 7. Depth of field (physical circle of confusion, autofocus or click-to-focus).
 8. Motion blur (skipped for stills and on camera cuts).

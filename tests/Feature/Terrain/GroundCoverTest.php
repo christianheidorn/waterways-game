@@ -37,7 +37,7 @@ class GroundCoverTest extends TestCase
 
         $manifest = app(GameManifest::class)->build($map->refresh());
         $slot0 = collect($manifest['layers'])->firstWhere('slot', 0);
-        $this->assertSame([['foliage_type_id' => $grass->id, 'density' => 1.5]], $slot0['ground_cover']);
+        $this->assertSame([['foliage_type_id' => $grass->id, 'density' => 1.5, 'clustering' => 0.0, 'spacing' => 0.0]], $slot0['ground_cover']);
         $this->assertStringEndsWith("/api/maps/{$map->slug}/layers", $manifest['endpoints']['update_layers']);
 
         // Clearing it.
@@ -62,6 +62,8 @@ class GroundCoverTest extends TestCase
             ['foliage_type_id' => $grass->id, 'density' => 1],
             ['foliage_type_id' => $grass->id, 'density' => 2],
         ]])->assertStatus(422);
+        $this->patchJson($url, ['ground_cover' => [['foliage_type_id' => $grass->id, 'density' => 1, 'clustering' => 2]]])
+            ->assertStatus(422)->assertJsonValidationErrors('ground_cover.0.clustering');
         $this->patchJson($url, [])->assertStatus(422);
 
         // A layer of another map.
@@ -81,10 +83,10 @@ class GroundCoverTest extends TestCase
         $this->put("/maps/{$map->slug}/layers/{$layer->id}", [
             'name' => 'Meadow', 'color' => '#4f6b2a', 'color_secondary' => '#6f8a34', 'roughness' => 0.9, 'noise_scale' => 6,
             'variation' => 0.5, 'bump' => 0.3, 'auto_priority' => 0,
-            'ground_cover' => [['foliage_type_id' => $grass->id, 'density' => 0.5]],
+            'ground_cover' => [['foliage_type_id' => $grass->id, 'density' => 0.5, 'clustering' => 0.8, 'spacing' => 6]],
         ])->assertSessionHasNoErrors();
 
-        $this->assertSame([['foliage_type_id' => $grass->id, 'density' => 0.5]], $layer->refresh()->groundCover());
+        $this->assertSame([['foliage_type_id' => $grass->id, 'density' => 0.5, 'clustering' => 0.8, 'spacing' => 6.0]], $layer->refresh()->groundCover());
 
         $this->get("/maps/{$map->slug}/layers")
             ->assertOk()

@@ -209,6 +209,8 @@ class TerrainLayerController extends Controller
             'ground_cover' => ['sometimes', 'nullable', 'array', 'max:8'],
             'ground_cover.*.foliage_type_id' => ['required', 'integer', 'distinct', 'exists:foliage_types,id'],
             'ground_cover.*.density' => ['required', 'numeric', 'between:0,4'],
+            'ground_cover.*.clustering' => ['sometimes', 'numeric', 'between:0,1'],
+            'ground_cover.*.spacing' => ['sometimes', 'numeric', 'between:0,50'],
         ];
     }
 }

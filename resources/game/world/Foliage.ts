@@ -621,7 +621,12 @@ export class Foliage {
                     this.types.has(entry.foliage_type_id)
                 ) {
                     const list = sources.get(entry.foliage_type_id) ?? [];
-                    list.push({ slot: layer.slot, density: entry.density });
+                    list.push({
+                        slot: layer.slot,
+                        density: entry.density,
+                        clustering: entry.clustering ?? 0,
+                        spacing: entry.spacing ?? 0,
+                    });
                     sources.set(entry.foliage_type_id, list);
                 }
             }

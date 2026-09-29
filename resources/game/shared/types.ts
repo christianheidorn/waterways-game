@@ -265,6 +265,10 @@ export type GroundCoverEntry = {
     foliage_type_id: number;
     /** Multiplier on the type's density at full paint weight (0-4). */
     density: number;
+    /** 0 = even spread … 1 = groves and clearings (default 0). */
+    clustering?: number;
+    /** Minimum distance between instances in metres (default 0: from the density alone). */
+    spacing?: number;
 };
 
 export type MaterialMapName =

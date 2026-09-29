@@ -168,6 +168,24 @@ the switch from LOD0 to LOD1 happens per instance, not per 128 m cell, so full-d
 LOD distance. The F10 menu lists per-type instances drawn, triangles per LOD and LOD distances, and warns
 about missing or over-budget LODs.
 
+**GPU-driven foliage (WebGPU).** Like Unreal's GPU scene, the GPU decides what to draw
+(`world/foliage/FoliageGpu.ts`):
+
+- Every instance of a type lives in one GPU storage buffer. Painting, erasing, re-scattering and type edits
+  update only the changed ranges.
+- Each frame one compute pass per type tests every instance: cull distance × foliage distance, density falloff,
+  per-instance LOD with the LOD bias, the view frustum, and **Hi-Z occlusion**
+  (`world/foliage/HiZ.ts`). Hi-Z builds a depth pyramid from the previous frame's depth and skips plants
+  hidden behind terrain or other trees. It is conservative: anything uncertain counts as visible, and it is
+  off for a frame after camera cuts.
+- The survivors are compacted into per-LOD lists, and each LOD draws with **one indirect draw call**. The CPU
+  does no per-instance work, however much foliage a map has.
+- Shadow casters get their own list, within the foliage shadow distance.
+- The F10 foliage table shows the instances drawn per LOD and the occluded count; "Foliage culling" in the pass
+  table is the compute cost.
+
+On the WebGL 2 backend (no compute shaders), foliage uses CPU culling of 32–128 m cells with instanced meshes.
+
 ## Player characters
 
 **Characters** (Studio → Characters) are playable, rigged and animated models:
@@ -293,10 +311,10 @@ only when it is enabled.
    resolution.
 7. Depth of field (physical circle of confusion, autofocus or click-to-focus).
 8. Motion blur (skipped for stills and on camera cuts).
-9. Auto exposure (GPU histogram without read-backs: compute shaders on WebGPU, a luminance reduction on
-   WebGL 2).
+9. Auto exposure (GPU histogram without read-backs: a log-luminance image reduced to 16×16 block means and
+   a 1×1 feedback pass, identical on WebGPU and WebGL 2).
 10. Bloom and lens flare.
-11. Output: chromatic aberration, tone mapping, sharpening, 3D-LUT colour grade, saturation and contrast,
+11. Output: chromatic aberration, tone mapping, sharpening, LUT colour grade, saturation and contrast,
     vignette; then FXAA / SMAA and FSR 1 when selected; film grain, dither and letterbox.
 
 **Quality switches** live in Game settings → Graphics → Cinematic effects and are set by the presets:
@@ -415,11 +433,15 @@ app/
                            water surface builder (rasterise, ocean flood fill, carve), binary storage
   Support/                 Schema-driven settings (SettingField/Group), GameManifest, default layers
 resources/js/              Creator Studio (React + shadcn/ui); pages/maps/editor.tsx hosts the game
-resources/game/            The game (plain TypeScript + Three.js, separate Vite entry)
+resources/game/            The game (TypeScript + Three.js WebGPURenderer with TSL node materials; WebGPU with a
+                           WebGL 2 fallback; separate Vite entry)
   shared/                  Contracts shared with the studio: manifest types + postMessage protocol
-  core/                    Game loop, API client, iframe bridge, input
+  core/                    Game loop, renderer setup, API client, iframe bridge, input, GPU profiler,
+                           PostFx (RenderPipeline) + postfx/ (one TSL module per effect)
   world/                   Heightfield, Terrain (LOD chunks), TerrainMaterial, SplatMap, Water,
-                           Atmosphere, Foliage (+ procedural FoliageGeometry, baked GLB LODs)
+                           Atmosphere, SkyDome, HeightFog (scene fog node), Weather,
+                           Foliage (+ procedural FoliageGeometry, baked GLB LODs, foliage/: TSL material,
+                           GPU culling, Hi-Z, impostors)
   tools/FoliageBaker.ts    In-browser foliage asset optimiser (LODs, impostor, cards, thumbnail)
   player/                  Character controller, third-person camera, procedural / glTF character
   editor/                  Editor (tools, strokes), Brush, History (undo), FlyCamera, terrainOps, UI panel
@@ -457,7 +479,6 @@ vendor/bin/pint --test      # PHP style
 ## Roadmap ideas
 
 - A terrain texture library (PBR albedo, normal and roughness) plus triplanar mapping for cliffs.
-- Screen-space reflections and refraction for water.
 - Streaming and multi-tile worlds beyond 1025².
 - Terrain holes, and foliage collision for the player.
 - Gameplay entities: NPCs, boats, quests.

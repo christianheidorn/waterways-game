@@ -8,6 +8,7 @@ import type {
     Vec3Node,
     Vec4Node,
 } from './common';
+import { isSkyDepth } from '../depth';
 import { ScreenPass } from './common';
 
 export type CompositeInputs = {
@@ -84,9 +85,15 @@ export class Composite {
         this.pass.fragment = Fn(() => {
             const vUv = uv();
             const c = inputs.color.sample(vUv).rgb.toVar();
+            // Screen-space terms belong to surfaces only. The sky dome writes no depth, but three's GTAO
+            // and SSR only recognise the standard far depth (1) as sky, not the reversed one (0): left
+            // alone they shade the sky with the dome's box normals (a faint box around the world).
+            const surface = float(1)
+                .sub(isSkyDepth(f.rawDepth(vUv)).select(float(1), float(0)))
+                .toVar();
 
             if (ao) {
-                c.mulAssign(mix(1, ao.sample(vUv).r, 0.8));
+                c.mulAssign(mix(1, ao.sample(vUv).r, surface.mul(0.8)));
             }
 
             if (contact) {
@@ -94,7 +101,7 @@ export class Composite {
                     mix(
                         1,
                         contactShadow(vUv, contact.texture, contact.size),
-                        this.contactStrength,
+                        this.contactStrength.mul(surface),
                     ),
                 );
             }
@@ -105,8 +112,12 @@ export class Composite {
                 const ndv = ssr.normal.dot(view.negate()).max(0);
                 const fresnel = ndv.oneMinus().pow(5).mul(0.98).add(0.02);
                 const hit = r.a.greaterThan(0).select(float(1), float(0));
-                const w = ssr.gloss.mul(fresnel).mul(hit).clamp(0, 1);
-                c.assign(c.mul(w.oneMinus()).add(r.rgb));
+                const w = ssr.gloss
+                    .mul(fresnel)
+                    .mul(hit)
+                    .mul(surface)
+                    .clamp(0, 1);
+                c.assign(c.mul(w.oneMinus()).add(r.rgb.mul(surface)));
             }
 
             if (rays) {

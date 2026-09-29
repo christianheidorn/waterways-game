@@ -29,6 +29,7 @@ import type { FoliageTypeUniforms, LodRole } from './foliage/FoliageMaterial';
 import { HiZ } from './foliage/HiZ';
 import { renderImpostor } from './foliage/Impostor';
 import { InstanceBatch } from './foliage/InstanceBatch';
+import type { InstanceView } from './foliage/InstanceBatch';
 import { INSTANCE_FLOATS, writeInstance } from './foliage/instances';
 import type { Heightfield } from './Heightfield';
 
@@ -74,6 +75,21 @@ const BUILD_BUDGET_MS = 4;
  * whole block is beyond the far LOD distance (distant forests become a few draw calls).
  */
 const CHUNK_CELLS = 4;
+/**
+ * CPU path: shown cells drawing at most MERGE_MAX_INSTANCES are merged per square, LOD and shadow
+ * flag into one batch. Sparse cells (a few rocks or trees each) would otherwise cost a draw call
+ * apiece, and every draw is expensive on the WebGL 2 backend. Squares are MERGE_SIZE metres at
+ * LOD0 and double per LOD (farther away, so about the same size on screen): larger ones would
+ * frustum-cull too coarsely.
+ */
+const MERGE_MAX_INSTANCES = 512;
+const MERGE_SIZE = 256;
+/** Small, dense kinds: not drawn in the water reflection (invisible in its ripples, costly). */
+const SMALL_KINDS: ReadonlySet<FoliageKind> = new Set([
+    'grass',
+    'flower',
+    'reed',
+]);
 /** Default distance (m) within which foliage casts shadows (GraphicsSettings.foliage_shadow_distance). */
 const DEFAULT_SHADOW_DISTANCE = 120;
 /**
@@ -121,10 +137,22 @@ type Cell = {
      */
     near: THREE.Mesh | null;
     nearBatch: InstanceBatch | null;
+    /** Drawn through a merged batch since the last evaluation (the cell mesh is hidden). */
+    merged: boolean;
 };
 
 /** A far-LOD batch over CHUNK_CELLS² cells; `data` is only filled while building. */
 type Chunk = Cell & { members: Cell[]; gx: number; gz: number };
+
+/** Copies of sparse cells of one chunk area drawn with one LOD and shadow flag (see mergeCells). */
+type MergedBatch = {
+    mesh: THREE.Mesh;
+    batch: InstanceBatch;
+    /** Source batches, their versions and drawn counts of the current contents. */
+    signature: string;
+    lod: number;
+    stamp: number;
+};
 
 type TypeRenderer = {
     type: FoliageType;
@@ -161,6 +189,8 @@ type TypeRenderer = {
     extent: THREE.Box3;
     /** Cells currently shown (mesh.visible = true). */
     shown: Cell[];
+    /** Merged batches of sparse shown cells by chunk area, LOD and shadow flag (CPU path). */
+    merged: Map<string, MergedBatch>;
     /** Distance fade / density falloff (per instance) for small foliage. */
     fade: boolean;
     falloff: { start: number; min: number } | null;
@@ -338,6 +368,8 @@ export class Foliage {
     private evalTimer = 0;
     private readonly lastEvalPos = new THREE.Vector3(Infinity, 0, 0);
     private readonly queue: { renderer: TypeRenderer; cell: Cell }[] = [];
+    /** Released instance batches (CPU path), reused before new ones are allocated. */
+    private readonly batchPool: InstanceBatch[] = [];
     private lastCamera: THREE.Camera | null = null;
     /** Renderer used to render missing impostors (set explicitly or picked up from a draw). */
     private gl: GameRenderer | null = null;
@@ -349,6 +381,8 @@ export class Foliage {
 
     constructor() {
         this.group.name = 'Foliage';
+        // Static: an auto-updated group would recompute every cell mesh's world matrix each frame.
+        this.group.matrixAutoUpdate = false;
     }
 
     /**
@@ -490,6 +524,7 @@ export class Foliage {
                 this.removeCellMesh(chunk);
             }
 
+            this.clearMerged(renderer);
             renderer.cells.clear();
             renderer.grid.clear();
             renderer.chunks.clear();
@@ -1188,49 +1223,53 @@ export class Foliage {
                 continue;
             }
 
+            const drawn: { mesh: THREE.Mesh | null; lod: number }[] = [];
+
             for (const cell of renderer.shown) {
-                for (const mesh of [cell.mesh, cell.near]) {
-                    if (!mesh?.visible) {
-                        continue;
-                    }
+                stats.shownCells += cell.mesh?.visible || cell.merged ? 1 : 0;
+                drawn.push(
+                    { mesh: cell.mesh, lod: cell.lod },
+                    { mesh: cell.near, lod: 0 },
+                );
+            }
 
-                    const lod = mesh === cell.near ? 0 : cell.lod;
+            for (const merged of renderer.merged.values()) {
+                drawn.push(merged);
+            }
 
-                    if (mesh === cell.mesh) {
-                        stats.shownCells++;
-                    }
+            for (const { mesh, lod } of drawn) {
+                if (!mesh?.visible) {
+                    continue;
+                }
 
-                    stats.shadowCasters += mesh.castShadow ? 1 : 0;
-                    detail.shadowCasters += mesh.castShadow ? 1 : 0;
+                stats.shadowCasters += mesh.castShadow ? 1 : 0;
+                detail.shadowCasters += mesh.castShadow ? 1 : 0;
 
-                    if (
-                        camera &&
-                        !_frustum.intersectsSphere(
-                            mesh.geometry.boundingSphere!,
-                        )
-                    ) {
-                        continue;
-                    }
+                if (
+                    camera &&
+                    !_frustum.intersectsSphere(mesh.geometry.boundingSphere!)
+                ) {
+                    continue;
+                }
 
-                    const geometry = mesh.geometry;
-                    const count = instanceCountOf(mesh);
-                    const groups = Array.isArray(mesh.material)
-                        ? Math.max(1, geometry.groups.length)
-                        : 1;
-                    const triangles = triangleCount(geometry) * count;
-                    stats.drawnInstances += count;
-                    stats.drawCalls += groups;
-                    stats.triangles += triangles;
-                    typeStats.drawCalls += groups;
-                    typeStats.triangles += triangles;
-                    typeStats.instances += count;
-                    detail.drawn += count;
-                    detail.drawCalls += groups;
-                    detail.triangles += triangles;
+                const geometry = mesh.geometry;
+                const count = instanceCountOf(mesh);
+                const groups = Array.isArray(mesh.material)
+                    ? Math.max(1, geometry.groups.length)
+                    : 1;
+                const triangles = triangleCount(geometry) * count;
+                stats.drawnInstances += count;
+                stats.drawCalls += groups;
+                stats.triangles += triangles;
+                typeStats.drawCalls += groups;
+                typeStats.triangles += triangles;
+                typeStats.instances += count;
+                detail.drawn += count;
+                detail.drawCalls += groups;
+                detail.triangles += triangles;
 
-                    if (lod < detail.lodInstances.length) {
-                        detail.lodInstances[lod] += count;
-                    }
+                if (lod < detail.lodInstances.length) {
+                    detail.lodInstances[lod] += count;
                 }
             }
         }
@@ -1296,12 +1335,15 @@ export class Foliage {
      * GPU-driven culling (WebGPU; no-op on the CPU path): builds the Hi-Z pyramid from the previous
      * frame's scene depth, then one compute pass per type culls every instance and writes the
      * indirect draw arguments. Call once per frame after update(), before the scene is rendered.
+     * `reflection` is the water reflection's camera when the reflection renders this frame: the same
+     * passes fill its own visibility lists (drawn between beginReflection() and endReflection()).
      */
     cull(
         renderer: GameRenderer,
         camera: THREE.Camera,
         depth?: THREE.Texture | null,
         profiler?: GpuProfiler | null,
+        reflection?: THREE.Camera | null,
     ): void {
         if (!isWebGpu(renderer)) {
             return;
@@ -1324,6 +1366,7 @@ export class Foliage {
         camera.updateMatrixWorld();
         this.globals.camPos.value.copy(camera.position);
         frame.setCamera(camera);
+        frame.setReflection(reflection ?? null);
         frame.lodBias.value = this.lodBias;
         frame.shadowDistance.value = this.shadowDistance;
 
@@ -1363,6 +1406,29 @@ export class Foliage {
         this.hasPrevious = true;
     }
 
+    /**
+     * Around the water reflection's render: the GPU path swaps its draws for the ones culled against
+     * the reflection camera (see cull()). The CPU path needs nothing: three frustum-culls its cells
+     * per camera.
+     */
+    beginReflection(): void {
+        this.setReflectionPass(true);
+    }
+
+    endReflection(): void {
+        this.setReflectionPass(false);
+    }
+
+    private setReflectionPass(reflection: boolean): void {
+        if (!this.gpuFrame) {
+            return;
+        }
+
+        for (const renderer of this.renderers.values()) {
+            renderer.gpu?.setReflectionPass(reflection);
+        }
+    }
+
     /** Switches to the GPU-driven path: CPU cell meshes go, every type gets its storage buffers. */
     private enableGpu(): void {
         this.gpuFrame = new GpuCullFrame(this.globals, new HiZ());
@@ -1377,6 +1443,7 @@ export class Foliage {
                 cell.queued = false;
             }
 
+            this.clearMerged(renderer);
             renderer.shown = [];
             this.attachGpu(renderer);
         }
@@ -1477,6 +1544,7 @@ export class Foliage {
                 : renderer.cellSize * 0.5,
             center: sphere.center,
             radius: sphere.radius,
+            reflect: !SMALL_KINDS.has(renderer.type.kind),
         };
     }
 
@@ -1660,6 +1728,8 @@ export class Foliage {
                     hideCell(cell);
                 }
             }
+
+            this.mergeCells(renderer, stamp);
         }
 
         if (this.queue.length > 1) {
@@ -1752,7 +1822,7 @@ export class Foliage {
             }
         } else {
             // Leaving far range: keep the chunk until every member in range has a mesh.
-            if (!chunk.mesh?.visible || near >= cull) {
+            if (!(chunk.mesh?.visible || chunk.merged) || near >= cull) {
                 return;
             }
 
@@ -1875,7 +1945,7 @@ export class Foliage {
 
         if (!cell.near || !nearBatch || nearBatch.capacity < batch.capacity) {
             this.removeNear(cell);
-            nearBatch = new InstanceBatch(batch.capacity);
+            nearBatch = this.acquireBatch(batch.capacity);
             const near = new THREE.Mesh(
                 nearBatch.view(renderer.drawLods[0]),
                 lodMaterial(renderer, 0),
@@ -1964,6 +2034,156 @@ export class Foliage {
         return Math.min(built, Math.ceil(target * built));
     }
 
+    /**
+     * Draws sparse shown cells through merged batches: the meshes of one square (MERGE_SIZE) that draw
+     * the same LOD (and LOD split role) with the same shadow flag are copied into one instance buffer
+     * (the drawn prefix of each, keeping the per-cell ranks of the density fade) and hidden. Cells the
+     * LOD split passes through contribute their LOD1 mesh and their LOD0 subset separately; far
+     * chunks merge per 2 × 2 chunks. Batches are only rewritten when their sources, source versions
+     * or drawn counts change; dense cells keep their own draws.
+     */
+    private mergeCells(renderer: TypeRenderer, stamp: number): void {
+        const groups = new Map<
+            string,
+            { lod: number; cells: Cell[]; sources: THREE.Mesh[] }
+        >();
+        const add = (cell: Cell, mesh: THREE.Mesh | null, lod: number) => {
+            if (!mesh?.visible || instanceCountOf(mesh) > MERGE_MAX_INSTANCES) {
+                return;
+            }
+
+            // Far chunks pair up (their own grid: cx / cz count chunks).
+            const chunk = isChunk(cell);
+            const span = chunk
+                ? 2
+                : Math.max(
+                      1,
+                      Math.round(
+                          (MERGE_SIZE << Math.max(0, lod - 1)) /
+                              renderer.cellSize,
+                      ),
+                  );
+
+            // The LOD0 subsets draw with the 'near' role, whole cells at LOD0 too.
+            const key = `${chunk ? 'c' : ''}${Math.floor(cell.cx / span)},${Math.floor(cell.cz / span)}:${lod}:${mesh.castShadow ? 1 : 0}`;
+            let group = groups.get(key);
+
+            if (!group) {
+                group = { lod, cells: [], sources: [] };
+                groups.set(key, group);
+            }
+
+            group.cells.push(cell);
+            group.sources.push(mesh);
+        };
+
+        for (const cell of renderer.shown) {
+            cell.merged = false;
+
+            add(cell, cell.mesh, cell.lod);
+            add(cell, cell.near, 0);
+        }
+
+        for (const [key, { lod, cells, sources }] of groups) {
+            if (sources.length < 2) {
+                continue;
+            }
+
+            let total = 0;
+            let signature = '';
+
+            for (const source of sources) {
+                const n = instanceCountOf(source);
+                const batch = batchOf(source);
+                total += n;
+                signature += `${batch.id}.${batch.version}:${n};`;
+            }
+
+            let merged = renderer.merged.get(key);
+
+            // Reallocated when full or far too large (the headroom avoids churn while counts vary).
+            if (
+                !merged ||
+                total > merged.batch.capacity ||
+                merged.batch.capacity > (total + 8) * 4
+            ) {
+                this.removeMerged(renderer, key);
+                const batch = this.acquireBatch(total);
+                const mesh = new THREE.Mesh(
+                    batch.view(renderer.drawLods[lod]),
+                    lodMaterial(renderer, lod),
+                );
+                this.setupMesh(renderer, mesh, `merged:${key}`);
+                this.group.add(mesh);
+                merged = { mesh, batch, signature: '', lod, stamp };
+                renderer.merged.set(key, merged);
+            }
+
+            const { mesh, batch } = merged;
+
+            if (merged.signature !== signature) {
+                merged.signature = signature;
+                _box.makeEmpty();
+                let offset = 0;
+
+                for (const source of sources) {
+                    const from = batchOf(source);
+                    const n = instanceCountOf(source) * INSTANCE_FLOATS;
+                    batch.array.set(from.array.subarray(0, n), offset);
+                    offset += n;
+                    _box.union(from.box);
+                }
+
+                batch.upload(total);
+                batch.setBounds(_box);
+            }
+
+            const view = batch.view(renderer.drawLods[lod]);
+            mesh.geometry = view;
+            mesh.material = lodMaterial(renderer, lod);
+            mesh.castShadow = sources[0].castShadow;
+            merged.lod = lod;
+            view.instanceCount = total;
+            mesh.visible = true;
+            merged.stamp = stamp;
+
+            for (const source of sources) {
+                source.visible = false;
+            }
+
+            for (const cell of cells) {
+                cell.merged = true;
+            }
+        }
+
+        for (const [key, merged] of renderer.merged) {
+            if (merged.stamp !== stamp) {
+                this.removeMerged(renderer, key);
+            }
+        }
+    }
+
+    private removeMerged(renderer: TypeRenderer, key: string): void {
+        const merged = renderer.merged.get(key);
+
+        if (merged) {
+            this.group.remove(merged.mesh);
+            this.releaseBatch(merged.batch);
+            renderer.merged.delete(key);
+        }
+    }
+
+    /** Drops every merged batch of a type (its cells show again on the next evaluation). */
+    private clearMerged(renderer: TypeRenderer): void {
+        for (const key of renderer.merged.keys()) {
+            this.removeMerged(renderer, key);
+        }
+
+        for (const cell of renderer.cells.values()) {
+            cell.merged = false;
+        }
+    }
+
     /** (Re)builds queued cells nearest-first within a per-frame time budget. */
     private processQueue(camera: THREE.Camera): void {
         const start = performance.now();
@@ -2027,6 +2247,14 @@ export class Foliage {
                 continue;
             }
 
+            // Its merged copy keeps drawing the old instances until the next evaluation re-merges.
+            if (cell.merged) {
+                hideCell(cell);
+                this.needsEval = true;
+
+                continue;
+            }
+
             const cam = camera.position;
             const cull = renderer.type.cull_distance * this.distanceScale;
             const dist = cell.bounds.distanceToPoint(cam);
@@ -2054,6 +2282,12 @@ export class Foliage {
 
         this.renderers.clear();
         this.gpuFrame?.hiz.dispose();
+
+        for (const batch of this.batchPool) {
+            batch.dispose();
+        }
+
+        this.batchPool.length = 0;
     }
 
     private tryPlace(
@@ -2295,6 +2529,7 @@ export class Foliage {
             chunk: null,
             near: null,
             nearBatch: null,
+            merged: false,
         };
         this.resetBounds(renderer, cell);
 
@@ -2412,8 +2647,7 @@ export class Foliage {
             count < batch.capacity / 4
         ) {
             this.removeCellMesh(cell);
-            // Headroom so painting doesn't reallocate on every dab.
-            batch = new InstanceBatch(count + Math.ceil(count * 0.25) + 8);
+            batch = this.acquireBatch(count);
             const lod = Math.min(cell.lod, renderer.drawLods.length - 1);
             const mesh = new THREE.Mesh(
                 batch.view(renderer.drawLods[lod]),
@@ -2498,13 +2732,81 @@ export class Foliage {
         };
     }
 
+    /**
+     * An instance batch with room for `count` instances: the smallest released one that fits, or a
+     * new one with headroom (painting grows cells a few instances at a time). Batches are recycled
+     * rather than disposed while the world lives: disposing a batch's views makes three drop the LOD
+     * vertex / index buffers they share with every other cell, and its WebGL backend keeps drawing
+     * those cells through vertex array objects that still point at the deleted buffers.
+     */
+    private acquireBatch(count: number): InstanceBatch {
+        const pool = this.batchPool;
+        let best = -1;
+
+        for (let i = 0; i < pool.length; i++) {
+            const capacity = pool[i].capacity;
+
+            if (
+                capacity >= count &&
+                (best < 0 || capacity < pool[best].capacity)
+            ) {
+                best = i;
+            }
+        }
+
+        if (best < 0) {
+            return new InstanceBatch(count + Math.ceil(count * 0.25) + 8);
+        }
+
+        const batch = pool[best];
+        pool[best] = pool[pool.length - 1];
+        pool.pop();
+
+        return batch;
+    }
+
+    private releaseBatch(batch: InstanceBatch | null): void {
+        if (batch) {
+            this.batchPool.push(batch);
+        }
+    }
+
+    /** Drops every batch's views of LOD geometries that are being disposed. */
+    private forgetGeometries(geometries: Iterable<THREE.BufferGeometry>): void {
+        const list = [...geometries];
+        const batches = new Set(this.batchPool);
+
+        for (const renderer of this.renderers.values()) {
+            for (const cell of [
+                ...renderer.cells.values(),
+                ...renderer.chunks.values(),
+            ]) {
+                if (cell.batch) {
+                    batches.add(cell.batch);
+                }
+
+                if (cell.nearBatch) {
+                    batches.add(cell.nearBatch);
+                }
+            }
+
+            for (const merged of renderer.merged.values()) {
+                batches.add(merged.batch);
+            }
+        }
+
+        for (const batch of batches) {
+            batch.forget(list);
+        }
+    }
+
     private removeNear(cell: Cell): void {
         if (cell.near) {
             this.group.remove(cell.near);
             cell.near = null;
         }
 
-        cell.nearBatch?.dispose();
+        this.releaseBatch(cell.nearBatch);
         cell.nearBatch = null;
     }
 
@@ -2517,7 +2819,7 @@ export class Foliage {
             cell.built = 0;
         }
 
-        cell.batch?.dispose();
+        this.releaseBatch(cell.batch);
         cell.batch = null;
     }
 
@@ -2553,6 +2855,7 @@ export class Foliage {
             chunks: new Map(),
             extent: new THREE.Box3(),
             shown: [],
+            merged: new Map(),
             fade: falloff !== null,
             falloff,
             radius: geometryRadius(set.lods),
@@ -2798,13 +3101,20 @@ export class Foliage {
                 chunk.dirty = true;
             }
 
+            this.clearMerged(renderer);
             renderer.gpu?.configure(this.gpuConfig(renderer));
 
-            for (const g of new Set(previous.lods)) {
-                g.dispose();
+            const disposed = new Set(previous.lods);
+
+            if (previous.proxy) {
+                disposed.add(previous.proxy);
             }
 
-            previous.proxy?.dispose();
+            this.forgetGeometries(disposed);
+
+            for (const g of disposed) {
+                g.dispose();
+            }
 
             for (const m of new Set(previous.materials)) {
                 m.dispose();
@@ -2835,7 +3145,11 @@ export class Foliage {
             this.removeCellMesh(cell);
         }
 
-        for (const g of new Set([...renderer.lods, ...renderer.drawLods])) {
+        this.clearMerged(renderer);
+        const disposed = new Set([...renderer.lods, ...renderer.drawLods]);
+        this.forgetGeometries(disposed);
+
+        for (const g of disposed) {
             g.dispose();
         }
 
@@ -3556,6 +3870,11 @@ function disposeObject(root: THREE.Object3D): void {
             m.dispose();
         }
     });
+}
+
+/** Instance batch behind a cell / near mesh (its geometry is a view of it). */
+function batchOf(mesh: THREE.Mesh): InstanceBatch {
+    return (mesh.geometry as InstanceView).batch;
 }
 
 /** Instances a cell / near mesh draws (its instanced geometry view). */

@@ -85,6 +85,8 @@ export class Game {
     private lastFrameAt = 0;
     private frameIntervalMs = 16.7;
     private backend: 'webgpu' | 'webgl' = 'webgl';
+    private readonly skyLight = new THREE.Color();
+    private readonly sunLight = new THREE.Color();
     private reflection = new WaterReflection();
     private reflectionLevelTimer = 0;
     private reflectionLevel: number | null = null;
@@ -667,6 +669,12 @@ export class Game {
                   ? this.editor.cursor
                   : this.cameraGroundPoint();
         this.atmosphere.update(dt, focus);
+        this.atmosphere.skyAndSunLight(this.skyLight, this.sunLight);
+        this.world.foliage.setLighting(
+            this.skyLight,
+            this.sunLight,
+            this.atmosphere.lightDirection(),
+        );
         this.world.terrain.updateLod(this.camera);
         this.world.water.update(dt);
         this.world.wetness.update(dt);

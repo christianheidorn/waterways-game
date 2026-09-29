@@ -1,21 +1,27 @@
 import * as THREE from 'three/webgpu';
 import {
     attribute,
+    cameraPosition,
     dFdx,
+    diffuseColor,
     dFdy,
     distance,
     dot,
     float,
     Fn,
     log2,
+    materialEmissive,
     materialOpacity,
+    mix,
     max,
     normalGeometry,
     normalize,
     normalLocal,
     normalViewGeometry,
+    normalWorld,
     positionGeometry,
     positionPrevious,
+    positionWorld,
     sin,
     smoothstep,
     step,
@@ -61,6 +67,12 @@ export type FoliageGlobals = {
     camPos: THREE.UniformNode<'vec3', THREE.Vector3>;
     fadeScale: FloatUniform;
     density: FloatUniform;
+    /** Sky irradiance (hemisphere sky colour × intensity) for leaf translucency. */
+    skyLight: THREE.UniformNode<'color', THREE.Color>;
+    /** Sun (or moon) colour × intensity for leaf translucency. */
+    sunLight: THREE.UniformNode<'color', THREE.Color>;
+    /** Direction towards the sun / moon. */
+    sunDir: THREE.UniformNode<'vec3', THREE.Vector3>;
 };
 
 /** Per-type uniforms (updated in place, e.g. when the cull distance changes). */
@@ -81,6 +93,9 @@ export function createFoliageGlobals(): FoliageGlobals {
         camPos: uniform(new THREE.Vector3()),
         fadeScale: uniform(1),
         density: uniform(1),
+        skyLight: uniform(new THREE.Color(0.5, 0.6, 0.75)),
+        sunLight: uniform(new THREE.Color(0, 0, 0)),
+        sunDir: uniform(new THREE.Vector3(0, 1, 0)),
     };
 }
 
@@ -286,7 +301,41 @@ export function createFoliageMaterial(
     keepBackFaceNormals(material);
     mipAlphaBoost(material);
 
+    if (options.stiffness > 0) {
+        leafTranslucency(material, options.globals);
+    }
+
     return material;
+}
+
+/**
+ * Light transmitted through leaves and blades (thin, translucent): sky light passing through the
+ * canopy, strongest on the undersides the sky doesn't reach directly, plus a glow when the sun or moon
+ * is behind them. Without it, foliage lit only by the (dark) ground from below turns near-black under
+ * overcast skies. Leaves are told apart from trunks and stems by the wind weight (rooted parts barely
+ * sway) and by colour (bark isn't green).
+ */
+function leafTranslucency(
+    material: THREE.MeshStandardNodeMaterial,
+    g: FoliageGlobals,
+): void {
+    const albedo = diffuseColor.rgb;
+    const green = albedo.g
+        .sub(max(albedo.r, albedo.b))
+        .div(max(albedo.g, 1e-3))
+        .mul(4)
+        .clamp(0, 1);
+    const leaf = smoothstep(0.2, 0.45, attribute('wind', 'float')).mul(
+        mix(0.35, 1, green),
+    );
+    const underside = normalWorld.y.mul(-0.5).add(0.5);
+    const sky = g.skyLight.mul(mix(0.18, 0.45, underside));
+    const toCamera = normalize(cameraPosition.sub(positionWorld));
+    const backlit = max(dot(toCamera.negate(), g.sunDir), 0).pow(4);
+    const sun = g.sunLight.mul(backlit.mul(0.25));
+    material.emissiveNode = materialEmissive.add(
+        albedo.mul(sky.add(sun)).mul(leaf),
+    );
 }
 
 /** Wind response per kind: rocks are rigid, trees sway less than grass and bushes. */

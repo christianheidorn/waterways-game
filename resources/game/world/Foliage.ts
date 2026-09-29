@@ -1299,6 +1299,20 @@ export class Foliage {
         });
     }
 
+    /**
+     * Light for the leaf translucency term: sky irradiance, sun / moon colour × intensity and the
+     * direction towards it (from the Atmosphere, once per frame).
+     */
+    setLighting(
+        sky: THREE.Color,
+        sun: THREE.Color,
+        sunDir: THREE.Vector3,
+    ): void {
+        this.globals.skyLight.value.copy(sky);
+        this.globals.sunLight.value.copy(sun);
+        this.globals.sunDir.value.copy(sunDir);
+    }
+
     update(dt: number, camera: THREE.Camera): void {
         this.globals.prevTime.value = this.globals.time.value;
         this.globals.time.value += dt;

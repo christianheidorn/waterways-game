@@ -420,6 +420,12 @@ export class Atmosphere {
         }
     }
 
+    /** Sky irradiance (hemisphere sky colour × intensity) and sun / moon light (colour × intensity). */
+    skyAndSunLight(sky: THREE.Color, sun: THREE.Color): void {
+        sky.copy(this.hemi.color).multiplyScalar(this.hemi.intensity);
+        sun.copy(this.sun.color).multiplyScalar(this.sun.intensity);
+    }
+
     /** Direction towards the light that is up: the sun by day, the moon by night. */
     lightDirection(): THREE.Vector3 {
         return this.sunDirection.y > -0.05

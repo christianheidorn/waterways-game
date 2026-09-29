@@ -7,6 +7,7 @@ import type {
 import type { Atmosphere } from './Atmosphere';
 import { withWeatherDefaults } from './Atmosphere';
 import type { Heightfield } from './Heightfield';
+import { FallingLeaves } from './FallingLeaves';
 import { Lightning } from './Lightning';
 import { Precipitation } from './Precipitation';
 import type { PrecipitationLight } from './PrecipitationCommon';
@@ -35,12 +36,14 @@ const TAU = 0.9;
 export class Weather {
     readonly precipitation: Precipitation;
     readonly lightning = new Lightning();
+    readonly leaves = new FallingLeaves();
     readonly audio = new WeatherAudio();
     private env: EnvironmentSettings | null = null;
     private settled = false;
     // Blended values.
     private rain = 0;
     private snow = 0;
+    private leafAmount = 0;
     private lightningRate = 0;
     private envWetness = 0;
     // Slowly accumulating ground state.
@@ -75,7 +78,11 @@ export class Weather {
             heights: world.heights,
             waterLevelAt: (x, z) => world.water.levelAt(x, z),
         });
-        scene.add(this.precipitation.group, this.lightning.group);
+        scene.add(
+            this.precipitation.group,
+            this.lightning.group,
+            this.leaves.mesh,
+        );
         this.terrainMin = world.heights.minMax().min;
     }
 
@@ -92,6 +99,7 @@ export class Weather {
             const t = this.targets(env);
             this.rain = t.rain;
             this.snow = t.snow;
+            this.leafAmount = env.falling_leaves;
             this.lightningRate = env.lightning_frequency;
             this.envWetness = env.wetness;
             // A map saved with rain / snow starts soaked / snowed in.
@@ -103,6 +111,7 @@ export class Weather {
     setQuality(graphics: Partial<GraphicsSettings>): void {
         this.effects = graphics.effects_quality ?? 'high';
         this.precipitation.setQuality(this.effects);
+        this.leaves.setQuality(this.effects);
         this.atmosphere.setCloudQuality(
             (graphics.cloud_quality as CloudQuality | undefined) ?? 'medium',
         );
@@ -120,6 +129,7 @@ export class Weather {
         const t = this.targets(env);
         this.rain += (t.rain - this.rain) * k;
         this.snow += (t.snow - this.snow) * k;
+        this.leafAmount += (env.falling_leaves - this.leafAmount) * k;
         this.lightningRate +=
             (env.lightning_frequency - this.lightningRate) * k;
         this.envWetness += (env.wetness - this.envWetness) * k;
@@ -208,6 +218,13 @@ export class Weather {
             this.light,
             underwater,
         );
+        this.leaves.update(
+            dt,
+            camera,
+            this.leafAmount,
+            this.windVec,
+            underwater,
+        );
 
         // ---- lightning
         this.updateLightning(dt);
@@ -219,8 +236,13 @@ export class Weather {
     }
 
     dispose(): void {
-        this.scene.remove(this.precipitation.group, this.lightning.group);
+        this.scene.remove(
+            this.precipitation.group,
+            this.lightning.group,
+            this.leaves.mesh,
+        );
         this.precipitation.dispose();
+        this.leaves.dispose();
         this.lightning.dispose();
         this.audio.dispose();
     }

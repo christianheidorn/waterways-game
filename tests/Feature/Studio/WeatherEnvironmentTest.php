@@ -28,6 +28,7 @@ class WeatherEnvironmentTest extends TestCase
             'rain' => [['weather' => 'rain', 'cloud_coverage' => 0.92, 'turbidity' => 8, 'fog_density' => 0.0007, 'height_fog_height' => 40, 'height_fog_density' => 0.008, 'precipitation' => 0.65, 'lightning_frequency' => 0, 'wind_strength' => 0.8, 'wetness' => 0.6, 'exposure' => 0.6]],
             'storm' => [['weather' => 'storm', 'cloud_coverage' => 1, 'turbidity' => 10, 'fog_density' => 0.0009, 'height_fog_height' => 60, 'height_fog_density' => 0.01, 'precipitation' => 1, 'lightning_frequency' => 6, 'wind_strength' => 1.4, 'wetness' => 0.9, 'exposure' => 0.6]],
             'snow' => [['weather' => 'snow', 'cloud_coverage' => 0.88, 'turbidity' => 6, 'fog_density' => 0.001, 'height_fog_height' => 0, 'height_fog_density' => 0.012, 'precipitation' => 0.6, 'lightning_frequency' => 0, 'wind_strength' => 0.3, 'wetness' => 0, 'exposure' => 0.5]],
+            'autumn' => [['weather' => 'autumn', 'cloud_coverage' => 0.45, 'turbidity' => 3.5, 'fog_density' => 0.0003, 'height_fog_height' => 20, 'height_fog_density' => 0.01, 'precipitation' => 0, 'falling_leaves' => 0.6, 'lightning_frequency' => 0, 'wind_strength' => 0.9, 'wetness' => 0.15, 'exposure' => 0.52]],
         ];
     }
 
@@ -37,6 +38,7 @@ class WeatherEnvironmentTest extends TestCase
 
         $this->assertSame('clear', $defaults['weather']);
         $this->assertSame(0.0, $defaults['precipitation']);
+        $this->assertSame(0.0, $defaults['falling_leaves']);
         $this->assertSame(0.0, $defaults['lightning_frequency']);
         $this->assertSame(0.7, $defaults['thunder_volume']);
         $this->assertSame(45.0, $defaults['wind_direction']);
@@ -45,7 +47,7 @@ class WeatherEnvironmentTest extends TestCase
         $this->assertSame(0.0, $defaults['wetness']);
 
         $weather = collect(EnvironmentDefaults::group()->fields)->firstWhere('key', 'weather');
-        $this->assertSame(['clear', 'cloudy', 'overcast', 'fog', 'rain', 'storm', 'snow'], array_keys($weather->options));
+        $this->assertSame(['clear', 'cloudy', 'overcast', 'fog', 'rain', 'storm', 'snow', 'autumn'], array_keys($weather->options));
     }
 
     public function test_maps_saved_before_weather_existed_get_defaults_in_the_manifest(): void

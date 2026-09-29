@@ -355,7 +355,7 @@ them on exit. Keys and controls:
 ## Weather & sky
 
 Every map has a weather setup in its **Environment** page (and in the studio editor's live Environment panel).
-One-click presets (Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow) set a matching bundle of sky, fog,
+One-click presets (Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow, Autumn) set a matching bundle of sky, fog,
 precipitation, wind, wetness and exposure values, which you can then fine-tune. The game blends to a new
 look over a few seconds, so changes preview smoothly.
 
@@ -363,6 +363,7 @@ look over a few seconds, so changes preview smoothly.
 | -------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `weather`                        | Weather type (for presets); `snow` turns precipitation into snowfall                              |
 | `precipitation`                  | Rain / snow amount (0-1): particles, rain ripples on water, rain sound, reduced visibility        |
+| `falling_leaves`                 | Autumn leaves blowing through the air around the camera (0-1); combines with any weather          |
 | `lightning_frequency`            | Strikes per minute: sky flash, light pulse, branching bolt, thunder delayed by distance (343 m/s) |
 | `thunder_volume`                 | Thunder loudness                                                                                  |
 | `wind_strength` / `_direction`   | Foliage sway, cloud drift, rain slant, water chop; storms add gusts                               |

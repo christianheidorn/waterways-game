@@ -9,6 +9,7 @@ type WeatherFields = Pick<
     | 'height_fog_height'
     | 'height_fog_density'
     | 'precipitation'
+    | 'falling_leaves'
     | 'lightning_frequency'
     | 'wind_strength'
     | 'wetness'
@@ -38,6 +39,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             height_fog_height: 0,
             height_fog_density: 0.012,
             precipitation: 0,
+            falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.35,
             wetness: 0,
@@ -55,6 +57,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             height_fog_height: 0,
             height_fog_density: 0.012,
             precipitation: 0,
+            falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.6,
             wetness: 0,
@@ -72,6 +75,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             height_fog_height: 0,
             height_fog_density: 0.012,
             precipitation: 0,
+            falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.5,
             wetness: 0.1,
@@ -89,6 +93,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             height_fog_height: 80,
             height_fog_density: 0.014,
             precipitation: 0,
+            falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.1,
             wetness: 0.25,
@@ -106,6 +111,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             height_fog_height: 40,
             height_fog_density: 0.008,
             precipitation: 0.65,
+            falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.8,
             wetness: 0.6,
@@ -123,6 +129,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             height_fog_height: 60,
             height_fog_density: 0.01,
             precipitation: 1,
+            falling_leaves: 0,
             lightning_frequency: 6,
             wind_strength: 1.4,
             wetness: 0.9,
@@ -140,10 +147,29 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             height_fog_height: 0,
             height_fog_density: 0.012,
             precipitation: 0.6,
+            falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.3,
             wetness: 0,
             exposure: 0.5,
+        },
+    },
+    autumn: {
+        label: 'Autumn',
+        description: 'Breezy fall day with leaves blowing through the air.',
+        values: {
+            weather: 'autumn',
+            cloud_coverage: 0.45,
+            turbidity: 3.5,
+            fog_density: 0.0003,
+            height_fog_height: 20,
+            height_fog_density: 0.01,
+            precipitation: 0,
+            falling_leaves: 0.6,
+            lightning_frequency: 0,
+            wind_strength: 0.9,
+            wetness: 0.15,
+            exposure: 0.52,
         },
     },
 };

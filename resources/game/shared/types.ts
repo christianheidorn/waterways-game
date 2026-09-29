@@ -50,6 +50,8 @@ export type EnvironmentSettings = {
     weather: WeatherKind;
     /** 0-1 rain / snow amount (0 = none). */
     precipitation: number;
+    /** 0-1 amount of leaves blowing through the air (autumn). */
+    falling_leaves: number;
     /** Lightning strikes per minute (storms). */
     lightning_frequency: number;
     thunder_volume: number;
@@ -106,7 +108,8 @@ export type WeatherKind =
     | 'fog'
     | 'rain'
     | 'storm'
-    | 'snow';
+    | 'snow'
+    | 'autumn';
 
 export type PlayerSettings = {
     walk_speed: number;

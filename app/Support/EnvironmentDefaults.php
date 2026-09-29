@@ -19,6 +19,7 @@ final class EnvironmentDefaults
         'rain' => 'Rain',
         'storm' => 'Thunderstorm',
         'snow' => 'Snow',
+        'autumn' => 'Autumn leaves',
     ];
 
     public static function group(): SettingGroup
@@ -34,6 +35,7 @@ final class EnvironmentDefaults
             SettingField::number('wind_direction', 'Wind direction', 45, 0, 360, 1, '°', 'Direction the wind blows towards (0 = north, 90 = east). Moves clouds and slants rain.'),
             SettingField::select('weather', 'Weather', 'clear', self::WEATHER, 'Weather type; the studio presets also set a matching sky, fog and rain. Snow turns precipitation into snowfall.'),
             SettingField::number('precipitation', 'Precipitation', 0, 0, 1, 0.01, null, 'Amount of rain (or snow) falling around the camera.'),
+            SettingField::number('falling_leaves', 'Falling leaves', 0, 0, 1, 0.01, null, 'Autumn leaves blowing through the air around the camera; works with any weather.'),
             SettingField::number('lightning_frequency', 'Lightning', 0, 0, 20, 0.1, '/min', 'Lightning strikes per minute.'),
             SettingField::number('thunder_volume', 'Thunder volume', 0.7, 0, 1, 0.01),
             SettingField::number('height_fog_height', 'Valley fog height', 0, 0, 2000, 1, 'm', 'Fog that pools in valleys, up to this height above the lowest point of the map (or sea level with an ocean). 0 = off.'),

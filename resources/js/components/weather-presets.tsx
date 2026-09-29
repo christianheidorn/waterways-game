@@ -6,6 +6,7 @@ import {
     CloudLightning,
     CloudRain,
     CloudSun,
+    Leaf,
     Snowflake,
     Sun,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ const ICONS: Record<WeatherKind, LucideIcon> = {
     rain: CloudRain,
     storm: CloudLightning,
     snow: Snowflake,
+    autumn: Leaf,
 };
 
 type Props = {
@@ -37,7 +39,7 @@ export function WeatherPresets({ value, onApply, className }: Props) {
         <div
             role="group"
             aria-label="Weather presets"
-            className={cn('grid grid-cols-4 gap-2 sm:grid-cols-7', className)}
+            className={cn('grid grid-cols-4 gap-2 sm:grid-cols-8', className)}
         >
             {(Object.keys(WEATHER_PRESETS) as WeatherKind[]).map((kind) => {
                 const preset = WEATHER_PRESETS[kind];

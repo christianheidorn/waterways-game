@@ -69,6 +69,7 @@ export function withWeatherDefaults(
         ...env,
         weather: env.weather ?? 'clear',
         precipitation: env.precipitation ?? 0,
+        falling_leaves: env.falling_leaves ?? 0,
         lightning_frequency: env.lightning_frequency ?? 0,
         thunder_volume: env.thunder_volume ?? 0.7,
         wind_direction: env.wind_direction ?? 45,

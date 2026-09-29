@@ -478,8 +478,9 @@ export class GpuFoliageType {
         this.ranges.clear();
         this.pendingFills.clear();
 
-        // Filled ranges are only cleared by the next fill pass, which must not fill their slots
-        // again in the same dispatch: new ranges go above them (a repack reclaims the space).
+        // Freed filled ranges are cleared by a later fill pass (maybe not the next one, when it is
+        // full): new ranges must not take their slots before that, so they go above them (a repack
+        // reclaims the space).
         if (!filled) {
             this.top = 0;
         }

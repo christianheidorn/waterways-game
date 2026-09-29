@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { TerrainMaterialRef } from '../shared/types';
 
 export const TERRAIN_SLOTS = 8;

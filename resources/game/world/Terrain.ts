@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { GridRect, Heightfield } from './Heightfield';
 import type { TerrainMaterial } from './TerrainMaterial';
 

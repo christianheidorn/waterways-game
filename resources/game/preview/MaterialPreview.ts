@@ -1,6 +1,7 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { Sky } from 'three/addons/objects/Sky.js';
+import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
+import { installWebGpuCompat } from '../core/renderer';
 import type { TerrainLayer, TerrainMaterialRef } from '../shared/types';
 import { SimplexNoise } from '../util/noise';
 import { Heightfield } from '../world/Heightfield';
@@ -22,10 +23,11 @@ const PATCH_RES = 129;
 
 /**
  * Live preview of a terrain material, rendered with the game's own TerrainMaterial (anti-tiling,
- * triplanar cliffs, height blending) so what you see is what the terrain will look like.
+ * triplanar cliffs, height blending) so what you see is what the terrain will look like. Runs on
+ * the game's renderer: WebGPU where available, WebGL 2 otherwise. Create it with `MaterialPreview.create()`.
  */
 export class MaterialPreview {
-    private readonly renderer: THREE.WebGLRenderer;
+    private readonly renderer: THREE.WebGPURenderer;
     private readonly scene = new THREE.Scene();
     private readonly camera = new THREE.PerspectiveCamera(40, 1, 0.05, 2000);
     private readonly controls: OrbitControls;
@@ -36,11 +38,11 @@ export class MaterialPreview {
     private readonly plane: THREE.Mesh;
     private readonly sun = new THREE.DirectionalLight(0xffffff, 3);
     private readonly hemi = new THREE.HemisphereLight(0xbfd9ff, 0x4a4030, 0.25);
-    private readonly sky = new Sky();
-    private readonly envSky = new Sky();
+    private readonly sky = new SkyMesh();
+    private readonly envSky = new SkyMesh();
     private readonly envScene = new THREE.Scene();
     private readonly pmrem: THREE.PMREMGenerator;
-    private envTarget: THREE.WebGLRenderTarget | null = null;
+    private envTarget: THREE.RenderTarget | null = null;
     private shape: MaterialPreviewShape = 'sphere';
     private tileSize = 2;
     private frame = 0;
@@ -48,12 +50,31 @@ export class MaterialPreview {
     private readonly resizeObserver: ResizeObserver;
     private readonly intersection: IntersectionObserver;
 
-    constructor(private readonly canvas: HTMLCanvasElement) {
-        this.renderer = new THREE.WebGLRenderer({
+    /** Initialises the renderer (async on WebGPU) and starts rendering into the canvas. */
+    static async create(canvas: HTMLCanvasElement): Promise<MaterialPreview> {
+        await installWebGpuCompat();
+        const renderer = new THREE.WebGPURenderer({
             canvas,
             antialias: true,
             alpha: false,
         });
+
+        try {
+            await renderer.init();
+        } catch (error) {
+            void renderer.dispose();
+
+            throw error;
+        }
+
+        return new MaterialPreview(canvas, renderer);
+    }
+
+    private constructor(
+        private readonly canvas: HTMLCanvasElement,
+        renderer: THREE.WebGPURenderer,
+    ) {
+        this.renderer = renderer;
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
         this.renderer.toneMappingExposure = 0.5;
@@ -180,16 +201,15 @@ export class MaterialPreview {
         );
 
         for (const sky of [this.sky, this.envSky]) {
-            const u = sky.material.uniforms;
-            u.turbidity.value = 2.5;
-            u.rayleigh.value = 1.2;
-            u.mieCoefficient.value = 0.005;
-            u.mieDirectionalG.value = 0.8;
-            u.sunPosition.value.copy(dir);
-            u.cloudCoverage.value = 0.2;
+            sky.turbidity.value = 2.5;
+            sky.rayleigh.value = 1.2;
+            sky.mieCoefficient.value = 0.005;
+            sky.mieDirectionalG.value = 0.8;
+            sky.sunPosition.value.copy(dir);
+            sky.cloudCoverage.value = 0.2;
         }
 
-        this.envSky.material.uniforms.showSunDisc.value = 0;
+        this.envSky.showSunDisc.value = 0;
         const up = THREE.MathUtils.clamp(elevation / 25, 0, 1);
         this.sun.color.set('#ffb070').lerp(new THREE.Color('#fff6e8'), up);
         this.sun.intensity =
@@ -197,8 +217,9 @@ export class MaterialPreview {
         this.sun.position.copy(dir).multiplyScalar(80);
         this.hemi.intensity = THREE.MathUtils.lerp(0.08, 0.25, up);
 
-        this.envTarget?.dispose();
-        this.envTarget = this.pmrem.fromScene(this.envScene, 0, 0.1, 2000);
+        this.envTarget = this.pmrem.fromScene(this.envScene, 0, 0.1, 2000, {
+            renderTarget: this.envTarget,
+        });
         this.scene.environment = this.envTarget.texture;
         this.scene.environmentIntensity = 0.55;
     }
@@ -243,8 +264,7 @@ export class MaterialPreview {
         this.pmrem.dispose();
         this.sky.material.dispose();
         this.envSky.material.dispose();
-        this.renderer.dispose();
-        this.renderer.forceContextLoss();
+        void this.renderer.dispose();
     }
 
     private applyShape(): void {

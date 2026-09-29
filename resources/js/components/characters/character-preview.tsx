@@ -47,21 +47,33 @@ export function CharacterPreview({
 
         void (async () => {
             try {
-                const THREE = await import('three');
+                const THREE = await import('three/webgpu');
                 const { OrbitControls } =
                     await import('three/addons/controls/OrbitControls.js');
                 const { GltfCharacter } =
                     await import('@game/player/GltfCharacter');
+                const { installWebGpuCompat } =
+                    await import('@game/core/renderer');
 
                 if (disposed) {
                     return;
                 }
 
-                const renderer = new THREE.WebGLRenderer({
+                // The game's renderer: WebGPU where available, WebGL 2 otherwise.
+                await installWebGpuCompat();
+                const renderer = new THREE.WebGPURenderer({
                     canvas,
                     antialias: true,
                     alpha: true,
                 });
+                await renderer.init();
+
+                if (disposed) {
+                    void renderer.dispose();
+
+                    return;
+                }
+
                 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
                 renderer.toneMapping = THREE.ACESFilmicToneMapping;
                 renderer.shadowMap.enabled = true;
@@ -97,7 +109,7 @@ export function CharacterPreview({
 
                 if (disposed) {
                     model.dispose();
-                    renderer.dispose();
+                    void renderer.dispose();
 
                     return;
                 }
@@ -116,12 +128,13 @@ export function CharacterPreview({
                 const observer = new ResizeObserver(resize);
                 observer.observe(canvas);
 
-                const clock = new THREE.Clock();
+                const timer = new THREE.Timer();
                 let frame = 0;
                 const tick = () => {
                     frame = requestAnimationFrame(tick);
+                    timer.update();
                     const key = clipRef.current;
-                    model.update(clock.getDelta(), {
+                    model.update(timer.getDelta(), {
                         speed: key === 'run' ? 7.5 : key === 'walk' ? 3.2 : 0,
                         runSpeed: 7.5,
                         grounded: key !== 'jump',
@@ -138,8 +151,7 @@ export function CharacterPreview({
                     observer.disconnect();
                     controls.dispose();
                     model.dispose();
-                    renderer.dispose();
-                    renderer.forceContextLoss();
+                    void renderer.dispose();
                 };
             } catch (error) {
                 console.error(error);

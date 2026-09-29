@@ -1,4 +1,39 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import {
+    abs,
+    cameraViewMatrix,
+    clamp,
+    cross,
+    dFdx,
+    dFdy,
+    dot,
+    float,
+    floor,
+    Fn,
+    fract,
+    fwidth,
+    If,
+    max,
+    mix,
+    normalize,
+    normalWorldGeometry,
+    positionView,
+    positionWorld,
+    pow,
+    property,
+    select,
+    sign,
+    sin,
+    smoothstep,
+    sqrt,
+    step,
+    texture,
+    uniform,
+    uniformArray,
+    vec2,
+    vec3,
+    vec4,
+} from 'three/tsl';
 import type { TerrainLayer, TerrainMaterialRef } from '../shared/types';
 import { SimplexNoise } from '../util/noise';
 import type { SplatMap } from './SplatMap';
@@ -14,19 +49,91 @@ export type BrushOverlay = {
 };
 
 /**
- * PBR terrain material: MeshStandardMaterial extended with
+ * Layers shaded per pixel. The splat map may blend all 8 layers, but a pixel rarely has more than
+ * two or three: the strongest four are picked per pixel and only those are sampled, which keeps
+ * the texture fetches (and the shader) bounded no matter how many layers the map uses.
+ */
+const SHADED_LAYERS = 4;
+
+/** Splat weight below which a layer is not shaded at all. */
+const MIN_WEIGHT = 0.004;
+
+type Float = THREE.Node<'float'>;
+type Vec2 = THREE.Node<'vec2'>;
+type Vec3 = THREE.Node<'vec3'>;
+type Vec4 = THREE.Node<'vec4'>;
+
+function createUniforms(
+    splat: SplatMap,
+    size: number,
+    resolution: number,
+    textures: TerrainTextures,
+    noise: THREE.Texture,
+    wet: THREE.Texture,
+) {
+    const colorA = Array.from({ length: 8 }, () => new THREE.Color());
+    const colorB = Array.from({ length: 8 }, () => new THREE.Color());
+    // x: noise scale (m), y: variation, z: roughness, w: bump
+    const params = Array.from(
+        { length: 8 },
+        () => new THREE.Vector4(8, 0.5, 0.9, 0.5),
+    );
+    // x: slot enabled, y: has material, z: tile size (m), w: height contrast
+    const mat = Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, 4, 1));
+    // x: roughness scale, y: normal strength, z: macro variation, w: unused
+    const mat2 = Array.from(
+        { length: 8 },
+        () => new THREE.Vector4(1, 1, 0.5, 0),
+    );
+    const tint = Array.from({ length: 8 }, () => new THREE.Color(1, 1, 1));
+
+    return {
+        uSplat0: texture(splat.textures[0]),
+        uSplat1: texture(splat.textures[1]),
+        uNoise: texture(noise),
+        uAlbedoArr: texture(textures.albedoRough),
+        uDetailArr: texture(textures.normalAoHeight),
+        uWet: texture(wet),
+        uMapHalf: uniform(size / 2),
+        uCell: uniform(size / (resolution - 1)),
+        uRes: uniform(resolution),
+        uColorA: uniformArray<'color'>(colorA, 'color'),
+        uColorB: uniformArray<'color'>(colorB, 'color'),
+        uParams: uniformArray<'vec4'>(params, 'vec4'),
+        uMat: uniformArray<'vec4'>(mat, 'vec4'),
+        uMat2: uniformArray<'vec4'>(mat2, 'vec4'),
+        uTint: uniformArray<'color'>(tint, 'color'),
+        uBrush: uniform(new THREE.Vector4(0, 0, 0, 0.5)),
+        uBrushVisible: uniform(0),
+        uBrushColor: uniform(new THREE.Color(0.25, 0.75, 1)),
+        uGridVisible: uniform(0),
+        // Global weather (Weather.ts): rain wetness and snow cover, 0-1.
+        uWeatherWet: uniform(0),
+        uSnowCover: uniform(0),
+        /** CPU-side values behind the uniform arrays (edited in place by setLayers). */
+        layers: { colorA, colorB, params, mat, mat2, tint },
+    };
+}
+
+export type TerrainUniforms = ReturnType<typeof createUniforms>;
+
+/**
+ * PBR terrain material: a MeshStandardNodeMaterial whose surface comes from
  *
  * - 8-layer splat blending with height-based transitions,
  * - per-layer PBR materials from the studio library (albedo, normal, roughness, AO, height)
  *   packed into texture arrays, sampled with anti-tiling (randomised offsets per noise cell),
  *   triplanar projection on steep slopes and a far-distance detail blend,
  * - procedural colour/noise shading for layers without a material,
- * - wet ground near water (darker, glossier), an editor brush overlay and grid.
+ * - wet ground near water and after rain (darker, glossier: the roughness output feeds the
+ *   screen-space reflections), snow cover, an editor brush overlay and grid.
  */
-export class TerrainMaterial extends THREE.MeshStandardMaterial {
-    readonly uniforms: Record<string, THREE.IUniform>;
+export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
+    readonly uniforms: TerrainUniforms;
     private textures: TerrainTextures;
     private layers: TerrainLayer[] = [];
+    private readonly noise: THREE.DataTexture;
+    private readonly blankWet: THREE.DataTexture;
 
     constructor(
         splat: SplatMap,
@@ -35,95 +142,27 @@ export class TerrainMaterial extends THREE.MeshStandardMaterial {
         textureSize = 1024,
     ) {
         super({ roughness: 1, metalness: 0, envMapIntensity: 0.45 });
+        this.name = 'Terrain';
 
         this.textures = this.createTextures(textureSize);
-        const blankWet = new THREE.DataTexture(
+        this.noise = createNoiseTexture();
+        this.blankWet = new THREE.DataTexture(
             new Uint8Array([0]),
             1,
             1,
             THREE.RedFormat,
         );
-        blankWet.needsUpdate = true;
+        this.blankWet.needsUpdate = true;
 
-        this.uniforms = {
-            uSplat0: { value: splat.textures[0] },
-            uSplat1: { value: splat.textures[1] },
-            uNoise: { value: createNoiseTexture() },
-            uAlbedoArr: { value: this.textures.albedoRough },
-            uDetailArr: { value: this.textures.normalAoHeight },
-            uWet: { value: blankWet },
-            uMapHalf: { value: size / 2 },
-            uCell: { value: size / (resolution - 1) },
-            uRes: { value: resolution },
-            uColorA: {
-                value: Array.from({ length: 8 }, () => new THREE.Color()),
-            },
-            uColorB: {
-                value: Array.from({ length: 8 }, () => new THREE.Color()),
-            },
-            // x: noise scale (m), y: variation, z: roughness, w: bump
-            uParams: {
-                value: Array.from(
-                    { length: 8 },
-                    () => new THREE.Vector4(8, 0.5, 0.9, 0.5),
-                ),
-            },
-            // x: slot enabled, y: has material, z: tile size (m), w: height contrast
-            uMat: {
-                value: Array.from(
-                    { length: 8 },
-                    () => new THREE.Vector4(0, 0, 4, 1),
-                ),
-            },
-            // x: roughness scale, y: normal strength, z: macro variation, w: unused
-            uMat2: {
-                value: Array.from(
-                    { length: 8 },
-                    () => new THREE.Vector4(1, 1, 0.5, 0),
-                ),
-            },
-            uTint: {
-                value: Array.from(
-                    { length: 8 },
-                    () => new THREE.Color(1, 1, 1),
-                ),
-            },
-            uBrush: { value: new THREE.Vector4(0, 0, 0, 0.5) },
-            uBrushVisible: { value: 0 },
-            uBrushColor: { value: new THREE.Color(0.25, 0.75, 1) },
-            uGridVisible: { value: 0 },
-            // Global weather (Weather.ts): rain wetness and snow cover, 0-1.
-            uWeatherWet: { value: 0 },
-            uSnowCover: { value: 0 },
-        };
-
-        this.onBeforeCompile = (shader) => {
-            Object.assign(shader.uniforms, this.uniforms);
-            shader.vertexShader = shader.vertexShader
-                .replace(
-                    '#include <common>',
-                    '#include <common>\nvarying vec3 vTerrainPos;\nvarying vec3 vTerrainNormal;',
-                )
-                .replace(
-                    '#include <begin_vertex>',
-                    '#include <begin_vertex>\nvTerrainPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvTerrainNormal = normalize(mat3(modelMatrix) * objectNormal);',
-                );
-            shader.fragmentShader = shader.fragmentShader
-                .replace(
-                    '#include <common>',
-                    `#include <common>\n${FRAGMENT_PARS}`,
-                )
-                .replace('#include <map_fragment>', FRAGMENT_ALBEDO)
-                .replace(
-                    '#include <roughnessmap_fragment>',
-                    'float roughnessFactor = terrainRoughness;',
-                )
-                .replace('#include <normal_fragment_maps>', FRAGMENT_NORMAL)
-                .replace('#include <aomap_fragment>', FRAGMENT_AO)
-                .replace('#include <emissivemap_fragment>', FRAGMENT_OVERLAY);
-        };
-
-        this.customProgramCacheKey = () => 'waterways-terrain-v2';
+        this.uniforms = createUniforms(
+            splat,
+            size,
+            resolution,
+            this.textures,
+            this.noise,
+            this.blankWet,
+        );
+        this.buildNodes();
     }
 
     get textureSize(): number {
@@ -145,12 +184,8 @@ export class TerrainMaterial extends THREE.MeshStandardMaterial {
 
     setLayers(layers: TerrainLayer[]): void {
         this.layers = layers;
-        const colorA = this.uniforms.uColorA.value as THREE.Color[];
-        const colorB = this.uniforms.uColorB.value as THREE.Color[];
-        const params = this.uniforms.uParams.value as THREE.Vector4[];
-        const mat = this.uniforms.uMat.value as THREE.Vector4[];
-        const mat2 = this.uniforms.uMat2.value as THREE.Vector4[];
-        const tint = this.uniforms.uTint.value as THREE.Color[];
+        const { colorA, colorB, params, mat, mat2, tint } =
+            this.uniforms.layers;
         const used = new Set<number>();
 
         for (let i = 0; i < TERRAIN_SLOTS; i++) {
@@ -212,14 +247,14 @@ export class TerrainMaterial extends THREE.MeshStandardMaterial {
     }
 
     setBrush(brush: BrushOverlay): void {
-        (this.uniforms.uBrush.value as THREE.Vector4).set(
+        this.uniforms.uBrush.value.set(
             brush.x,
             brush.z,
             brush.radius,
             brush.falloff,
         );
         this.uniforms.uBrushVisible.value = brush.visible ? 1 : 0;
-        (this.uniforms.uBrushColor.value as THREE.Color).copy(brush.color);
+        this.uniforms.uBrushColor.value.copy(brush.color);
     }
 
     hideBrush(): void {
@@ -231,7 +266,8 @@ export class TerrainMaterial extends THREE.MeshStandardMaterial {
     }
 
     override dispose(): void {
-        (this.uniforms.uNoise.value as THREE.Texture).dispose();
+        this.noise.dispose();
+        this.blankWet.dispose();
         this.textures.dispose();
         super.dispose();
     }
@@ -239,9 +275,7 @@ export class TerrainMaterial extends THREE.MeshStandardMaterial {
     private createTextures(size: number): TerrainTextures {
         const textures = new TerrainTextures(size);
         textures.onSlotReady = (slot, ready) => {
-            const mat = this.uniforms?.uMat.value as
-                | THREE.Vector4[]
-                | undefined;
+            const mat = this.uniforms?.layers.mat;
 
             if (mat) {
                 mat[slot].y = ready ? 1 : 0;
@@ -250,6 +284,499 @@ export class TerrainMaterial extends THREE.MeshStandardMaterial {
 
         return textures;
     }
+
+    /**
+     * The surface is evaluated once, in the colour node, and handed to the normal / roughness / AO
+     * nodes through shader-global properties (so the lighting and MRT outputs never re-run it).
+     */
+    private buildNodes(): void {
+        const u = this.uniforms;
+        const surfaceNormal = property('vec3', 'terrainNormal');
+        const surfaceRoughness = property('float', 'terrainRoughness');
+        const surfaceAO = property('float', 'terrainAO');
+        const surfaceBump = property('float', 'terrainBump');
+
+        this.colorNode = Fn(() => {
+            const s = terrainSurface(u);
+            surfaceNormal.assign(s.normal);
+            surfaceRoughness.assign(s.roughness);
+            surfaceAO.assign(s.ao);
+            surfaceBump.assign(s.bump);
+
+            return vec4(s.albedo, 1);
+        })();
+
+        this.roughnessNode = surfaceRoughness;
+        this.aoNode = mix(1, surfaceAO, 0.85);
+
+        this.normalNode = Fn(() => {
+            const n = normalize(
+                cameraViewMatrix.mul(vec4(surfaceNormal, 0)).xyz,
+            );
+            // Procedural bump for layers without a material; faded with distance to avoid moiré.
+            const bumpFade = float(1).sub(
+                smoothstep(40, 260, positionView.length()),
+            );
+            const dH = vec2(dFdx(surfaceBump), dFdy(surfaceBump)).mul(
+                bumpFade.mul(0.22),
+            );
+
+            return perturbNormal(positionView, n, dH);
+        })();
+
+        this.emissiveNode = Fn(() => {
+            const glow = vec3(0).toVar();
+            const wp = positionWorld.xz;
+
+            If(u.uBrushVisible.greaterThan(0.5), () => {
+                const b = u.uBrush;
+                const d = wp.sub(b.xy).length().toVar();
+                const px = fwidth(d).mul(1.5).toVar();
+                const outer = float(1).sub(smoothstep(0, px, abs(d.sub(b.z))));
+                const innerR = b.z.mul(float(1).sub(b.w)).toVar();
+                const inner = float(1)
+                    .sub(smoothstep(0, px, abs(d.sub(innerR))))
+                    .mul(0.6);
+                const fill = float(1)
+                    .sub(smoothstep(innerR, b.z, d))
+                    .mul(step(d, b.z))
+                    .mul(0.12);
+                const centre = float(1).sub(
+                    smoothstep(0, px.mul(2), d.sub(px.mul(2))),
+                );
+                glow.addAssign(
+                    u.uBrushColor.mul(outer.add(inner).add(fill).add(centre)),
+                );
+            });
+
+            If(u.uGridVisible.greaterThan(0.5), () => {
+                const cell = wp.div(100).toVar();
+                const g = abs(fract(cell.sub(0.5)).sub(0.5)).div(fwidth(cell));
+                const line = float(1).sub(g.x.min(g.y).min(1));
+                glow.addAssign(vec3(0.6 * 0.25).mul(line));
+            });
+
+            return glow;
+        })();
+    }
+}
+
+/** Tangent-space normal from the packed detail map (OpenGL convention; v grows southwards on the ground). */
+function unpackNormal(detail: Vec4, strength: Float): Vec3 {
+    const xy = detail.xy.mul(2).sub(1).mul(strength).toVar();
+
+    return vec3(
+        xy.x,
+        xy.y.negate(),
+        sqrt(max(float(1).sub(dot(xy, xy)), 0.05)),
+    );
+}
+
+/** Bump mapping from screen-space height derivatives (Mikkelsen), front faces only. */
+function perturbNormal(surfPos: Vec3, surfNorm: Vec3, dHdxy: Vec2): Vec3 {
+    const sigmaX = normalize(dFdx(surfPos));
+    const sigmaY = normalize(dFdy(surfPos));
+    const r1 = cross(sigmaY, surfNorm).toVar();
+    const r2 = cross(surfNorm, sigmaX).toVar();
+    const det = dot(sigmaX, r1).toVar();
+    const grad = sign(det).mul(r1.mul(dHdxy.x).add(r2.mul(dHdxy.y)));
+
+    return normalize(abs(det).mul(surfNorm).sub(grad));
+}
+
+/** One shaded layer: its surface and the inputs of the height blend. */
+type LayerSample = {
+    weight: Float;
+    valid: THREE.Node<'bool'>;
+    albedo: Vec3;
+    normal: Vec3;
+    roughness: Float;
+    ao: Float;
+    height: Float;
+    bump: Float;
+};
+
+/** Splat, layer and weather evaluation (fragment stage). */
+function terrainSurface(u: TerrainUniforms) {
+    const wpos = positionWorld.toVar();
+    const wp = wpos.xz.toVar();
+    const N = normalize(normalWorldGeometry).toVar();
+    const splatUv = wp
+        .add(u.uMapHalf)
+        .div(u.uCell)
+        .add(0.5)
+        .div(u.uRes)
+        .toVar();
+    const s0 = u.uSplat0.sample(splatUv).toVar();
+    const s1 = u.uSplat1.sample(splatUv).toVar();
+    const splatWeights = [s0.x, s0.y, s0.z, s0.w, s1.x, s1.y, s1.z, s1.w];
+
+    const dist = positionView.length().toVar();
+    const macro = u.uNoise.sample(wp.div(420)).toVar();
+    const macro2 = u.uNoise.sample(wp.div(97)).toVar();
+    const tileNoise = u.uNoise.sample(wp.div(61)).w.toVar();
+
+    // Triplanar weights for steep ground (cliffs); flat ground only uses the top projection.
+    const tw = pow(abs(N), vec3(4)).toVar();
+    tw.divAssign(tw.x.add(tw.y).add(tw.z));
+    const steep = tw.y.lessThan(0.97).toVar();
+    const axisSign = sign(N).toVar();
+
+    // Screen-space derivatives of world position (mip selection with explicit gradients; every
+    // lookup below may run in divergent control flow).
+    const dpx = dFdx(wpos).toVar();
+    const dpy = dFdy(wpos).toVar();
+
+    // Anti-tiling cell offsets (shared by all layers): see the layer lookups below.
+    const tileCell = tileNoise.mul(8).toVar();
+    const tileFract = fract(tileCell).toVar();
+    const offsetA = sin(vec2(3, 7).mul(floor(tileCell))).toVar();
+    const offsetB = sin(vec2(3, 7).mul(floor(tileCell).add(1))).toVar();
+
+    const farFade = smoothstep(35, 220, dist).toVar();
+    const normalFade = float(1)
+        .sub(smoothstep(60, 450, dist).mul(0.75))
+        .toVar();
+
+    // ---- pick the strongest layers (insertion into a sorted list, branch-free)
+    const topW = Array.from({ length: SHADED_LAYERS }, () => float(-1).toVar());
+    const topI = Array.from({ length: SHADED_LAYERS }, () => float(0).toVar());
+
+    for (let i = 0; i < TERRAIN_SLOTS; i++) {
+        const w = splatWeights[i].mul(u.uMat.element(i).x).toVar();
+
+        for (let k = SHADED_LAYERS - 1; k >= 0; k--) {
+            if (k === 0) {
+                topI[0].assign(
+                    select(w.greaterThan(topW[0]), float(i), topI[0]),
+                );
+                topW[0].assign(max(topW[0], w));
+            } else {
+                const above = w.greaterThan(topW[k - 1]);
+                topI[k].assign(
+                    select(
+                        above,
+                        topI[k - 1],
+                        select(w.greaterThan(topW[k]), float(i), topI[k]),
+                    ),
+                );
+                topW[k].assign(select(above, topW[k - 1], max(topW[k], w)));
+            }
+        }
+    }
+
+    // ---- pass 1: sample the selected layers
+    const samples: LayerSample[] = [];
+
+    for (let k = 0; k < SHADED_LAYERS; k++) {
+        const albedo = vec3(0).toVar();
+        const normal = vec3(N).toVar();
+        const roughness = float(1).toVar();
+        const ao = float(1).toVar();
+        const height = float(0.5).toVar();
+        const bump = float(0).toVar();
+        const valid = topW[k].greaterThanEqual(MIN_WEIGHT).toVar();
+        const index = topI[k].toInt().toVar();
+
+        If(valid, () => {
+            const m = u.uMat.element(index).toVar();
+            const m2 = u.uMat2.element(index).toVar();
+
+            If(m.y.greaterThan(0.5), () => {
+                const tile = m.z;
+                const uvT = wp.div(tile).toVar();
+                const gx = dpx.xz.div(tile).toVar();
+                const gy = dpy.xz.div(tile).toVar();
+                const albedoAt = (uv: Vec2, ddx: Vec2, ddy: Vec2) =>
+                    u.uAlbedoArr.sample(uv).depth(index).grad(ddx, ddy);
+                const detailAt = (uv: Vec2, ddx: Vec2, ddy: Vec2) =>
+                    u.uDetailArr.sample(uv).depth(index).grad(ddx, ddy);
+
+                // Anti-tiling: two lookups with per-cell random offsets, cross-faded by a
+                // low-frequency noise (after Inigo Quilez, "texture repetition", technique 3).
+                // Albedo+rough and detail use the same blend so the maps stay consistent.
+                const a1 = albedoAt(uvT.add(offsetA), gx, gy).toVar();
+                const b1 = albedoAt(uvT.add(offsetB), gx, gy).toVar();
+                const a2 = detailAt(uvT.add(offsetA), gx, gy);
+                const b2 = detailAt(uvT.add(offsetB), gx, gy);
+                const t = smoothstep(
+                    0.2,
+                    0.8,
+                    tileFract.sub(dot(a1.xyz.sub(b1.xyz), vec3(0.1))),
+                ).toVar();
+                const ar = mix(a1, b1, t).toVar();
+                const dt = mix(a2, b2, t).toVar();
+
+                // Far away, blend with a 4× larger lookup to break visible repetition.
+                If(farFade.greaterThan(0), () => {
+                    const far = albedoAt(
+                        uvT.mul(0.23).add(0.31),
+                        gx.mul(0.23),
+                        gy.mul(0.23),
+                    );
+                    ar.assign(
+                        vec4(mix(ar.xyz, far.xyz, farFade.mul(0.5)), ar.w),
+                    );
+                });
+
+                const strength = m2.y.mul(normalFade).toVar();
+                const tnY = unpackNormal(dt, strength).toVar();
+                const col = ar.xyz.toVar();
+                const rough = ar.w.toVar();
+                const occ = dt.z.toVar();
+                const h = dt.w.toVar();
+                // Whiteout-blended triplanar normal (Ben Golus); top projection only on flat ground.
+                const nSum = vec3(
+                    tnY.x.add(N.x),
+                    abs(tnY.z).mul(N.y),
+                    tnY.y.add(N.z),
+                )
+                    .mul(tw.y)
+                    .toVar();
+
+                If(steep, () => {
+                    col.mulAssign(tw.y);
+                    rough.mulAssign(tw.y);
+                    occ.mulAssign(tw.y);
+                    h.mulAssign(tw.y);
+
+                    // Side projections with a negligible weight are skipped.
+                    If(tw.x.greaterThan(0.01), () => {
+                        const uvX = vec2(
+                            wpos.z.mul(axisSign.x),
+                            wpos.y.negate(),
+                        ).div(tile);
+                        const gxX = vec2(
+                            dpx.z.mul(axisSign.x),
+                            dpx.y.negate(),
+                        ).div(tile);
+                        const gyX = vec2(
+                            dpy.z.mul(axisSign.x),
+                            dpy.y.negate(),
+                        ).div(tile);
+                        const arX = albedoAt(uvX, gxX, gyX).toVar();
+                        const dtX = detailAt(uvX, gxX, gyX).toVar();
+                        const tnX = unpackNormal(dtX, strength).toVar();
+                        const nX = vec3(
+                            abs(tnX.z).mul(N.x),
+                            tnX.y.negate().add(N.y),
+                            tnX.x.mul(axisSign.x).add(N.z),
+                        );
+                        nSum.addAssign(nX.mul(tw.x));
+                        col.addAssign(arX.xyz.mul(tw.x));
+                        rough.addAssign(arX.w.mul(tw.x));
+                        occ.addAssign(dtX.z.mul(tw.x));
+                        h.addAssign(dtX.w.mul(tw.x));
+                    });
+
+                    If(tw.z.greaterThan(0.01), () => {
+                        const uvZ = vec2(
+                            wpos.x.negate().mul(axisSign.z),
+                            wpos.y.negate(),
+                        ).div(tile);
+                        const gxZ = vec2(
+                            dpx.x.negate().mul(axisSign.z),
+                            dpx.y.negate(),
+                        ).div(tile);
+                        const gyZ = vec2(
+                            dpy.x.negate().mul(axisSign.z),
+                            dpy.y.negate(),
+                        ).div(tile);
+                        const arZ = albedoAt(uvZ, gxZ, gyZ).toVar();
+                        const dtZ = detailAt(uvZ, gxZ, gyZ).toVar();
+                        const tnZ = unpackNormal(dtZ, strength).toVar();
+                        const nZ = vec3(
+                            tnZ.x.mul(axisSign.z.negate()).add(N.x),
+                            tnZ.y.negate().add(N.y),
+                            abs(tnZ.z).mul(N.z),
+                        );
+                        nSum.addAssign(nZ.mul(tw.z));
+                        col.addAssign(arZ.xyz.mul(tw.z));
+                        rough.addAssign(arZ.w.mul(tw.z));
+                        occ.addAssign(dtZ.z.mul(tw.z));
+                        h.addAssign(dtZ.w.mul(tw.z));
+                    });
+                });
+
+                // Gentle macro variation so large areas don't look uniform.
+                col.mulAssign(
+                    macro2.y
+                        .sub(0.5)
+                        .mul(m2.z.mul(0.25))
+                        .add(macro.x.mul(0.12))
+                        .add(0.9),
+                );
+                albedo.assign(col.mul(u.uTint.element(index)));
+                normal.assign(normalize(nSum));
+                roughness.assign(clamp(rough.mul(m2.x), 0.03, 1));
+                ao.assign(occ);
+                height.assign(clamp(h.sub(0.5).mul(m.w).add(0.5), 0, 1));
+            }).Else(() => {
+                // Procedural fallback: two colours mixed by noise.
+                const p = u.uParams.element(index).toVar();
+                const scale = p.x;
+                const n = u.uNoise
+                    .sample(wp.div(scale))
+                    .grad(dpx.xz.div(scale), dpy.xz.div(scale))
+                    .toVar();
+                const fineScale = scale.mul(0.23);
+                const nFine = u.uNoise
+                    .sample(wp.div(fineScale))
+                    .grad(dpx.xz.div(fineScale), dpy.xz.div(fineScale))
+                    .toVar();
+                const t = clamp(
+                    n.z
+                        .mul(0.65)
+                        .add(nFine.x.mul(0.35))
+                        .sub(0.5)
+                        .mul(p.y.mul(3).add(1))
+                        .add(0.5),
+                    0,
+                    1,
+                );
+                const c = mix(
+                    u.uColorA.element(index),
+                    u.uColorB.element(index),
+                    smoothstep(0.2, 0.8, t)
+                        .mul(p.y)
+                        .add(float(1).sub(p.y).mul(0.25)),
+                )
+                    .mul(nFine.y.mul(0.16).add(0.92))
+                    .mul(
+                        macro.x
+                            .mul(0.2)
+                            .add(macro2.y.sub(0.5).mul(0.08))
+                            .add(0.88),
+                    );
+                albedo.assign(c);
+                roughness.assign(p.z);
+                height.assign(n.x.mul(0.6).add(n.y.mul(0.4)));
+                bump.assign(height.mul(p.w));
+            });
+        });
+
+        samples.push({
+            weight: topW[k],
+            valid,
+            albedo,
+            normal,
+            roughness,
+            ao,
+            height,
+            bump,
+        });
+    }
+
+    // ---- pass 2: height-based blend weights (sharp, natural transitions)
+    const scores = samples.map((s) =>
+        select(s.valid, s.weight.add(s.height.mul(0.5)), float(-1)).toVar(),
+    );
+    const best = scores.reduce<Float>((a, b) => max(a, b), float(-1)).toVar();
+    const blend = samples.map((s, k) =>
+        select(
+            s.valid,
+            max(scores[k].sub(best).add(0.18), 0),
+            float(0),
+        ).toVar(),
+    );
+    const total = blend.reduce<Float>((a, b) => a.add(b), float(0)).toVar();
+
+    // Nothing to blend (no enabled layer here): the first layer's colour.
+    const albedo = vec3(0).toVar();
+    albedo.assign(u.uColorA.element(0));
+    const nrm = vec3(N).toVar();
+    const rough = float(0.9).toVar();
+    const ao = float(1).toVar();
+    const bumpH = float(0).toVar();
+
+    If(total.greaterThanEqual(1e-4), () => {
+        const inv = float(1).div(total).toVar();
+        let a: Vec3 = vec3(0);
+        let n: Vec3 = vec3(0);
+        let r: Float = float(0);
+        let o: Float = float(0);
+        let b: Float = float(0);
+
+        samples.forEach((s, k) => {
+            const w = blend[k].mul(inv);
+            a = a.add(s.albedo.mul(w));
+            n = n.add(s.normal.mul(w));
+            r = r.add(s.roughness.mul(w));
+            o = o.add(s.ao.mul(w));
+            b = b.add(s.bump.mul(w));
+        });
+
+        albedo.assign(a);
+        nrm.assign(n);
+        rough.assign(r);
+        ao.assign(o);
+        bumpH.assign(b);
+    });
+
+    // Wet ground along water: darker, glossier, smoother.
+    const wet = u.uWet.sample(splatUv).x.toVar();
+    albedo.mulAssign(mix(1, 0.55, wet));
+    rough.assign(mix(rough, 0.12, wet.mul(0.85)));
+    nrm.assign(normalize(mix(nrm, N, wet.mul(0.5))));
+
+    // Weather: rain-soaked ground (porous darkening, glossy) with puddles in flat hollows.
+    If(u.uWeatherWet.greaterThan(0.001), () => {
+        const gw = u.uWeatherWet;
+        const flatness = smoothstep(0.93, 0.99, N.y);
+        const hollow = float(1)
+            .sub(macro2.z)
+            .mul(0.55)
+            .add(float(1).sub(macro.y).mul(0.45));
+        const puddle = smoothstep(
+            float(0.76).sub(gw.mul(0.14)),
+            float(0.82).sub(gw.mul(0.14)),
+            hollow,
+        )
+            .mul(flatness)
+            .mul(smoothstep(0.3, 0.8, gw))
+            .mul(0.85)
+            .toVar();
+        albedo.mulAssign(mix(1, 0.62, gw.mul(float(1).sub(wet.mul(0.5)))));
+        rough.assign(mix(rough, rough.mul(0.6), gw));
+        albedo.mulAssign(mix(1, 0.75, puddle));
+        rough.assign(mix(rough, 0.14, puddle));
+        nrm.assign(normalize(mix(nrm, N, max(gw.mul(0.25), puddle))));
+    });
+
+    // Snow settles on flatter ground first; thinner near water.
+    If(u.uSnowCover.greaterThan(0.001), () => {
+        const cover = u.uSnowCover.mul(float(1).sub(wet.mul(0.8))).toVar();
+        const lie = smoothstep(
+            0.55,
+            0.85,
+            N.y
+                .add(macro2.x.sub(0.5).mul(0.25))
+                .add(tileNoise.sub(0.5).mul(0.1)),
+        );
+        const snow = smoothstep(
+            0,
+            0.25,
+            lie.mul(cover).mul(1.4).sub(float(1).sub(cover).mul(0.3)),
+        ).toVar();
+        albedo.assign(
+            mix(
+                albedo,
+                vec3(0.86, 0.89, 0.93).mul(macro.x.mul(0.08).add(0.94)),
+                snow,
+            ),
+        );
+        rough.assign(mix(rough, 0.55, snow));
+        nrm.assign(normalize(mix(nrm, N, snow.mul(0.7))));
+        ao.assign(mix(ao, 1, snow.mul(0.6)));
+    });
+
+    return {
+        albedo,
+        normal: normalize(nrm),
+        roughness: clamp(rough, 0.03, 1),
+        ao,
+        bump: bumpH,
+    };
 }
 
 /** The material a layer renders with: its library material, or its legacy uploaded albedo. */
@@ -326,294 +853,3 @@ function createNoiseTexture(): THREE.DataTexture {
 
     return texture;
 }
-
-const FRAGMENT_PARS = /* glsl */ `
-varying vec3 vTerrainPos;
-varying vec3 vTerrainNormal;
-uniform sampler2D uSplat0;
-uniform sampler2D uSplat1;
-uniform sampler2D uNoise;
-uniform sampler2D uWet;
-uniform highp sampler2DArray uAlbedoArr;
-uniform highp sampler2DArray uDetailArr;
-uniform float uMapHalf;
-uniform float uCell;
-uniform float uRes;
-uniform vec3 uColorA[8];
-uniform vec3 uColorB[8];
-uniform vec4 uParams[8];
-uniform vec4 uMat[8];
-uniform vec4 uMat2[8];
-uniform vec3 uTint[8];
-uniform vec4 uBrush;
-uniform float uBrushVisible;
-uniform vec3 uBrushColor;
-uniform float uGridVisible;
-uniform float uWeatherWet;
-uniform float uSnowCover;
-
-float terrainRoughness = 1.0;
-float terrainBump = 0.0;       // procedural bump height (layers without material)
-float terrainAO = 1.0;
-vec3 terrainWorldNormal = vec3(0.0, 1.0, 0.0);
-
-vec3 perturbNormalTerrain(vec3 surf_pos, vec3 surf_norm, vec2 dHdxy, float faceDir) {
-    vec3 vSigmaX = normalize(dFdx(surf_pos.xyz));
-    vec3 vSigmaY = normalize(dFdy(surf_pos.xyz));
-    vec3 R1 = cross(vSigmaY, surf_norm);
-    vec3 R2 = cross(surf_norm, vSigmaX);
-    float fDet = dot(vSigmaX, R1) * faceDir;
-    vec3 vGrad = sign(fDet) * (dHdxy.x * R1 + dHdxy.y * R2);
-    return normalize(abs(fDet) * surf_norm - vGrad);
-}
-
-// Anti-tiling: two lookups with per-cell random offsets, cross-faded by a low-frequency noise
-// (after Inigo Quilez, "texture repetition", technique 3). Samples albedo+rough and detail with
-// the same blend so the maps stay consistent.
-void sampleLayer(vec2 uv, float layer, vec2 ddx, vec2 ddy, float k, out vec4 albedoRough, out vec4 detail) {
-    float l = k * 8.0;
-    float f = fract(l);
-    float ia = floor(l);
-    float ib = ia + 1.0;
-    vec2 oa = sin(vec2(3.0, 7.0) * ia);
-    vec2 ob = sin(vec2(3.0, 7.0) * ib);
-    vec4 a1 = textureGrad(uAlbedoArr, vec3(uv + oa, layer), ddx, ddy);
-    vec4 b1 = textureGrad(uAlbedoArr, vec3(uv + ob, layer), ddx, ddy);
-    vec4 a2 = textureGrad(uDetailArr, vec3(uv + oa, layer), ddx, ddy);
-    vec4 b2 = textureGrad(uDetailArr, vec3(uv + ob, layer), ddx, ddy);
-    float t = smoothstep(0.2, 0.8, f - 0.1 * dot(a1.rgb - b1.rgb, vec3(1.0)));
-    albedoRough = mix(a1, b1, t);
-    detail = mix(a2, b2, t);
-}
-
-// Tangent-space normal from the packed detail map (OpenGL convention; v grows southwards on the
-// ground so green is flipped), scaled by strength.
-vec3 unpackNormal(vec4 detail, float strength) {
-    vec2 xy = (detail.rg * 2.0 - 1.0) * strength;
-    xy.y = -xy.y;
-    return vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.05)));
-}
-`;
-
-const FRAGMENT_ALBEDO = /* glsl */ `
-{
-    vec3 wpos = vTerrainPos;
-    vec2 wp = wpos.xz;
-    vec3 N = normalize(vTerrainNormal);
-    vec2 splatUv = ((wp + uMapHalf) / uCell + 0.5) / uRes;
-    vec4 s0 = texture2D(uSplat0, splatUv);
-    vec4 s1 = texture2D(uSplat1, splatUv);
-    float w[8];
-    w[0] = s0.r; w[1] = s0.g; w[2] = s0.b; w[3] = s0.a;
-    w[4] = s1.r; w[5] = s1.g; w[6] = s1.b; w[7] = s1.a;
-
-    float dist = length(vViewPosition);
-    vec4 macro = texture2D(uNoise, wp / 420.0);
-    vec4 macro2 = texture2D(uNoise, wp / 97.0);
-    float tileNoise = texture2D(uNoise, wp / 61.0).a;
-
-    // Triplanar weights for steep ground (cliffs); flat ground only uses the top projection.
-    vec3 tw = pow(abs(N), vec3(4.0));
-    tw /= (tw.x + tw.y + tw.z);
-    bool steep = tw.y < 0.97;
-    vec3 axisSign = sign(N);
-
-    // Screen-space derivatives of world position (for mip selection with textureGrad).
-    vec3 dpx = dFdx(wpos);
-    vec3 dpy = dFdy(wpos);
-
-    // ---- pass 1: sample every active layer
-    vec3 lAlbedo[8];
-    vec3 lNormal[8];
-    float lRough[8];
-    float lAO[8];
-    float lHeight[8];
-    float farFade = smoothstep(35.0, 220.0, dist);
-    float normalFade = 1.0 - 0.75 * smoothstep(60.0, 450.0, dist);
-
-    for (int i = 0; i < 8; i++) {
-        w[i] *= uMat[i].x;
-        lAlbedo[i] = vec3(0.0);
-        lNormal[i] = N;
-        lRough[i] = 1.0;
-        lAO[i] = 1.0;
-        lHeight[i] = 0.5;
-
-        if (w[i] < 0.004) continue;
-
-        if (uMat[i].y > 0.5) {
-            float tile = uMat[i].z;
-            float li = float(i);
-            vec4 ar;
-            vec4 dt;
-            vec2 uvT = wp / tile;
-            sampleLayer(uvT, li, dpx.xz / tile, dpy.xz / tile, tileNoise, ar, dt);
-
-            // Far away, blend with a 4× larger lookup to break visible repetition.
-            vec4 farAR = textureGrad(uAlbedoArr, vec3(uvT * 0.23 + 0.31, li), dpx.xz / tile * 0.23, dpy.xz / tile * 0.23);
-            ar.rgb = mix(ar.rgb, mix(ar.rgb, farAR.rgb, 0.5), farFade);
-
-            float strength = uMat2[i].y * normalFade;
-            vec3 tnY = unpackNormal(dt, strength);
-            vec3 albedo = ar.rgb;
-            float rough = ar.a;
-            float ao = dt.b;
-            float h = dt.a;
-            // Whiteout-blended triplanar normal (Ben Golus); top projection only on flat ground.
-            vec3 nY = vec3(tnY.x + N.x, abs(tnY.z) * N.y, tnY.y + N.z);
-            vec3 nSum = nY * tw.y;
-
-            if (steep) {
-                vec2 uvX = vec2(wpos.z * axisSign.x, -wpos.y) / tile;
-                vec2 uvZ = vec2(-wpos.x * axisSign.z, -wpos.y) / tile;
-                vec2 gxX = vec2(dpx.z * axisSign.x, -dpx.y) / tile;
-                vec2 gyX = vec2(dpy.z * axisSign.x, -dpy.y) / tile;
-                vec2 gxZ = vec2(-dpx.x * axisSign.z, -dpx.y) / tile;
-                vec2 gyZ = vec2(-dpy.x * axisSign.z, -dpy.y) / tile;
-                vec4 arX = textureGrad(uAlbedoArr, vec3(uvX, li), gxX, gyX);
-                vec4 dtX = textureGrad(uDetailArr, vec3(uvX, li), gxX, gyX);
-                vec4 arZ = textureGrad(uAlbedoArr, vec3(uvZ, li), gxZ, gyZ);
-                vec4 dtZ = textureGrad(uDetailArr, vec3(uvZ, li), gxZ, gyZ);
-                vec3 tnX = unpackNormal(dtX, strength);
-                vec3 tnZ = unpackNormal(dtZ, strength);
-                tnX.x *= axisSign.x;
-                tnZ.x *= -axisSign.z;
-                vec3 nX = vec3(abs(tnX.z) * N.x, -tnX.y + N.y, tnX.x + N.z);
-                vec3 nZ = vec3(tnZ.x + N.x, -tnZ.y + N.y, abs(tnZ.z) * N.z);
-                nSum += nX * tw.x + nZ * tw.z;
-                albedo = albedo * tw.y + arX.rgb * tw.x + arZ.rgb * tw.z;
-                rough = rough * tw.y + arX.a * tw.x + arZ.a * tw.z;
-                ao = ao * tw.y + dtX.b * tw.x + dtZ.b * tw.z;
-                h = h * tw.y + dtX.a * tw.x + dtZ.a * tw.z;
-            }
-
-            // Gentle macro variation so large areas don't look uniform.
-            albedo *= 0.9 + (macro2.g - 0.5) * 0.25 * uMat2[i].z + macro.r * 0.12;
-            lAlbedo[i] = albedo * uTint[i];
-            lNormal[i] = normalize(nSum);
-            lRough[i] = clamp(rough * uMat2[i].x, 0.03, 1.0);
-            lAO[i] = ao;
-            lHeight[i] = clamp((h - 0.5) * uMat[i].w + 0.5, 0.0, 1.0);
-        } else {
-            // Procedural fallback: two colours mixed by noise.
-            vec4 n = texture2D(uNoise, wp / uParams[i].x);
-            vec4 nFine = texture2D(uNoise, wp / (uParams[i].x * 0.23));
-            float t = clamp((n.b * 0.65 + nFine.r * 0.35 - 0.5) * (1.0 + uParams[i].y * 3.0) + 0.5, 0.0, 1.0);
-            vec3 c = mix(uColorA[i], uColorB[i], smoothstep(0.2, 0.8, t) * uParams[i].y + (1.0 - uParams[i].y) * 0.25);
-            c *= 0.92 + nFine.g * 0.16;
-            c *= 0.88 + macro.r * 0.2 + (macro2.g - 0.5) * 0.08;
-            lAlbedo[i] = c;
-            lRough[i] = uParams[i].z;
-            lHeight[i] = n.r * 0.6 + n.g * 0.4;
-            lAO[i] = 1.0;
-        }
-    }
-
-    // ---- pass 2: height-based blend weights (sharp, natural transitions)
-    float best = -1.0;
-    for (int i = 0; i < 8; i++) {
-        if (w[i] >= 0.004) best = max(best, w[i] + lHeight[i] * 0.5);
-    }
-
-    float total = 0.0;
-    for (int i = 0; i < 8; i++) {
-        float b = w[i] >= 0.004 ? max(w[i] + lHeight[i] * 0.5 - best + 0.18, 0.0) : 0.0;
-        w[i] = b;
-        total += b;
-    }
-
-    vec3 albedo = vec3(0.0);
-    vec3 nrm = vec3(0.0);
-    float rough = 0.0;
-    float ao = 0.0;
-    float bumpH = 0.0;
-
-    if (total < 1e-4) {
-        albedo = uColorA[0];
-        nrm = N;
-        rough = 0.9;
-        ao = 1.0;
-    } else {
-        for (int i = 0; i < 8; i++) {
-            float wi = w[i] / total;
-            if (wi <= 0.0) continue;
-            albedo += lAlbedo[i] * wi;
-            nrm += lNormal[i] * wi;
-            rough += lRough[i] * wi;
-            ao += lAO[i] * wi;
-            bumpH += (uMat[i].y > 0.5 ? 0.0 : lHeight[i] * uParams[i].w) * wi;
-        }
-    }
-
-    // Wet ground along water: darker, glossier, smoother.
-    float wet = texture2D(uWet, splatUv).r;
-    albedo *= mix(1.0, 0.55, wet);
-    rough = mix(rough, 0.12, wet * 0.85);
-    nrm = normalize(mix(nrm, N, wet * 0.5));
-
-    // Weather: rain-soaked ground (porous darkening, glossy) with puddles in flat hollows.
-    if (uWeatherWet > 0.001) {
-        float gw = uWeatherWet;
-        float flatness = smoothstep(0.93, 0.99, N.y);
-        float hollow = (1.0 - macro2.b) * 0.55 + (1.0 - macro.g) * 0.45;
-        float puddle = smoothstep(0.76 - gw * 0.14, 0.82 - gw * 0.14, hollow) * flatness * smoothstep(0.3, 0.8, gw) * 0.85;
-        albedo *= mix(1.0, 0.62, gw * (1.0 - wet * 0.5));
-        rough = mix(rough, rough * 0.6, gw);
-        albedo *= mix(1.0, 0.75, puddle);
-        rough = mix(rough, 0.14, puddle);
-        nrm = normalize(mix(nrm, N, max(gw * 0.25, puddle)));
-    }
-
-    // Snow settles on flatter ground first; thinner near water.
-    if (uSnowCover > 0.001) {
-        float cover = uSnowCover * (1.0 - wet * 0.8);
-        float lie = smoothstep(0.55, 0.85, N.y + (macro2.r - 0.5) * 0.25 + (tileNoise - 0.5) * 0.1);
-        float snow = smoothstep(0.0, 0.25, lie * cover * 1.4 - (1.0 - cover) * 0.3);
-        albedo = mix(albedo, vec3(0.86, 0.89, 0.93) * (0.94 + macro.r * 0.08), snow);
-        rough = mix(rough, 0.55, snow);
-        nrm = normalize(mix(nrm, N, snow * 0.7));
-        ao = mix(ao, 1.0, snow * 0.6);
-    }
-
-    diffuseColor.rgb *= albedo;
-    terrainRoughness = clamp(rough, 0.03, 1.0);
-    terrainAO = mix(1.0, ao, 0.85);
-    terrainBump = bumpH;
-    terrainWorldNormal = normalize(nrm);
-}
-`;
-
-const FRAGMENT_NORMAL = /* glsl */ `
-#include <normal_fragment_maps>
-{
-    normal = normalize((viewMatrix * vec4(terrainWorldNormal, 0.0)).xyz);
-    // Procedural bump for layers without a material; faded with distance to avoid moiré.
-    float bumpFade = 1.0 - smoothstep(40.0, 260.0, length(vViewPosition));
-    vec2 dH = vec2(dFdx(terrainBump), dFdy(terrainBump)) * 0.22 * bumpFade;
-    normal = perturbNormalTerrain(-vViewPosition, normal, dH, faceDirection);
-}
-`;
-
-const FRAGMENT_AO = /* glsl */ `
-reflectedLight.indirectDiffuse *= terrainAO;
-reflectedLight.indirectSpecular *= terrainAO;
-`;
-
-const FRAGMENT_OVERLAY = /* glsl */ `
-#include <emissivemap_fragment>
-if (uBrushVisible > 0.5) {
-    float d = length(vTerrainPos.xz - uBrush.xy);
-    float px = fwidth(d) * 1.5;
-    float outer = 1.0 - smoothstep(0.0, px, abs(d - uBrush.z));
-    float innerR = uBrush.z * (1.0 - uBrush.w);
-    float inner = (1.0 - smoothstep(0.0, px, abs(d - innerR))) * 0.6;
-    float fill = (1.0 - smoothstep(innerR, uBrush.z, d)) * step(d, uBrush.z) * 0.12;
-    float dot_ = 1.0 - smoothstep(0.0, px * 2.0, d - px * 2.0);
-    totalEmissiveRadiance += uBrushColor * (outer + inner + fill + dot_);
-}
-if (uGridVisible > 0.5) {
-    vec2 g = abs(fract(vTerrainPos.xz / 100.0 - 0.5) - 0.5) / fwidth(vTerrainPos.xz / 100.0);
-    float line = 1.0 - min(min(g.x, g.y), 1.0);
-    totalEmissiveRadiance += vec3(0.6) * line * 0.25;
-}
-`;

@@ -94,9 +94,9 @@ final class GameSettingsSchema
                 SettingField::number('foliage_shadow_distance', 'Foliage shadow distance', 120, 0, 1000, 10, 'm', 'Foliage beyond this distance casts no shadows. 0 disables foliage shadows.'),
                 SettingField::number('foliage_lod_bias', 'Foliage detail', 1, 0.25, 4, 0.05, '×', 'Higher values keep detailed foliage LODs further away.'),
                 // Resolution & frame rate
-                SettingField::number('render_scale', 'Render scale', 1, 0.5, 2, 0.05, '×', 'Multiplier on the device pixel ratio.'),
+                SettingField::number('render_scale', 'Render scale', 1, 0.5, 2, 0.05, '×', 'Screen percentage on the capped pixel ratio. Below 1 the scene renders at a lower resolution and is upscaled (TAAU with TAA, FSR 1 otherwise); above 1 it is supersampled.'),
                 SettingField::number('max_pixel_ratio', 'Resolution cap', 1.5, 1, 3, 0.25, '×', 'Highest pixel density rendered on Retina / HiDPI screens (2–3× pixel ratio). Render scale applies on top of the capped ratio; 1.5 on a 2× display renders 56 % of the pixels.'),
-                SettingField::number('sharpen', 'Sharpen', 0, 0, 1, 0.01, null, 'Contrast-adaptive sharpening; useful with a render scale below 1.'),
+                SettingField::number('sharpen', 'Sharpen', 0, 0, 1, 0.01, null, 'Contrast-adaptive sharpening (FSR 1 RCAS when upscaling without TAA); useful with a render scale below 1.'),
                 SettingField::boolean('dynamic_resolution', 'Dynamic resolution', false, 'Lowers the render scale (down to 0.5×) automatically to hold the target frame rate.'),
                 SettingField::number('target_fps', 'Target frame rate', 60, 30, 144, 1, 'fps', 'Frame rate dynamic resolution tries to hold.'),
                 SettingField::select('renderer_backend', 'Graphics API', 'auto', [

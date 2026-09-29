@@ -133,7 +133,7 @@ type Effects = {
  *  2. GTAO         ambient occlusion at a fraction of the scene resolution.
  *     Contact      screen-space contact shadows (½ res), SSR (½ or full res), light shafts (¼ / ½ res).
  *  3. Composite    HDR lighting composite: × AO × contact shadows, + reflections, + light shafts.
- *  4. TAA / TAAU   temporal AA; below 1× render scale (or with dynamic resolution) the scene renders at
+ *  4. TAA / TAAU   temporal AA; below 1× render scale (render_scale × dynamic resolution) the scene renders at
  *                  the lower resolution and TAAU reconstructs the output resolution (like UE's TSR).
  *                  Everything after this runs at the output resolution.
  *  5. DoF          physically based CoC, auto-focus, half resolution bokeh gather, full-res composite.
@@ -526,8 +526,8 @@ export class PostFx {
         const look = this.look;
         const s: Structure = {
             aa: antiAliasingMode(g),
-            // With dynamic resolution the upscaler stays in place (no rebuilds as the scale changes).
-            upscale: this.inputScale < 0.999 || g.dynamic_resolution,
+            // At full scale TRAA resolves sharper than TAAU (which only pays off when upscaling).
+            upscale: this.inputScale < 0.999,
             ao: !!g.ambient_occlusion,
             bloom: !!g.bloom && (g.bloom_intensity ?? 0.12) > 0.001,
             autoExposure: !!g.auto_exposure,

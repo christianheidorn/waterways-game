@@ -18,6 +18,7 @@ import {
     nodeObject,
     normalize,
     normalWorldGeometry,
+    output,
     positionView,
     positionWorld,
     pow,
@@ -37,6 +38,7 @@ import {
 import type { TerrainLayer, TerrainMaterialRef } from '../shared/types';
 import { SimplexNoise } from '../util/noise';
 import type { SplatMap } from './SplatMap';
+import { TerrainDebugView } from './TerrainDebugView';
 import { TERRAIN_SLOTS, TerrainTextures } from './TerrainTextures';
 
 export type BrushOverlay = {
@@ -145,10 +147,14 @@ export type TerrainUniforms = ReturnType<typeof createUniforms>;
  *   triplanar projection on steep slopes and a far-distance detail blend,
  * - procedural colour/noise shading for layers without a material,
  * - wet ground near water and after rain (darker, glossier: the roughness output feeds the
- *   screen-space reflections), snow cover, an editor brush overlay and grid.
+ *   screen-space reflections), snow cover, an editor brush overlay and grid,
+ * - the editor's view modes (TerrainDebugView: lighting only, layers, slope, height, foliage
+ *   density, wireframe).
  */
 export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
     readonly uniforms: TerrainUniforms;
+    /** Editor view modes (see TerrainDebugView). */
+    readonly debug: TerrainDebugView;
     private textures: TerrainTextures;
     private layers: TerrainLayer[] = [];
     private readonly noise: THREE.DataTexture;
@@ -183,6 +189,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
             this.noise,
             this.blankWet,
         );
+        this.debug = new TerrainDebugView(size);
         this.buildNodes();
     }
 
@@ -290,6 +297,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
         this.noise.dispose();
         this.blankWet.dispose();
         this.textures.dispose();
+        this.debug.dispose();
         super.dispose();
     }
 
@@ -335,7 +343,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
             surfaceAO.assign(s.ao);
             surfaceBump.assign(s.bump);
 
-            return vec4(s.albedo, 1);
+            return vec4(this.debug.albedo(s.albedo), 1);
         })();
 
         this.roughnessNode = surfaceRoughness;
@@ -356,7 +364,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
             return perturbNormal(positionView, n, dH);
         })();
 
-        this.emissiveNode = Fn(() => {
+        const overlay = Fn(() => {
             const glow = vec3(0).toVar();
             const wp = positionWorld.xz;
 
@@ -390,6 +398,21 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
 
             return glow;
         })();
+        this.emissiveNode = overlay;
+
+        const splatUv = positionWorld.xz
+            .add(u.uMapHalf)
+            .div(u.uCell)
+            .add(0.5)
+            .div(u.uRes);
+        this.outputNode = this.debug.output(output, overlay, {
+            splat0: u.uSplat0.sample(splatUv),
+            splat1: u.uSplat1.sample(splatUv),
+            mat: u.uMat,
+            mapHalf: u.uMapHalf,
+            cell: u.uCell,
+            density: fixedTexture(this.debug.density.texture),
+        });
     }
 }
 

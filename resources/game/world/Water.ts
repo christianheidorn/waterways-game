@@ -1039,12 +1039,13 @@ function createWaterMaterial(
         0.001,
         0.999,
     );
-    // Black until a reflection is connected (weight 0). Its own placeholder texture: nodes that start
-    // on the same texture share one binding, which would keep sampling it after the swap.
-    const reflection = texture(
-        new THREE.DataTexture(new Uint8Array(4), 1, 1),
-        reflUv,
-    );
+    // Black until a reflection is connected (weight 0). Its own placeholder: nodes that start on the
+    // same texture share one binding, and the shader's sampling mode (filtered or texel fetch) is
+    // chosen from the placeholder's filters.
+    const placeholder = new THREE.DataTexture(new Uint8Array(4), 1, 1);
+    placeholder.minFilter = placeholder.magFilter = THREE.LinearFilter;
+    placeholder.needsUpdate = true;
+    const reflection = texture(placeholder, reflUv);
     material.planarNode = reflection.rgb;
     material.planarWeightNode = u.hasReflection.mul(
         smoothstep(0.4, 2, abs(pos.y.sub(u.reflLevel))).oneMinus(),

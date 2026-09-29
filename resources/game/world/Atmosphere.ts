@@ -1,4 +1,5 @@
 import * as THREE from 'three/webgpu';
+import { mix, normalize, positionLocal, smoothstep, uniform } from 'three/tsl';
 import type { GameRenderer } from '../core/renderer';
 import type { EnvironmentSettings, ShadowQuality } from '../shared/types';
 import {
@@ -100,6 +101,16 @@ export class Atmosphere {
     private envTarget: THREE.RenderTarget | null = null;
     private envScene = new THREE.Scene();
     private envSky: SkyDome;
+    /** Radiance of the ground below the horizon in the sky reflections (see createEnvGround). */
+    private readonly envGroundColor = uniform(
+        new THREE.Color(0.05, 0.05, 0.05),
+    );
+    private readonly envGround: THREE.Mesh<
+        THREE.SphereGeometry,
+        THREE.MeshBasicNodeMaterial
+    >;
+    private groundWet = 0;
+    private groundSnow = 0;
     private readonly skies: SkyDome[];
     private envDirty = true;
     private envTimer = 0;
@@ -119,6 +130,7 @@ export class Atmosphere {
     // Scratch objects (no per-frame allocations).
     private readonly tmpColor = new THREE.Color();
     private readonly tmpColor2 = new THREE.Color();
+    private readonly zenithColor = new THREE.Color();
     private readonly tmpDir = new THREE.Vector3();
     private readonly tmpCenter = new THREE.Vector3();
     private readonly lightRot = new THREE.Matrix4();
@@ -143,14 +155,14 @@ export class Atmosphere {
 
         this.envSky = new SkyDome('low', false);
         this.envSky.scale.setScalar(1000);
-        this.envScene.add(this.envSky);
+        this.envGround = this.createEnvGround();
+        this.envScene.add(this.envSky, this.envGround);
         this.skies = [this.sky, this.envSky];
 
         this.sun = new THREE.DirectionalLight(0xffffff, 3);
         this.sun.name = 'Sun';
         this.sun.castShadow = true;
-        this.sun.shadow.bias = -0.0004;
-        this.sun.shadow.normalBias = 0.6;
+        // Biases follow the shadow map resolution (setShadowQuality).
         scene.add(this.sun);
         scene.add(this.sun.target);
 
@@ -221,6 +233,24 @@ export class Atmosphere {
         this.lightingDirty = true;
     }
 
+    /**
+     * Ground state seen in the sky reflections: rain-soaked ground is darker, snow much brighter. Small
+     * changes are ignored (the reflections re-render at most every 0.25 s anyway).
+     */
+    setGround(wet: number, snow: number): void {
+        if (
+            Math.abs(wet - this.groundWet) < 0.02 &&
+            Math.abs(snow - this.groundSnow) < 0.02
+        ) {
+            return;
+        }
+
+        this.groundWet = wet;
+        this.groundSnow = snow;
+        this.lightingDirty = true;
+        this.envDirty = true;
+    }
+
     setCloudQuality(quality: CloudQuality): void {
         this.sky.setCloudQuality(quality);
         this.envSky.setCloudQuality(quality === 'off' ? 'off' : 'low');
@@ -244,6 +274,14 @@ export class Atmosphere {
         cam.near = 1;
         cam.far = distance * 6 + 4000;
         cam.updateProjectionMatrix();
+
+        // Biases in shadow-map texels, not fixed values: the depth bias is normalised to the (km-long)
+        // depth range, so a constant one pushed shadows ~2 m away from their casters and small objects
+        // (the player, rocks, bushes) cast no shadow on the ground or themselves. Half a texel of depth
+        // bias plus 1.5 texels along the normal keep flat ground at a grazing sun free of acne.
+        const texel = (distance * 2) / Math.max(1, size);
+        this.sun.shadow.bias = -(texel * 0.5) / (cam.far - cam.near);
+        this.sun.shadow.normalBias = texel * 1.5;
     }
 
     /** Blend weather, relight, and keep the shadow frustum centred on the focus point. */
@@ -346,6 +384,8 @@ export class Atmosphere {
         this.pmrem.dispose();
         this.sky.dispose();
         this.envSky.dispose();
+        this.envGround.geometry.dispose();
+        this.envGround.material.dispose();
         this.flashLight.dispose();
     }
 
@@ -380,7 +420,8 @@ export class Atmosphere {
         }
     }
 
-    private lightDirection(): THREE.Vector3 {
+    /** Direction towards the light that is up: the sun by day, the moon by night. */
+    lightDirection(): THREE.Vector3 {
         return this.sunDirection.y > -0.05
             ? this.sunDirection
             : this.moonDirection;
@@ -430,7 +471,7 @@ export class Atmosphere {
             dir.set(0, 1, 0),
             this.sunDirection,
             p,
-            this.tmpColor,
+            this.zenithColor,
         );
         const zenithLum =
             zenith.r * 0.2126 + zenith.g * 0.7152 + zenith.b * 0.0722;
@@ -562,7 +603,84 @@ export class Atmosphere {
         this.scene.environmentIntensity =
             0.55 * (1 - dark * 0.35) + flash * 0.8;
 
+        this.updateEnvGround(zenith, deck, overcast);
         this.applyFog();
+    }
+
+    /**
+     * Ground radiance for the lower half of the sky reflections: what flat terrain renders at with the
+     * current lights (Lambert: albedo / π × direct irradiance + albedo × sky irradiance), divided by the
+     * environment intensity the reflections are scaled with when sampled. Without it every surface that
+     * faces sideways or down (characters, rocks, trunks) is lit from below by the bright horizon.
+     */
+    private updateEnvGround(
+        zenith: THREE.Color,
+        deck: THREE.Color,
+        overcast: number,
+    ): void {
+        // Typical terrain albedo (grass, soil); rain darkens it, snow brightens it.
+        const albedo = THREE.MathUtils.lerp(
+            0.25 * (1 - this.groundWet * 0.35),
+            0.75,
+            this.groundSnow,
+        );
+        const envIntensity = Math.max(0.05, this.scene.environmentIntensity);
+        // Sky radiance averaged over the upper hemisphere (the horizon is brighter than the zenith on
+        // clear days; under a closed deck the deck is all there is).
+        const sky = this.tmpColor2
+            .copy(zenith)
+            .multiplyScalar(1.4)
+            .lerp(deck, Math.min(1, overcast * 1.2));
+        const e = this.envGroundColor.value;
+        // Direct light on flat ground (sun or moon; lightning never reaches the reflections).
+        const cosSun = Math.max(0, this.lightDirection().y);
+        e.copy(this.sun.color).multiplyScalar(
+            (this.sun.intensity * cosSun) / Math.PI,
+        );
+        // Hemisphere light: the sky colour for an up-facing surface.
+        e.r += (this.hemi.color.r * this.hemi.intensity) / Math.PI;
+        e.g += (this.hemi.color.g * this.hemi.intensity) / Math.PI;
+        e.b += (this.hemi.color.b * this.hemi.intensity) / Math.PI;
+        e.multiplyScalar(1 / envIntensity);
+        // Sky light, already in environment units.
+        e.add(sky);
+        e.multiplyScalar(albedo);
+    }
+
+    /**
+     * Lower hemisphere of the environment scene: a ground dome in `envGroundColor` that fades into the
+     * horizon (fog) colour just below the horizon, where the distant terrain disappears in the haze.
+     * Drawn before the sky, which is projected onto the far plane and fails the depth test behind it.
+     */
+    private createEnvGround(): THREE.Mesh<
+        THREE.SphereGeometry,
+        THREE.MeshBasicNodeMaterial
+    > {
+        const material = new THREE.MeshBasicNodeMaterial({
+            side: THREE.BackSide,
+        });
+        material.fog = false;
+        material.lights = false;
+        const up = normalize(positionLocal).y;
+        material.colorNode = mix(
+            this.envGroundColor,
+            this.envSky.uniforms.horizonColor,
+            smoothstep(-0.08, 0, up),
+        );
+        const geometry = new THREE.SphereGeometry(
+            500,
+            24,
+            6,
+            0,
+            Math.PI * 2,
+            Math.PI / 2,
+            Math.PI / 2,
+        );
+        const ground = new THREE.Mesh(geometry, material);
+        ground.name = 'EnvGround';
+        ground.frustumCulled = false;
+
+        return ground;
     }
 
     private applyFog(): void {

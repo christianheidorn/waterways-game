@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { applyWetness } from '../world/SurfaceWetness';
 
 /**
  * Procedural explorer humanoid (~1.8 m, origin at the feet, facing local -Z) with a joint
@@ -85,9 +86,9 @@ export class CharacterModel {
 
     private readonly joints: THREE.Group[] = [];
     private readonly geometries: THREE.BufferGeometry[] = [];
-    private readonly materials: THREE.MeshStandardMaterial[] = [];
-    private readonly jacket: THREE.MeshStandardMaterial;
-    private readonly jacketTrim: THREE.MeshStandardMaterial;
+    private readonly materials: THREE.MeshStandardNodeMaterial[] = [];
+    private readonly jacket: THREE.MeshStandardNodeMaterial;
+    private readonly jacketTrim: THREE.MeshStandardNodeMaterial;
 
     private readonly scratch: Pose = new Float32Array(POSE_SIZE);
     private readonly target: Pose = new Float32Array(POSE_SIZE);
@@ -107,12 +108,13 @@ export class CharacterModel {
             c: THREE.ColorRepresentation,
             roughness = 0.85,
             metalness = 0,
-        ): THREE.MeshStandardMaterial => {
-            const m = new THREE.MeshStandardMaterial({
+        ): THREE.MeshStandardNodeMaterial => {
+            const m = new THREE.MeshStandardNodeMaterial({
                 color: c,
                 roughness,
                 metalness,
             });
+            applyWetness(m);
             this.materials.push(m);
 
             return m;

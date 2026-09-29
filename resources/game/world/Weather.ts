@@ -9,6 +9,8 @@ import { withWeatherDefaults } from './Atmosphere';
 import type { Heightfield } from './Heightfield';
 import { Lightning } from './Lightning';
 import { Precipitation } from './Precipitation';
+import type { PrecipitationLight } from './PrecipitationCommon';
+import { surfaceWetness } from './SurfaceWetness';
 import type { CloudQuality } from './SkyDome';
 import type { TerrainMaterial } from './TerrainMaterial';
 import type { Water } from './Water';
@@ -51,7 +53,14 @@ export class Weather {
     private readonly target = { rain: 0, snow: 0 };
     private readonly windDir = new THREE.Vector2(0, -1);
     private readonly windVec = new THREE.Vector2();
-    private readonly light = new THREE.Color();
+    private readonly light: PrecipitationLight = {
+        ambient: new THREE.Color(),
+        sky: new THREE.Color(),
+        sun: new THREE.Color(),
+        sunDirection: new THREE.Vector3(0, 1, 0),
+        flash: 0,
+        flashDirection: new THREE.Vector3(0, 1, 0),
+    };
     private readonly top = new THREE.Vector3();
     private readonly ground = new THREE.Vector3();
     private readonly camPos = new THREE.Vector3();
@@ -62,7 +71,10 @@ export class Weather {
         private readonly atmosphere: Atmosphere,
         private readonly world: WeatherWorld,
     ) {
-        this.precipitation = new Precipitation();
+        this.precipitation = new Precipitation({
+            heights: world.heights,
+            waterLevelAt: (x, z) => world.water.levelAt(x, z),
+        });
         scene.add(this.precipitation.group, this.lightning.group);
         this.terrainMin = world.heights.minMax().min;
     }
@@ -158,6 +170,9 @@ export class Weather {
             1,
         );
         this.world.material.setWeather(wet, this.snowCover);
+        this.atmosphere.setGround(wet, this.snowCover);
+        // Characters and props soak with the rain itself (not with the map's ground wetness setting).
+        surfaceWetness.value = this.soaked;
         this.world.water.setWeather(
             this.rain,
             this.windNow,
@@ -168,8 +183,14 @@ export class Weather {
         // ---- particles
         camera.getWorldPosition(this.camPos);
         const underwater = this.atmosphere.isUnderwater;
-        this.atmosphere.ambientColor(this.light);
-        this.light.addScalar(this.atmosphere.flash * 0.6);
+        const a = this.atmosphere;
+        const light = this.light;
+        a.ambientColor(light.ambient);
+        light.sky.copy(a.fog.color);
+        light.sun.copy(a.sun.color).multiplyScalar(a.sun.intensity);
+        light.sunDirection.copy(a.lightDirection());
+        light.flash = a.flash;
+        light.flashDirection.copy(a.flashDirection);
         this.precipitation.update(
             dt,
             camera,

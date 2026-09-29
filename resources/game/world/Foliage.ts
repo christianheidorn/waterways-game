@@ -3070,7 +3070,20 @@ export class Foliage {
         this.needsEval = true;
         this.dataRevision++;
 
-        if (renderer.type.cast_shadows) {
+        // Ground cover keeps growing tiles around the camera while it moves: only those that can cast
+        // into the shadow maps refresh the cached far shadow (edits always do; the shadow may be
+        // centred on a distant brush).
+        if (
+            renderer.type.cast_shadows &&
+            (!renderer.cover ||
+                rectDistance(
+                    this.globals.camPos.value,
+                    cell.cx,
+                    cell.cz,
+                    renderer.cellSize,
+                ) <=
+                    this.shadowDistance + renderer.radius * 4)
+        ) {
             this.onShadowCastersChanged?.();
         }
 

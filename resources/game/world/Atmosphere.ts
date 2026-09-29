@@ -258,7 +258,11 @@ export class Atmosphere {
         u.time.value += dt;
         this.envSky.uniforms.cloudOffset.value.copy(u.cloudOffset.value);
 
-        if (this.lightingDirty || this.flash > 0 || this.flashLight.intensity > 0) {
+        if (
+            this.lightingDirty ||
+            this.flash > 0 ||
+            this.flashLight.intensity > 0
+        ) {
             this.relight();
         }
 

@@ -764,7 +764,7 @@ export class PostFx {
         let exposure: AutoExposure | null = null;
 
         if (s.autoExposure) {
-            exposure = new AutoExposure(this.renderer, hdr);
+            exposure = new AutoExposure(hdr);
             names.push('Eye adaptation');
         }
 

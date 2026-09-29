@@ -1,26 +1,19 @@
 import * as THREE from 'three/webgpu';
 import {
     array,
-    atomicAdd,
-    atomicLoad,
-    atomicStore,
     exp2,
     float,
     Fn,
     If,
-    instanceIndex,
     int,
     ivec2,
     Loop,
     mix,
-    storage,
-    uint,
     uniform,
     uv,
     vec2,
     vec4,
 } from 'three/tsl';
-import { isWebGpu } from '../renderer';
 import type { FloatNode, TextureNode, Vec2Node, Vec4Node } from './common';
 import { luma, ScreenPass } from './common';
 
@@ -29,7 +22,7 @@ const GRID = 64;
 const BINS = 64;
 const LOG_MIN = -16;
 const LOG_MAX = 8;
-/** Side of the reduced log-luminance image the WebGL 2 histogram is built from. */
+/** Side of the reduced (block-averaged) log-luminance grid the histogram is built from. */
 const REDUCED = 16;
 
 /**
@@ -142,42 +135,20 @@ function adapt(
     return { ev, metered };
 }
 
-/** Runs the metering compute passes once per frame, before the first draw that reads the exposure. */
-class ComputeMeter extends THREE.TempNode {
-    constructor(
-        private readonly kernels: THREE.ComputeNode[],
-        private readonly result: FloatNode,
-    ) {
-        super('float');
-        this.updateBeforeType = THREE.NodeUpdateType.FRAME;
-    }
-
-    override updateBefore(frame: THREE.NodeFrame): boolean | undefined {
-        void (frame.renderer as THREE.Renderer).compute(this.kernels);
-
-        return undefined;
-    }
-
-    override setup(): THREE.Node {
-        return this.result;
-    }
-}
-
 /**
  * Eye adaptation, entirely on the GPU (no read-back stalls): a centre-weighted 64-bin histogram of the
  * log luminance of the final HDR image, the 50th-95th percentile mean as the metered value, and a
  * smoothed exposure multiplier applied on top of the base exposure (renderer.toneMappingExposure, set by
  * the Atmosphere from time of day and weather).
  *
- * - WebGPU: two compute passes: 64×64 metering samples binned with atomics, then one invocation that
- *   evaluates the histogram, clears it and updates the exposure in a storage buffer.
- * - WebGL 2: a 64×64 log-luminance image, reduced to 16×16, and a 1×1 feedback pass that builds the
- *   histogram of those 256 values.
+ * A 64×64 log-luminance image, reduced to 16×16 block means, and a 1×1 feedback pass that builds the
+ * histogram of those 256 values (the same fragment passes on WebGPU and WebGL 2: they follow the input
+ * texture as it changes, e.g. TAA's ping-pong targets, and cost next to nothing).
  */
 export class AutoExposure {
     /** Exposure multiplier node (reads the adapted value of this frame). */
     readonly multiplier: FloatNode;
-    /** WebGL 2 fragment passes (empty on WebGPU). */
+    /** The metering passes (log luminance, reduction, histogram + adaptation). */
     readonly passes: ScreenPass[] = [];
     private readonly params: Params = {
         dt: uniform(0),
@@ -189,59 +160,8 @@ export class AutoExposure {
     };
     private needsReset = true;
 
-    constructor(renderer: THREE.Renderer, input: TextureNode) {
-        this.multiplier = isWebGpu(renderer as THREE.WebGPURenderer)
-            ? this.buildCompute(input)
-            : this.buildFragment(input);
-    }
-
-    private buildCompute(input: TextureNode): FloatNode {
-        const p = this.params;
-        const histogram = new THREE.StorageBufferAttribute(
-            new Uint32Array(BINS),
-            1,
-        );
-        // [exposure multiplier, log2 exposure, metered log2 luminance, unused]
-        const state = new THREE.StorageBufferAttribute(
-            new Float32Array([1, 0, 0, 0]),
-            4,
-        );
-        const bins = storage(histogram, 'uint', BINS).toAtomic();
-        const stateRw = storage(state, 'vec4', 1);
-
-        const binKernel = Fn(() => {
-            const x = instanceIndex.mod(GRID);
-            const y = instanceIndex.div(GRID);
-            const cell = vec2(float(x), float(y)).add(0.5).div(GRID).toVar();
-            const l = cellLogLuminance(input, cell, true);
-            // Weights in 1/16 steps: atomics are integer.
-            const w = uint(meterWeight(cell).mul(16).round());
-            atomicAdd(bins.element(histogramBin(l)), w);
-        })().compute(GRID * GRID, [64]);
-        binKernel.name = 'Eye adaptation';
-
-        const adaptKernel = Fn(() => {
-            const previous = stateRw.element(0).y;
-            const { ev, metered } = adapt(
-                p,
-                (i) => float(atomicLoad(bins.element(i))),
-                previous,
-            );
-
-            Loop(BINS, ({ i }) => {
-                atomicStore(bins.element(i), 0);
-            });
-
-            stateRw.element(0).assign(vec4(exp2(ev), ev, metered, 0));
-        })().compute(1, [1]);
-        adaptKernel.name = 'Eye adaptation';
-
-        const read = storage(state, 'vec4', 1).toReadOnly().element(0).x;
-
-        return new ComputeMeter(
-            [binKernel, adaptKernel],
-            read,
-        ) as unknown as FloatNode;
+    constructor(input: TextureNode) {
+        this.multiplier = this.buildFragment(input);
     }
 
     private buildFragment(input: TextureNode): FloatNode {

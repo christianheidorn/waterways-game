@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { toLitNodeMaterial } from '../world/SurfaceWetness';
 import type { CharacterAnimState } from './CharacterModel';
 
 export type ClipKey = 'idle' | 'walk' | 'run' | 'jump' | 'swim';
@@ -15,6 +16,7 @@ export class GltfCharacter {
     private mixer: THREE.AnimationMixer | null = null;
     private actions = new Map<ClipKey, THREE.AnimationAction>();
     private current: ClipKey | null = null;
+    private readonly materials: THREE.Material[] = [];
 
     static async load(
         url: string,
@@ -47,14 +49,33 @@ export class GltfCharacter {
         model.scale.setScalar(scale);
         model.position.y = -box.min.y * scale;
         model.rotation.y = Math.PI;
+        // Shared materials are converted once.
+        const converted = new Map<THREE.Material, THREE.Material>();
+        const lit = (m: THREE.Material): THREE.Material => {
+            let node = converted.get(m);
+
+            if (!node) {
+                node = toLitNodeMaterial(m);
+                converted.set(m, node);
+                m.dispose();
+            }
+
+            return node;
+        };
         model.traverse((obj) => {
-            if ((obj as THREE.Mesh).isMesh) {
-                obj.castShadow = true;
-                obj.receiveShadow = true;
+            const mesh = obj as THREE.Mesh;
+
+            if (mesh.isMesh) {
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
                 // Skinned meshes animate outside their bind-pose bounds.
-                obj.frustumCulled = false;
+                mesh.frustumCulled = false;
+                mesh.material = Array.isArray(mesh.material)
+                    ? mesh.material.map(lit)
+                    : lit(mesh.material);
             }
         });
+        character.materials.push(...converted.values());
         character.root.add(model);
 
         const extra = new Map<ClipKey, THREE.AnimationClip>();
@@ -161,5 +182,9 @@ export class GltfCharacter {
                 mesh.geometry.dispose();
             }
         });
+
+        for (const material of this.materials) {
+            material.dispose();
+        }
     }
 }

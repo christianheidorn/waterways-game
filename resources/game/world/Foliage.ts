@@ -5,7 +5,12 @@ import type { GpuProfiler } from '../core/GpuProfiler';
 import { isWebGpu } from '../core/renderer';
 import type { GameRenderer } from '../core/renderer';
 import { FOLIAGE_STRIDE } from '../shared/types';
-import type { FoliageFile, FoliageKind, FoliageType } from '../shared/types';
+import type {
+    FoliageFile,
+    FoliageKind,
+    FoliageType,
+    TerrainLayer,
+} from '../shared/types';
 import { mulberry32, SimplexNoise } from '../util/noise';
 import type { FoliageTypeStat } from '../shared/protocol';
 import { uniform } from 'three/tsl';
@@ -26,6 +31,11 @@ import {
     windStiffness,
 } from './foliage/FoliageMaterial';
 import type { FoliageTypeUniforms, LodRole } from './foliage/FoliageMaterial';
+import { generateGroundCoverTile } from './foliage/groundCover';
+import type {
+    GroundCoverContext,
+    GroundCoverSource,
+} from './foliage/groundCover';
 import { HiZ } from './foliage/HiZ';
 import { renderImpostor } from './foliage/Impostor';
 import { InstanceBatch } from './foliage/InstanceBatch';
@@ -105,6 +115,10 @@ const NO_SPLIT = 1e9;
  * frame's depth says nothing about the new view, so occlusion culling pauses for that frame.
  */
 const CAMERA_CUT = 25;
+/** Frame budget (ms) for growing ground cover tiles (at least one tile per frame while any is due). */
+const COVER_BUDGET_MS = 3;
+/** Camera movement (m) before the ground cover tiles around it are re-checked. */
+const COVER_MOVE = 4;
 
 type Cell = {
     /** `${size}:${cx},${cz}` — also the undo snapshot id. */
@@ -214,6 +228,17 @@ type TypeRenderer = {
     pendingImpostor: { distance: number; role: LodRole } | null;
     /** An impostor capture is in flight (read-back is asynchronous). */
     capturing: boolean;
+    /**
+     * Set for ground cover renderers (a type grown by terrain layers, see groundCover.ts): their cells
+     * are generated tiles around the camera, never saved or edited.
+     */
+    cover: {
+        sources: GroundCoverSource[];
+        /** Generation inputs; a change regrows every tile. */
+        signature: string;
+        /** Tiles to regrow (painted, sculpted, …); they keep their old instances until then. */
+        stale: Set<string>;
+    } | null;
 };
 
 export type FoliageStats = {
@@ -378,6 +403,13 @@ export class Foliage {
     private readonly previousCamera = new THREE.Vector3();
     private hasPrevious = false;
     private lastCull = 0;
+    /** Every foliage type (ground cover renderers are created from these). */
+    private types = new Map<number, FoliageType>();
+    private coverLayers: TerrainLayer[] = [];
+    private coverCtx: GroundCoverContext | null = null;
+    /** Re-check the ground cover tiles on the next update (else only after the camera moved). */
+    private coverScan = true;
+    private readonly lastCoverPos = new THREE.Vector3(Infinity, 0, 0);
 
     constructor() {
         this.group.name = 'Foliage';
@@ -450,6 +482,7 @@ export class Foliage {
     set distanceScale(value: number) {
         this.globals.fadeScale.value = Math.max(0.01, value);
         this.needsEval = true;
+        this.coverScan = true;
     }
 
     /** Foliage further than this (m) casts no shadows (GraphicsSettings.foliage_shadow_distance). */
@@ -472,9 +505,10 @@ export class Foliage {
 
     setTypes(types: FoliageType[]): void {
         const keep = new Set(types.map((t) => t.id));
+        this.types = new Map(types.map((t) => [t.id, t]));
 
         for (const [id, renderer] of this.renderers) {
-            if (!keep.has(id)) {
+            if (!renderer.cover && !keep.has(id)) {
                 // Keep the data so re-adding the type (or saving) doesn't lose placements.
                 this.orphaned.set(id, flatten(renderer));
                 this.disposeRenderer(renderer);
@@ -511,6 +545,312 @@ export class Foliage {
             }
         }
 
+        this.syncCover();
+        this.needsEval = true;
+    }
+
+    /**
+     * Ground cover: the foliage types each terrain layer grows by itself wherever it is painted.
+     * `ctx` (terrain, splat map, water) is kept from the previous call when omitted.
+     */
+    setGroundCover(
+        layers: TerrainLayer[],
+        ctx?: GroundCoverContext | null,
+    ): void {
+        this.coverLayers = layers;
+
+        if (ctx !== undefined) {
+            this.coverCtx = ctx;
+        }
+
+        this.syncCover();
+    }
+
+    /** Regrows the ground cover tiles touching a world rect (splat paint, sculpting, water edits). */
+    invalidateGroundCover(
+        minX: number,
+        minZ: number,
+        maxX: number,
+        maxZ: number,
+    ): void {
+        for (const renderer of this.renderers.values()) {
+            if (!renderer.cover) {
+                continue;
+            }
+
+            const size = renderer.cellSize;
+
+            for (const cell of renderer.cells.values()) {
+                if (
+                    (cell.cx + 1) * size >= minX &&
+                    cell.cx * size <= maxX &&
+                    (cell.cz + 1) * size >= minZ &&
+                    cell.cz * size <= maxZ
+                ) {
+                    renderer.cover.stale.add(cell.key);
+                }
+            }
+        }
+
+        this.coverScan = true;
+    }
+
+    /** Ground cover instances currently grown around the camera (not part of the saved foliage). */
+    get groundCoverCount(): number {
+        let count = 0;
+
+        for (const renderer of this.renderers.values()) {
+            if (renderer.cover) {
+                for (const cell of renderer.cells.values()) {
+                    count += cell.data.length / FOLIAGE_STRIDE;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    /** Creates / updates / removes the ground cover renderers to match the layers and types. */
+    private syncCover(): void {
+        const sources = new Map<number, GroundCoverSource[]>();
+
+        for (const layer of this.coverLayers) {
+            for (const entry of layer.ground_cover ?? []) {
+                if (
+                    entry.density > 0 &&
+                    this.types.has(entry.foliage_type_id)
+                ) {
+                    const list = sources.get(entry.foliage_type_id) ?? [];
+                    list.push({ slot: layer.slot, density: entry.density });
+                    sources.set(entry.foliage_type_id, list);
+                }
+            }
+        }
+
+        for (const [key, renderer] of this.renderers) {
+            if (
+                renderer.cover &&
+                (!this.coverCtx || !sources.has(renderer.type.id))
+            ) {
+                this.disposeRenderer(renderer);
+                this.renderers.delete(key);
+            }
+        }
+
+        if (!this.coverCtx) {
+            return;
+        }
+
+        for (const [id, list] of sources) {
+            const type = this.types.get(id)!;
+            const key = coverKey(id);
+            const signature = JSON.stringify([
+                list,
+                type.density,
+                type.min_scale,
+                type.max_scale,
+                type.min_slope,
+                type.max_slope,
+                type.min_height,
+                type.max_height,
+                type.align_to_normal,
+                type.random_yaw,
+                type.allow_underwater,
+                type.kind,
+            ]);
+            let renderer = this.renderers.get(key);
+
+            if (renderer && sameVisuals(renderer.type, type)) {
+                renderer.type = type;
+                renderer.uniforms.fadeEnd.value = type.cull_distance;
+                renderer.gpu?.setCastShadows(type.cast_shadows);
+            } else {
+                // New, or the look changed (new model, colours): rebuild, keeping the grown tiles.
+                const old = renderer;
+                renderer = this.createRenderer(type);
+                renderer.cover = {
+                    sources: list,
+                    signature: old?.cover?.signature ?? signature,
+                    stale: new Set(),
+                };
+
+                if (old) {
+                    const flat = flatten(old);
+                    this.disposeRenderer(old);
+
+                    if (old.cellSize === renderer.cellSize) {
+                        this.insertFlat(renderer, flat);
+                    }
+                }
+
+                this.renderers.set(key, renderer);
+            }
+
+            const cover = renderer.cover!;
+            cover.sources = list;
+
+            if (cover.signature !== signature) {
+                // Density, scale or rules changed: regrow every tile (in place, no gap).
+                cover.signature = signature;
+
+                for (const k of renderer.cells.keys()) {
+                    cover.stale.add(k);
+                }
+            }
+        }
+
+        this.coverScan = true;
+        this.needsEval = true;
+    }
+
+    /**
+     * Grows the ground cover tiles within reach of the camera (nearest first, within a frame budget),
+     * regrows stale ones and drops the ones left far behind.
+     */
+    private updateGroundCover(cam: THREE.Vector3): void {
+        const ctx = this.coverCtx;
+
+        if (
+            !ctx ||
+            (!this.coverScan &&
+                cam.distanceToSquared(this.lastCoverPos) <
+                    COVER_MOVE * COVER_MOVE)
+        ) {
+            return;
+        }
+
+        this.coverScan = false;
+        this.lastCoverPos.copy(cam);
+        const hf = ctx.heights;
+        const ground = hf.contains(cam.x, cam.z) ? hf.sample(cam.x, cam.z) : 0;
+        const above = Math.max(0, cam.y - ground);
+        const todo: {
+            renderer: TypeRenderer;
+            cx: number;
+            cz: number;
+            d: number;
+        }[] = [];
+
+        for (const renderer of this.renderers.values()) {
+            const cover = renderer.cover;
+
+            if (!cover) {
+                continue;
+            }
+
+            const size = renderer.cellSize;
+            const cull = renderer.type.cull_distance * this.distanceScale;
+            // Horizontal reach at the camera's height above the ground.
+            const reach = Math.sqrt(Math.max(0, cull * cull - above * above));
+            const keep = reach + size * 2;
+
+            for (const cell of renderer.cells.values()) {
+                if (rectDistance(cam, cell.cx, cell.cz, size) > keep) {
+                    this.dropCell(renderer, cell);
+                    cover.stale.delete(cell.key);
+                }
+            }
+
+            if (reach <= 0) {
+                continue;
+            }
+
+            const c0 = Math.max(
+                Math.floor((cam.x - reach) / size),
+                Math.floor(-hf.half / size),
+            );
+            const c1 = Math.min(
+                Math.floor((cam.x + reach) / size),
+                Math.ceil(hf.half / size) - 1,
+            );
+            const r0 = Math.max(
+                Math.floor((cam.z - reach) / size),
+                Math.floor(-hf.half / size),
+            );
+            const r1 = Math.min(
+                Math.floor((cam.z + reach) / size),
+                Math.ceil(hf.half / size) - 1,
+            );
+
+            for (let cz = r0; cz <= r1; cz++) {
+                for (let cx = c0; cx <= c1; cx++) {
+                    const d = rectDistance(cam, cx, cz, size);
+
+                    if (d > reach) {
+                        continue;
+                    }
+
+                    const key = `${size}:${cx},${cz}`;
+
+                    if (!renderer.cells.has(key) || cover.stale.has(key)) {
+                        todo.push({ renderer, cx, cz, d });
+                    }
+                }
+            }
+        }
+
+        if (!todo.length) {
+            return;
+        }
+
+        todo.sort((a, b) => a.d - b.d);
+        const start = performance.now();
+        let i = 0;
+
+        for (; i < todo.length; i++) {
+            if (i > 0 && performance.now() - start > COVER_BUDGET_MS) {
+                break;
+            }
+
+            const { renderer, cx, cz } = todo[i];
+            const size = renderer.cellSize;
+            const key = `${size}:${cx},${cz}`;
+            const cell = this.cellFor(renderer, key);
+            cell.data = generateGroundCoverTile(
+                renderer.type,
+                size,
+                cx,
+                cz,
+                renderer.cover!.sources,
+                ctx,
+            );
+            renderer.cover!.stale.delete(key);
+            this.markDirty(renderer, cell);
+        }
+
+        // More to grow: carry on next frame.
+        if (i < todo.length) {
+            this.coverScan = true;
+        }
+    }
+
+    /** Removes a cell entirely (ground cover tiles left behind by the camera). */
+    private dropCell(renderer: TypeRenderer, cell: Cell): void {
+        this.removeCellMesh(cell);
+        cell.data = [];
+        renderer.cells.delete(cell.key);
+        renderer.grid.delete(gridIndex(cell.cx, cell.cz));
+        const chunk = cell.chunk;
+
+        if (chunk) {
+            const index = chunk.members.indexOf(cell);
+
+            if (index >= 0) {
+                chunk.members.splice(index, 1);
+            }
+
+            chunk.dirty = true;
+
+            if (!chunk.members.length) {
+                this.removeCellMesh(chunk);
+                renderer.chunks.delete(gridIndex(chunk.gx, chunk.gz));
+            }
+        }
+
+        if (renderer.gpu) {
+            renderer.gpuDirty.add(cell);
+        }
+
         this.needsEval = true;
     }
 
@@ -532,9 +872,11 @@ export class Foliage {
             renderer.extent.makeEmpty();
             renderer.gpu?.clear();
             renderer.gpuDirty.clear();
+            renderer.cover?.stale.clear();
         }
 
         this.queue.length = 0;
+        this.coverScan = true;
         this.orphaned.clear();
         this.needsEval = true;
 
@@ -570,6 +912,10 @@ export class Foliage {
         };
 
         for (const [id, renderer] of this.renderers) {
+            if (renderer.cover) {
+                continue;
+            }
+
             for (const cell of renderer.cells.values()) {
                 add(id, cell.data);
             }
@@ -586,6 +932,10 @@ export class Foliage {
         let count = 0;
 
         for (const renderer of this.renderers.values()) {
+            if (renderer.cover) {
+                continue;
+            }
+
             for (const cell of renderer.cells.values()) {
                 count += cell.data.length / FOLIAGE_STRIDE;
             }
@@ -980,7 +1330,7 @@ export class Foliage {
         const r2 = radius * radius;
 
         for (const [id, renderer] of this.renderers) {
-            if (typeIds && !typeIds.includes(id)) {
+            if (renderer.cover || (typeIds && !typeIds.includes(id))) {
                 continue;
             }
 
@@ -1029,8 +1379,14 @@ export class Foliage {
         maxZ: number,
     ): void {
         const normal = new THREE.Vector3();
+        // Ground cover regrows instead (slope and height rules may now differ).
+        this.invalidateGroundCover(minX, minZ, maxX, maxZ);
 
         for (const renderer of this.renderers.values()) {
+            if (renderer.cover) {
+                continue;
+            }
+
             const size = renderer.cellSize;
 
             for (const cell of renderer.cells.values()) {
@@ -1175,7 +1531,10 @@ export class Foliage {
 
         for (const renderer of this.renderers.values()) {
             stats.cells += renderer.cells.size;
-            const typeStats = (stats.byType[renderer.type.name] ??= {
+            const name = renderer.cover
+                ? `${renderer.type.name} · ground cover`
+                : renderer.type.name;
+            const typeStats = (stats.byType[name] ??= {
                 drawCalls: 0,
                 triangles: 0,
                 instances: 0,
@@ -1183,7 +1542,7 @@ export class Foliage {
             const cull = renderer.type.cull_distance * this.distanceScale;
             const lodTriangles = renderer.lods.map(triangleCount);
             const detail: FoliageTypeStat = {
-                name: renderer.type.name,
+                name,
                 kind: renderer.type.kind,
                 source: renderer.lodInfo.source,
                 instances: 0,
@@ -1318,6 +1677,7 @@ export class Foliage {
         this.globals.time.value += dt;
         this.globals.camPos.value.copy(camera.position);
         this.lastCamera = camera;
+        this.updateGroundCover(camera.position);
 
         if (this.gpuFrame) {
             this.syncGpu();
@@ -2930,6 +3290,7 @@ export class Foliage {
             splitRoles,
             pendingImpostor: null,
             capturing: false,
+            cover: null,
         };
         const none = this.cpuMaterial(material, renderer, 'none');
         const near = splitRoles
@@ -3330,6 +3691,24 @@ function forEachInRect(
             fn(i);
         }
     }
+}
+
+/** Renderer key of a type's ground cover (type ids are positive). */
+function coverKey(typeId: number): number {
+    return -typeId - 1;
+}
+
+/** Horizontal distance from a point to a cell's square. */
+function rectDistance(
+    p: THREE.Vector3,
+    cx: number,
+    cz: number,
+    size: number,
+): number {
+    const dx = Math.max(cx * size - p.x, 0, p.x - (cx + 1) * size);
+    const dz = Math.max(cz * size - p.z, 0, p.z - (cz + 1) * size);
+
+    return Math.hypot(dx, dz);
 }
 
 /** Packs cell grid coordinates into one number (cells span ±32k cells). */

@@ -13,6 +13,8 @@ export class SplatMap {
     readonly data: Uint8Array;
     readonly textures: [THREE.DataTexture, THREE.DataTexture];
     private readonly texData: [Uint8Array, Uint8Array];
+    /** Called after a region changed (painting, undo, auto paint), e.g. to regrow ground cover. */
+    onChange: ((rect: GridRect) => void) | null = null;
 
     constructor(resolution: number, data?: Uint8Array) {
         this.resolution = resolution;
@@ -55,6 +57,8 @@ export class SplatMap {
         for (const texture of this.textures) {
             texture.needsUpdate = true;
         }
+
+        this.onChange?.(rect);
     }
 
     /**

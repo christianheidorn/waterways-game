@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\FoliageTypeApiController;
 use App\Http\Controllers\Api\MapAiController;
 use App\Http\Controllers\Api\MapDataController;
 use App\Http\Controllers\Api\MaterialApiController;
+use App\Http\Controllers\Api\TerrainLayerApiController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('maps/{map}')->name('api.maps.')->group(function () {
@@ -15,6 +16,7 @@ Route::prefix('maps/{map}')->name('api.maps.')->group(function () {
     Route::get('assets/{asset}', [MapDataController::class, 'show'])->name('assets.show');
     Route::put('assets/{asset}', [MapDataController::class, 'update'])->name('assets.update');
     Route::patch('meta', [MapDataController::class, 'updateMeta'])->name('meta.update');
+    Route::patch('layers/{layer}/ground-cover', [TerrainLayerApiController::class, 'groundCover'])->name('layers.ground-cover');
     Route::post('thumbnail', [MapDataController::class, 'storeThumbnail'])->name('thumbnail.store');
 
     Route::post('ai/suggest-materials', [MapAiController::class, 'suggestMaterials'])->name('ai.suggest-materials');

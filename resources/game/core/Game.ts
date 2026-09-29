@@ -16,6 +16,8 @@ import type {
     GameManifest,
     GameSettings,
     GraphicsSettings,
+    GroundCoverEntry,
+    TerrainLayer,
 } from '../shared/types';
 import {
     applyPreset,
@@ -31,8 +33,9 @@ import {
 import { PhotoMode } from '../ui/PhotoMode';
 import { Hud, LoadingScreen } from '../ui/Hud';
 import { Atmosphere } from '../world/Atmosphere';
-import { Foliage } from '../world/Foliage';
+import { Foliage, placementAllowed } from '../world/Foliage';
 import { Heightfield } from '../world/Heightfield';
+import type { GridRect } from '../world/Heightfield';
 import { SplatMap } from '../world/SplatMap';
 import { Terrain } from '../world/Terrain';
 import { TerrainMaterial } from '../world/TerrainMaterial';
@@ -379,7 +382,34 @@ export class Game {
         const wetness = new Wetness(heights, waterGrid);
         wetness.compute();
         material.setWetness(wetness.texture);
-        water.onRebuild = () => wetness.invalidate();
+        // Ground cover: grass etc. grown by the terrain layers wherever they are painted.
+        const coverAt = (rect?: GridRect) =>
+            rect
+                ? foliage.invalidateGroundCover(
+                      heights.colToX(rect.x0 - 1),
+                      heights.rowToZ(rect.z0 - 1),
+                      heights.colToX(rect.x1 + 1),
+                      heights.rowToZ(rect.z1 + 1),
+                  )
+                : foliage.invalidateGroundCover(
+                      -Infinity,
+                      -Infinity,
+                      Infinity,
+                      Infinity,
+                  );
+        const waterLevelAt = (x: number, z: number) => water.levelAt(x, z);
+        foliage.setGroundCover(m.layers, {
+            heights,
+            splat,
+            waterLevelAt,
+            allowed: (type, x, z) =>
+                placementAllowed({ heights, waterLevelAt }, type, x, z),
+        });
+        splat.onChange = coverAt;
+        water.onRebuild = (rect) => {
+            wetness.invalidate();
+            coverAt(rect);
+        };
 
         this.world = {
             heights,
@@ -458,6 +488,8 @@ export class Game {
             },
             clearFoliage: (ids) => this.editor.clearFoliage(ids),
             updateFoliageType: (id, patch) => this.updateFoliageType(id, patch),
+            updateGroundCover: (id, entries) =>
+                this.updateGroundCover(id, entries),
         });
         this.hud.panelSlot.append(this.panel.el);
         this.graphicsMenu = new GraphicsMenu(
@@ -1116,6 +1148,54 @@ export class Game {
         );
     }
 
+    private readonly coverPatches = new Map<number, GroundCoverEntry[]>();
+    private coverSaveTimer = 0;
+
+    /** In-editor ground cover edits of a terrain layer: regrown live, saved after a short pause. */
+    private updateGroundCover(
+        layerId: number,
+        entries: GroundCoverEntry[],
+    ): void {
+        const layers = this.manifest.layers.map((l) =>
+            l.id === layerId ? { ...l, ground_cover: entries } : l,
+        );
+        this.manifest.layers = layers;
+        this.world.foliage.setGroundCover(layers);
+        this.editor.setLayers(layers);
+        this.coverPatches.set(layerId, entries);
+
+        window.clearTimeout(this.coverSaveTimer);
+        this.coverSaveTimer = window.setTimeout(
+            () => void this.flushCoverPatches(),
+            700,
+        );
+    }
+
+    private async flushCoverPatches(): Promise<void> {
+        const base = this.manifest.endpoints.update_layers;
+
+        if (!base) {
+            return;
+        }
+
+        const patches = [...this.coverPatches];
+        this.coverPatches.clear();
+
+        for (const [id, entries] of patches) {
+            try {
+                const saved = await this.api.patchJson<TerrainLayer>(
+                    `${base}/${id}/ground-cover`,
+                    { ground_cover: entries },
+                );
+                this.bridge.send({ type: 'terrainLayerSaved', layer: saved });
+            } catch (error) {
+                this.hud.flash(
+                    `Could not save ground cover: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            }
+        }
+    }
+
     private async flushFoliagePatches(): Promise<void> {
         const base = this.manifest.endpoints.update_foliage_type;
 
@@ -1561,6 +1641,7 @@ export class Game {
             case 'updateLayers':
                 this.manifest.layers = message.layers;
                 this.world.material.setLayers(message.layers);
+                this.world.foliage.setGroundCover(message.layers);
                 this.editor.setLayers(message.layers);
                 break;
             case 'updateFoliageTypes':

@@ -257,6 +257,14 @@ export type TerrainLayer = {
     auto_min_slope: number | null;
     auto_max_slope: number | null;
     auto_priority: number;
+    /** Foliage that grows by itself wherever this layer is painted (not stored per instance). */
+    ground_cover?: GroundCoverEntry[];
+};
+
+export type GroundCoverEntry = {
+    foliage_type_id: number;
+    /** Multiplier on the type's density at full paint weight (0-4). */
+    density: number;
 };
 
 export type MaterialMapName =
@@ -385,6 +393,8 @@ export type GameManifest = {
         save_thumbnail: string;
         /** PATCH a foliage type's settings from the in-game editor: `${update_foliage_type}/{id}`. */
         update_foliage_type?: string;
+        /** PATCH a terrain layer's ground cover: `${update_layers}/{id}/ground-cover`. */
+        update_layers?: string;
     };
 };
 

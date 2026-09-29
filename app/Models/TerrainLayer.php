@@ -28,11 +28,12 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property float|null $auto_min_slope
  * @property float|null $auto_max_slope
  * @property int $auto_priority
+ * @property list<array{foliage_type_id: int, density: float}>|null $ground_cover
  */
 #[Fillable([
     'slot', 'material_id', 'tint', 'roughness_scale', 'normal_strength', 'name', 'color', 'color_secondary', 'roughness', 'noise_scale', 'variation', 'bump',
     'texture_path', 'texture_scale', 'auto_min_height', 'auto_max_height', 'auto_min_slope',
-    'auto_max_slope', 'auto_priority',
+    'auto_max_slope', 'auto_priority', 'ground_cover',
 ])]
 class TerrainLayer extends Model
 {
@@ -55,6 +56,7 @@ class TerrainLayer extends Model
             'auto_min_slope' => 'float',
             'auto_max_slope' => 'float',
             'auto_priority' => 'integer',
+            'ground_cover' => 'array',
         ];
     }
 
@@ -68,6 +70,29 @@ class TerrainLayer extends Model
     public function map(): BelongsTo
     {
         return $this->belongsTo(Map::class);
+    }
+
+    /**
+     * Foliage that grows by itself wherever this layer is painted (see resources/game/world/foliage/groundCover.ts).
+     *
+     * @return list<array{foliage_type_id: int, density: float}>
+     */
+    public function groundCover(): array
+    {
+        $entries = [];
+
+        foreach ($this->ground_cover ?? [] as $entry) {
+            if (! is_array($entry) || ! isset($entry['foliage_type_id'])) {
+                continue;
+            }
+
+            $entries[] = [
+                'foliage_type_id' => (int) $entry['foliage_type_id'],
+                'density' => max(0.0, min(4.0, (float) ($entry['density'] ?? 1))),
+            ];
+        }
+
+        return $entries;
     }
 
     /**
@@ -97,6 +122,7 @@ class TerrainLayer extends Model
             'tint' => $this->tint,
             'roughness_scale' => $this->roughness_scale,
             'normal_strength' => $this->normal_strength,
+            'ground_cover' => $this->groundCover(),
         ];
     }
 }

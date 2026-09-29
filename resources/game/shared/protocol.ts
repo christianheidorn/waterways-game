@@ -103,6 +103,7 @@ export type GameToShellMessage =
     | { type: 'error'; message: string }
     /** A foliage type edited in the in-game editor was saved to the studio library. */
     | { type: 'foliageTypeSaved'; foliageType: FoliageType }
+    | { type: 'terrainLayerSaved'; layer: TerrainLayer }
     | {
           type: 'screenshot';
           requestId: string;

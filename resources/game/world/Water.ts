@@ -81,7 +81,7 @@ export class Water {
     private ocean: THREE.Mesh | null = null;
     private step: number;
     /** Called whenever water meshes are rebuilt (e.g. to refresh shore wetness). */
-    onRebuild: (() => void) | null = null;
+    onRebuild: ((rect?: GridRect) => void) | null = null;
 
     constructor(
         readonly surface: Heightfield,
@@ -252,7 +252,7 @@ export class Water {
 
     /** Rebuilds the water meshes that overlap the rect (after water painting or terrain sculpting). */
     rebuildRect(rect: GridRect): void {
-        this.onRebuild?.();
+        this.onRebuild?.(rect);
 
         for (const chunk of this.chunks) {
             if (

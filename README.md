@@ -62,7 +62,7 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
 | Mode    | Tools                                                                                                                                      |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Sculpt  | Sculpt (raise/lower), Smooth, Flatten (target pick, raise/lower-only), Ramp, Thermal erosion, Hydraulic erosion (droplets), Noise, Terrace |
-| Paint   | Paint/erase any of the 8 layers; _Auto paint_ re-applies the layer rules to the whole map                                                  |
+| Paint   | Paint/erase any of the 8 layers; _Auto paint_ re-applies the layer rules to the whole map; _Ground cover_ per layer (grows live)           |
 | Foliage | Paint (density-aware, rule-aware), Erase, Single placement, _Scatter_ (procedural forests, meadows, shoreline reeds), Clear                |
 | Water   | Lake (level picked from terrain or Ctrl+click, optional carving), River (follows terrain downhill), Erase                                  |
 | Place   | Player start (position + facing)                                                                                                           |
@@ -148,6 +148,22 @@ without leaving the editor: density, size, slope, altitude, visible distance, sh
 Changes apply live and are saved to the studio library after a short pause (`PATCH /api/foliage-types/{id}`).
 Visibility and shadows update at once; density, size and placement rules apply to new painting, and
 _Re-scatter_ regenerates a type.
+
+**Ground cover** (like Unreal's landscape grass): foliage that grows by itself wherever a terrain layer is
+painted, so you never have to place, erase and repaint grass to try out a setting.
+
+- Each terrain layer lists foliage types with a density multiplier. Set them in the editor's Paint tool
+  (_Ground cover_ under the layer tiles) or on the studio's Terrain layers page.
+- Near the camera, tiles grow instances in proportion to the layer's paint weight (a half-painted border
+  gets half the grass). They follow each type's slope, altitude and underwater rules.
+- Nothing is stored. Each tile is seeded, so it always grows the same plants, and tiles the camera leaves
+  far behind are dropped. Painting the layer, sculpting, editing water, a type's density, size or rules, or
+  the layer's density regrows the affected tiles at once, in place. The old plants stay until the new ones
+  are ready, so nothing flickers.
+- Ground cover uses the same renderer as painted foliage: wind, LODs, the distance density falloff, GPU
+  culling on WebGPU and CPU cells on WebGL 2. The F10 foliage table lists it as "‹type› · ground cover".
+- Hand-painted instances of the same type are unaffected, and ground cover is never written to `foliage.json`.
+- Editor changes are saved after a short pause (`PATCH /api/maps/{map}/layers/{layer}/ground-cover`).
 
 **AI foliage palette** (✨ _AI palette_ on the foliage page):
 

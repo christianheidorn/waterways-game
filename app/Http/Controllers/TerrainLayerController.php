@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\FoliageType;
 use App\Models\Map;
 use App\Models\Material;
 use App\Models\TerrainLayer;
@@ -23,6 +24,9 @@ class TerrainLayerController extends Controller
             'map' => MapController::summary($map),
             'layers' => $map->layers->map->toGameArray()->values(),
             'maxLayers' => TerrainLayer::MAX_LAYERS,
+            // For the ground cover picker.
+            'foliageTypes' => FoliageType::query()->orderBy('name')->get(['id', 'name', 'kind'])
+                ->map(fn (FoliageType $t) => ['id' => $t->id, 'name' => $t->name, 'kind' => $t->kind->value])->values(),
             // Library for the material picker; loaded lazily (partial reload) when the picker opens.
             'materials' => Inertia::optional(fn () => Material::query()->withCount('layers')->latest()->latest('id')->get()
                 ->map(fn (Material $m) => $m->toStudioArray())->values()),
@@ -190,6 +194,21 @@ class TerrainLayerController extends Controller
             'auto_min_slope' => ['nullable', 'numeric', 'between:0,90'],
             'auto_max_slope' => ['nullable', 'numeric', 'between:0,90'],
             'auto_priority' => ['required', 'integer', Rule::in(range(0, 10))],
+            ...self::groundCoverRules(),
         ]);
+    }
+
+    /**
+     * Foliage types that grow by themselves on a layer, with a density multiplier each.
+     *
+     * @return array<string, mixed>
+     */
+    public static function groundCoverRules(): array
+    {
+        return [
+            'ground_cover' => ['sometimes', 'nullable', 'array', 'max:8'],
+            'ground_cover.*.foliage_type_id' => ['required', 'integer', 'distinct', 'exists:foliage_types,id'],
+            'ground_cover.*.density' => ['required', 'numeric', 'between:0,4'],
+        ];
     }
 }

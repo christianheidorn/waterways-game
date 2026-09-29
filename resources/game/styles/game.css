@@ -913,6 +913,14 @@ body.ww-body {
     text-align: left;
 }
 
+.ww-ground-cover-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgb(255 255 255 / 0.06);
+}
+
 .ww-select {
     appearance: auto;
     cursor: pointer;

@@ -49,6 +49,7 @@ final class GameManifest
                 'save_meta' => route('api.maps.meta.update', $map),
                 'save_thumbnail' => route('api.maps.thumbnail.store', $map),
                 'update_foliage_type' => url('/api/foliage-types'),
+                'update_layers' => url("/api/maps/{$map->slug}/layers"),
             ],
         ];
     }

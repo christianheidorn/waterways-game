@@ -1,5 +1,5 @@
 import { Head, router, useForm } from '@inertiajs/react';
-import type { TerrainLayer } from '@game/shared/types';
+import type { GroundCoverEntry, TerrainLayer } from '@game/shared/types';
 import {
     Box,
     ChevronRight,
@@ -10,6 +10,7 @@ import {
     Plus,
     RotateCcw,
     Save,
+    Sprout,
     Trash2,
     WandSparkles,
     X,
@@ -35,6 +36,13 @@ import {
 } from '@/components/ui/collapsible';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
 import { Spinner } from '@/components/ui/spinner';
 import { DEFAULT_CATEGORIES } from '@/lib/materials';
 import { cn } from '@/lib/utils';
@@ -46,9 +54,12 @@ import type {
     MaterialStudio,
 } from '@/types';
 
+type FoliageOption = { id: number; name: string; kind: string };
+
 type Props = {
     map: MapSummary;
     layers: TerrainLayer[];
+    foliageTypes?: FoliageOption[];
     maxLayers: number;
     /** Material library for the picker (may be an optional / lazy prop). */
     materials?: MaterialStudio[];
@@ -78,6 +89,7 @@ const NEW_LAYER: LayerForm = {
     auto_min_slope: null,
     auto_max_slope: null,
     auto_priority: 0,
+    ground_cover: [],
 };
 
 function toForm(layer: TerrainLayer): LayerForm {
@@ -98,12 +110,14 @@ function toForm(layer: TerrainLayer): LayerForm {
         auto_min_slope: layer.auto_min_slope,
         auto_max_slope: layer.auto_max_slope,
         auto_priority: layer.auto_priority,
+        ground_cover: layer.ground_cover ?? [],
     };
 }
 
 export default function MapLayers({
     map,
     layers,
+    foliageTypes = [],
     maxLayers,
     materials,
     categories = DEFAULT_CATEGORIES,
@@ -208,6 +222,7 @@ export default function MapLayers({
                             key={`${layer.id}-${layer.material_id ?? 0}-${planApplied}`}
                             map={map}
                             layer={layer}
+                            foliageTypes={foliageTypes}
                             canDelete={layers.length > 1}
                             library={library}
                             categories={categories}
@@ -227,6 +242,7 @@ export default function MapLayers({
 function LayerCard({
     map,
     layer,
+    foliageTypes,
     canDelete,
     library,
     categories,
@@ -236,6 +252,7 @@ function LayerCard({
 }: {
     map: MapSummary;
     layer: TerrainLayer;
+    foliageTypes: FoliageOption[];
     canDelete: boolean;
     library: MaterialStudio[] | undefined;
     categories: CategoryOption[];
@@ -573,6 +590,16 @@ function LayerCard({
                         error={errors.auto_priority}
                     />
                 </fieldset>
+
+                <GroundCoverFields
+                    value={form.data.ground_cover ?? []}
+                    onChange={(v) => set('ground_cover', v)}
+                    foliageTypes={foliageTypes}
+                    error={
+                        (form.errors as Record<string, string | undefined>)
+                            .ground_cover
+                    }
+                />
             </div>
 
             <div className="mt-auto flex items-center gap-2 border-t bg-muted/30 px-4 py-3 sm:px-5">
@@ -645,6 +672,116 @@ function LayerCard({
                 layerName={form.data.name || layer.name}
             />
         </form>
+    );
+}
+
+const SMALL_KINDS = new Set(['grass', 'flower', 'reed', 'bush', 'rock']);
+
+/** Foliage types that grow by themselves wherever this layer is painted. */
+function GroundCoverFields({
+    value,
+    onChange,
+    foliageTypes,
+    error,
+}: {
+    value: GroundCoverEntry[];
+    onChange: (value: GroundCoverEntry[]) => void;
+    foliageTypes: FoliageOption[];
+    error?: string;
+}) {
+    const available = foliageTypes
+        .filter((t) => !value.some((e) => e.foliage_type_id === t.id))
+        .sort(
+            (a, b) =>
+                Number(SMALL_KINDS.has(b.kind)) -
+                    Number(SMALL_KINDS.has(a.kind)) ||
+                a.name.localeCompare(b.name),
+        );
+
+    return (
+        <fieldset className="grid gap-4 rounded-lg border p-4">
+            <legend className="flex items-center gap-1.5 px-1 text-sm font-medium">
+                <Sprout className="size-4 text-muted-foreground" />
+                Ground cover
+            </legend>
+            <p className="-mt-1 text-xs text-muted-foreground">
+                Grass, flowers or rocks that grow by themselves wherever this
+                layer is painted, following the paint and each type’s slope,
+                altitude and water rules. Nothing is placed by hand: repaint the
+                layer and it regrows. Density multiplies the type’s own density.
+                Also editable live in the editor’s Paint tool.
+            </p>
+            {value.map((entry, index) => {
+                const type = foliageTypes.find(
+                    (t) => t.id === entry.foliage_type_id,
+                );
+
+                return (
+                    <div
+                        key={entry.foliage_type_id}
+                        className="flex items-end gap-2"
+                    >
+                        <SliderField
+                            className="flex-1"
+                            label={
+                                type?.name ?? `Type ${entry.foliage_type_id}`
+                            }
+                            value={entry.density}
+                            onChange={(v) =>
+                                onChange(
+                                    value.map((e, i) =>
+                                        i === index ? { ...e, density: v } : e,
+                                    ),
+                                )
+                            }
+                            min={0}
+                            max={4}
+                            step={0.05}
+                            unit="×"
+                        />
+                        <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            aria-label={`Remove ${type?.name ?? 'type'}`}
+                            onClick={() =>
+                                onChange(value.filter((_e, i) => i !== index))
+                            }
+                        >
+                            <X />
+                        </Button>
+                    </div>
+                );
+            })}
+            {available.length > 0 && value.length < 8 && (
+                <Select
+                    value=""
+                    onValueChange={(v) =>
+                        onChange([
+                            ...value,
+                            { foliage_type_id: Number(v), density: 1 },
+                        ])
+                    }
+                >
+                    <SelectTrigger className="w-full">
+                        <SelectValue placeholder="Add foliage type…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                        {available.map((t) => (
+                            <SelectItem key={t.id} value={String(t.id)}>
+                                {t.name}
+                            </SelectItem>
+                        ))}
+                    </SelectContent>
+                </Select>
+            )}
+            {foliageTypes.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                    No foliage types yet — create some under Foliage.
+                </p>
+            )}
+            <InputError message={error} />
+        </fieldset>
     );
 }
 

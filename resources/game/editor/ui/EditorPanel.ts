@@ -19,7 +19,7 @@ import {
 } from 'lucide';
 import type { IconNode } from 'lucide';
 import type { EditorToolGroup } from '../../shared/protocol';
-import type { FoliageType } from '../../shared/types';
+import type { FoliageType, GroundCoverEntry } from '../../shared/types';
 import {
     button,
     h,
@@ -182,6 +182,11 @@ export class EditorPanel {
                 id: number,
                 patch: Partial<FoliageType>,
             ) => void;
+            /** Change a terrain layer's ground cover live (saved to the map). */
+            updateGroundCover: (
+                layerId: number,
+                entries: GroundCoverEntry[],
+            ) => void;
         },
     ) {
         this.groupSeg = segmented(
@@ -262,6 +267,7 @@ export class EditorPanel {
                 break;
             case 'paint':
                 this.body.append(this.layerList());
+                this.body.append(this.groundCover());
                 this.body.append(this.brushSection(true));
                 this.body.append(
                     section(
@@ -732,6 +738,131 @@ export class EditorPanel {
         );
     }
 
+    /**
+     * Ground cover of the selected layer: foliage types that grow by themselves wherever the layer
+     * is painted. Everything regrows live; the type settings below are the same as in the Foliage tab.
+     */
+    private groundCover(): HTMLElement {
+        const wrap = h('div', {});
+        const build = () => {
+            const s = this.editor.state;
+            const layer = this.editor.layers.find(
+                (l) => l.slot === s.paintLayer,
+            );
+            const types = this.editor.foliageTypes;
+
+            if (!layer) {
+                wrap.replaceChildren();
+
+                return;
+            }
+
+            const entries = layer.ground_cover ?? [];
+            const current = () =>
+                this.editor.layers.find((l) => l.id === layer.id)
+                    ?.ground_cover ?? entries;
+            const save = (next: GroundCoverEntry[]) => {
+                this.actions.updateGroundCover(layer.id, next);
+            };
+            const rows = entries.map((entry, index) => {
+                const type = types.find((t) => t.id === entry.foliage_type_id);
+                const density = slider({
+                    label: type?.name ?? `Type ${entry.foliage_type_id}`,
+                    min: 0,
+                    max: 4,
+                    step: 0.05,
+                    value: entry.density,
+                    format: (v) => `${v.toFixed(2)}×`,
+                    onInput: (v) =>
+                        save(
+                            current().map((e, i) =>
+                                i === index ? { ...e, density: v } : e,
+                            ),
+                        ),
+                });
+                const edit = button(
+                    'Settings',
+                    () => {
+                        this.editingTypeId = entry.foliage_type_id;
+                        build();
+                    },
+                    { title: 'Edit this type’s size, colour, rules below' },
+                );
+                const remove = button(
+                    'Remove',
+                    () => {
+                        save(current().filter((_e, i) => i !== index));
+                        build();
+                    },
+                    { icon: Eraser },
+                );
+
+                return h(
+                    'div',
+                    { class: 'ww-ground-cover-row' },
+                    density.el,
+                    h('div', { class: 'ww-row' }, edit, remove),
+                );
+            });
+
+            const available = types.filter(
+                (t) => !entries.some((e) => e.foliage_type_id === t.id),
+            );
+            const small = new Set(['grass', 'flower', 'reed', 'bush', 'rock']);
+            available.sort(
+                (a, b) =>
+                    Number(small.has(b.kind)) - Number(small.has(a.kind)) ||
+                    a.name.localeCompare(b.name),
+            );
+            const add = h('select', {
+                class: 'ww-input ww-select',
+                style: { width: '100%', textAlign: 'left' },
+                'aria-label': 'Add ground cover',
+            });
+            add.append(h('option', { value: '' }, 'Add foliage type…'));
+
+            for (const t of available) {
+                add.append(h('option', { value: String(t.id) }, t.name));
+            }
+
+            add.addEventListener('change', () => {
+                const id = Number(add.value);
+
+                if (!id || entries.length >= 8) {
+                    return;
+                }
+
+                save([...current(), { foliage_type_id: id, density: 1 }]);
+                this.editingTypeId = id;
+                build();
+            });
+
+            const settings = entries.some(
+                (e) => e.foliage_type_id === this.editingTypeId,
+            )
+                ? this.foliageSettings(true)
+                : null;
+
+            wrap.replaceChildren(
+                section(
+                    `Ground cover · ${layer.name}`,
+                    h(
+                        'p',
+                        { class: 'ww-muted' },
+                        'Grows by itself wherever this layer is painted, following the paint and each type’s slope, altitude and water rules. Nothing to place or erase: repaint the layer or tweak the settings and it regrows instantly.',
+                    ),
+                    ...rows,
+                    available.length && entries.length < 8 ? add : null,
+                ),
+                ...(settings ? [settings] : []),
+            );
+        };
+
+        build();
+
+        return wrap;
+    }
+
     private foliageList(): HTMLElement {
         const s = this.editor.state;
         const types = this.editor.foliageTypes;
@@ -847,7 +978,7 @@ export class EditorPanel {
      * Settings of one foliage type, editable without leaving the editor. Every change applies
      * live and is saved to the studio library after a short pause.
      */
-    private foliageSettings(): HTMLElement {
+    private foliageSettings(groundCover = false): HTMLElement {
         const wrap = h('div', {});
         const build = () => {
             const s = this.editor.state;
@@ -1058,16 +1189,20 @@ export class EditorPanel {
                     h(
                         'p',
                         { class: 'ww-muted' },
-                        'Saved to the studio library automatically. Visibility and shadows update at once; density, size and placement rules apply to new painting — use Scatter to regenerate a type.',
+                        groundCover
+                            ? 'Saved to the studio library automatically. Ground cover regrows at once; painted instances of this type keep their placement.'
+                            : 'Saved to the studio library automatically. Visibility and shadows update at once; density, size and placement rules apply to new painting (ground cover regrows at once) — use Scatter to regenerate a type.',
                     ),
-                    button(
-                        `Re-scatter ${type.name}`,
-                        () => this.actions.scatter([id]),
-                        {
-                            icon: Sparkles,
-                            title: 'Replace all placed instances of this type using the new settings (undoable)',
-                        },
-                    ),
+                    groundCover
+                        ? null
+                        : button(
+                              `Re-scatter ${type.name}`,
+                              () => this.actions.scatter([id]),
+                              {
+                                  icon: Sparkles,
+                                  title: 'Replace all placed instances of this type using the new settings (undoable)',
+                              },
+                          ),
                 ),
             );
         };

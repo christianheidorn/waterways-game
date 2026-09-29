@@ -26,6 +26,14 @@ export class TerrainTextures {
     );
     private canvas: HTMLCanvasElement | OffscreenCanvas;
     private ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+    /**
+     * Average albedo (linear) of every slot's material, computed when it is packed: the colour the
+     * ground reads as from a distance (foliage roots blend into it, see TerrainMaterial.groundColor).
+     */
+    readonly averages: THREE.Color[] = Array.from(
+        { length: TERRAIN_SLOTS },
+        () => new THREE.Color(1, 1, 1),
+    );
     /** Called whenever a slot finished loading (e.g. to update shader uniforms). */
     onSlotReady: ((slot: number, ready: boolean) => void) | null = null;
 
@@ -128,6 +136,7 @@ export class TerrainTextures {
                 dData[p + 3] = height ? height[p] : 128;
             }
 
+            averageAlbedo(aData, this.size, this.averages[slot]);
             this.albedoRough.addLayerUpdate(slot);
             this.normalAoHeight.addLayerUpdate(slot);
             this.albedoRough.needsUpdate = true;
@@ -202,4 +211,36 @@ export class TerrainTextures {
 
         return texture;
     }
+}
+
+/** sRGB byte → linear (working colour space), for averaging albedo texels. */
+const SRGB_TO_LINEAR = (() => {
+    const c = new THREE.Color();
+
+    return Float32Array.from(
+        { length: 256 },
+        (_, i) => c.setRGB(i / 255, i / 255, i / 255, THREE.SRGBColorSpace).r,
+    );
+})();
+
+/** Linear average of an RGBA8 sRGB image (size × size), from a 64 × 64 grid of texels. */
+function averageAlbedo(data: Uint8Array, size: number, out: THREE.Color): void {
+    const grid = Math.min(64, size);
+    let r = 0;
+    let g = 0;
+    let b = 0;
+
+    for (let row = 0; row < grid; row++) {
+        const y = Math.floor(((row + 0.5) * size) / grid);
+
+        for (let col = 0; col < grid; col++) {
+            const p = (y * size + Math.floor(((col + 0.5) * size) / grid)) * 4;
+            r += SRGB_TO_LINEAR[data[p]];
+            g += SRGB_TO_LINEAR[data[p + 1]];
+            b += SRGB_TO_LINEAR[data[p + 2]];
+        }
+    }
+
+    const n = grid * grid;
+    out.setRGB(r / n, g / n, b / n);
 }

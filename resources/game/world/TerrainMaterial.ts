@@ -105,6 +105,8 @@ function createUniforms(
         () => new THREE.Vector4(1, 1, 0.5, 0),
     );
     const tint = Array.from({ length: 8 }, () => new THREE.Color(1, 1, 1));
+    // Average albedo per layer (what the ground reads as from a distance; see groundColor).
+    const ground = Array.from({ length: 8 }, () => new THREE.Color());
 
     return {
         uSplat0: fixedTexture(splat.textures[0]),
@@ -122,6 +124,7 @@ function createUniforms(
         uMat: uniformArray<'vec4'>(mat, 'vec4'),
         uMat2: uniformArray<'vec4'>(mat2, 'vec4'),
         uTint: uniformArray<'color'>(tint, 'color'),
+        uGround: uniformArray<'color'>(ground, 'color'),
         uBrush: uniform(new THREE.Vector4(0, 0, 0, 0.5)),
         uBrushVisible: uniform(0),
         uBrushColor: uniform(new THREE.Color(0.25, 0.75, 1)),
@@ -130,7 +133,7 @@ function createUniforms(
         uWeatherWet: uniform(0),
         uSnowCover: uniform(0),
         /** CPU-side values behind the uniform arrays (edited in place by setLayers). */
-        layers: { colorA, colorB, params, mat, mat2, tint },
+        layers: { colorA, colorB, params, mat, mat2, tint, ground },
     };
 }
 
@@ -247,6 +250,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
                 .multiply(new THREE.Color(ref?.tint ?? '#ffffff'));
 
             void this.textures.load(i, ref, layer.roughness);
+            this.updateGroundColor(i);
         }
 
         for (let i = 0; i < TERRAIN_SLOTS; i++) {
@@ -254,6 +258,66 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
                 this.textures.clear(i);
             }
         }
+    }
+
+    /**
+     * Terrain colour at a world position (x, z) as it reads from a few metres away: the layers'
+     * average albedos weighted by the splat map, darkened where the ground is wet (shores, rain) and
+     * whitened by snow cover. Foliage blends its roots into it. Built from this material's uniforms
+     * (layer edits, material loads and weather apply without rebuilding the caller's shader); safe in
+     * the vertex stage (explicit LOD, 3 texture samples).
+     */
+    groundColor(xz: Vec2): Vec3 {
+        const u = this.uniforms;
+
+        return Fn(() => {
+            const splatUv = xz
+                .add(u.uMapHalf)
+                .div(u.uCell)
+                .add(0.5)
+                .div(u.uRes)
+                .toVar();
+            const s0 = u.uSplat0.sample(splatUv).level(float(0)).toVar();
+            const s1 = u.uSplat1.sample(splatUv).level(float(0)).toVar();
+            const weights = [s0.x, s0.y, s0.z, s0.w, s1.x, s1.y, s1.z, s1.w];
+            let sum: Float = float(0);
+            let color: Vec3 = vec3(0);
+
+            // Cubed weights: the terrain's height blend lets the dominant layer cover most of a
+            // mixed texel, a plain weighted average would look washed out next to it.
+            weights.forEach((weight, i) => {
+                const w = weight
+                    .mul(weight)
+                    .mul(weight)
+                    .mul(u.uMat.element(i).x);
+                sum = sum.add(w);
+                color = color.add(u.uGround.element(i).mul(w));
+            });
+
+            const total = sum.toVar();
+            // No enabled layer here: the first layer's colour (as the terrain shader does).
+            const ground = vec3(0).toVar();
+            ground.assign(u.uColorA.element(0));
+
+            If(total.greaterThan(1e-5), () => {
+                ground.assign(color.div(total));
+            });
+
+            // Wetness, rain and snow as in terrainSurface (flat ground, averaged puddles).
+            const wet = u.uWet.sample(splatUv).level(float(0)).x.toVar();
+            ground.mulAssign(mix(1, 0.55, wet));
+            ground.mulAssign(
+                mix(1, 0.62, u.uWeatherWet.mul(float(1).sub(wet.mul(0.5)))),
+            );
+            const cover = u.uSnowCover.mul(float(1).sub(wet.mul(0.8)));
+            const snow = smoothstep(
+                0,
+                0.25,
+                cover.mul(1.4).sub(float(1).sub(cover).mul(0.3)),
+            );
+
+            return mix(ground, vec3(0.86, 0.89, 0.93), snow);
+        })();
     }
 
     /** Weather-driven ground state: `wet` darkens and glosses everything (puddles on flat ground), `snow` whitens it. */
@@ -300,10 +364,35 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
 
             if (mat) {
                 mat[slot].y = ready ? 1 : 0;
+                this.updateGroundColor(slot);
             }
         };
 
         return textures;
+    }
+
+    /**
+     * Average albedo of a layer as the terrain shader renders it: its material's average × tint, or
+     * the procedural colour pair at the layer's average mix. Both get the mean of the macro
+     * variation (≈ 0.97).
+     */
+    private updateGroundColor(slot: number): void {
+        const { colorA, colorB, params, mat, tint, ground } =
+            this.uniforms.layers;
+
+        if (mat[slot].y > 0.5) {
+            ground[slot]
+                .copy(this.textures.averages[slot])
+                .multiply(tint[slot]);
+        } else {
+            // Noise mix: smoothstep(t) averages 0.5, weighted by the variation (see terrainSurface).
+            const variation = params[slot].y;
+            ground[slot]
+                .copy(colorA[slot])
+                .lerp(colorB[slot], 0.25 + 0.25 * variation);
+        }
+
+        ground[slot].multiplyScalar(0.97);
     }
 
     /**

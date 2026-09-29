@@ -1,5 +1,9 @@
 import { Head, router, useForm } from '@inertiajs/react';
-import type { GroundCoverEntry, TerrainLayer } from '@game/shared/types';
+import type {
+    BiomeSummary,
+    GroundCoverEntry,
+    TerrainLayer,
+} from '@game/shared/types';
 import {
     Box,
     ChevronRight,
@@ -30,6 +34,14 @@ import { SliderField } from '@/components/slider-field';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
+import {
     Collapsible,
     CollapsibleContent,
     CollapsibleTrigger,
@@ -46,6 +58,7 @@ import {
 import { Spinner } from '@/components/ui/spinner';
 import { DEFAULT_CATEGORIES } from '@/lib/materials';
 import { cn } from '@/lib/utils';
+import biomesRoutes from '@/routes/biomes';
 import maps from '@/routes/maps';
 import type {
     AiConfig,
@@ -59,6 +72,7 @@ type FoliageOption = { id: number; name: string; kind: string };
 type Props = {
     map: MapSummary;
     layers: TerrainLayer[];
+    biomes?: BiomeSummary[];
     foliageTypes?: FoliageOption[];
     maxLayers: number;
     /** Material library for the picker (may be an optional / lazy prop). */
@@ -117,6 +131,7 @@ function toForm(layer: TerrainLayer): LayerForm {
 export default function MapLayers({
     map,
     layers,
+    biomes = [],
     foliageTypes = [],
     maxLayers,
     materials,
@@ -129,7 +144,7 @@ export default function MapLayers({
     // Only one live WebGL preview at a time (browsers cap WebGL contexts).
     const [previewLayerId, setPreviewLayerId] = useState<number | null>(null);
     const [libraryRequested, setLibraryRequested] = useState(false);
-    // Bumped after an AI plan is applied so the layer forms pick up the new values.
+    // Bumped after an AI plan or a biome is applied so the layer forms pick up the new values.
     const [planApplied, setPlanApplied] = useState(0);
 
     const ensureLibrary = () => {
@@ -216,12 +231,16 @@ export default function MapLayers({
                     aiConfigured={ai?.configured}
                 />
 
+                <BiomeLibrary biomes={biomes} />
+
                 <div className="grid gap-6 xl:grid-cols-2">
                     {layers.map((layer) => (
                         <LayerCard
                             key={`${layer.id}-${layer.material_id ?? 0}-${planApplied}`}
                             map={map}
                             layer={layer}
+                            biomes={biomes}
+                            onBiomeApplied={() => setPlanApplied((n) => n + 1)}
                             foliageTypes={foliageTypes}
                             canDelete={layers.length > 1}
                             library={library}
@@ -242,6 +261,8 @@ export default function MapLayers({
 function LayerCard({
     map,
     layer,
+    biomes,
+    onBiomeApplied,
     foliageTypes,
     canDelete,
     library,
@@ -252,6 +273,8 @@ function LayerCard({
 }: {
     map: MapSummary;
     layer: TerrainLayer;
+    biomes: BiomeSummary[];
+    onBiomeApplied: () => void;
     foliageTypes: FoliageOption[];
     canDelete: boolean;
     library: MaterialStudio[] | undefined;
@@ -370,6 +393,14 @@ function LayerCard({
                     />
                     <InputError message={errors.name} />
                 </div>
+
+                <BiomeFields
+                    map={map}
+                    layer={layer}
+                    biomes={biomes}
+                    dirty={form.isDirty}
+                    onApplied={onBiomeApplied}
+                />
 
                 <section
                     aria-label="Material"
@@ -675,6 +706,271 @@ function LayerCard({
     );
 }
 
+/** Apply a library biome to this layer, or save the layer as a new biome. */
+function BiomeFields({
+    map,
+    layer,
+    biomes,
+    dirty,
+    onApplied,
+}: {
+    map: MapSummary;
+    layer: TerrainLayer;
+    biomes: BiomeSummary[];
+    dirty: boolean;
+    onApplied: () => void;
+}) {
+    const applyForm = useForm<{ biome_id: number | null }>({ biome_id: null });
+    const saveForm = useForm({
+        layer_id: layer.id,
+        name: layer.name,
+        description: '',
+    });
+    const [saveOpen, setSaveOpen] = useState(false);
+
+    const apply = (biomeId: number) => {
+        applyForm.transform(() => ({ biome_id: biomeId }));
+        applyForm.submit(
+            maps.layers.biome({ map: map.slug, layer: layer.id }),
+            { preserveScroll: true, onSuccess: onApplied },
+        );
+    };
+
+    return (
+        <div className="grid gap-2">
+            <Label>Biome</Label>
+            <div className="flex flex-wrap items-center gap-2">
+                <Select
+                    value=""
+                    onValueChange={(v) => apply(Number(v))}
+                    disabled={applyForm.processing || biomes.length === 0}
+                >
+                    <SelectTrigger className="min-w-0 flex-1">
+                        <SelectValue
+                            placeholder={
+                                biomes.length
+                                    ? 'Apply a biome…'
+                                    : 'No biomes in the library'
+                            }
+                        />
+                    </SelectTrigger>
+                    <SelectContent>
+                        {biomes.map((b) => (
+                            <SelectItem key={b.id} value={String(b.id)}>
+                                {b.name}
+                            </SelectItem>
+                        ))}
+                    </SelectContent>
+                </Select>
+                <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                        saveForm.setData('name', layer.name);
+                        setSaveOpen(true);
+                    }}
+                    disabled={dirty}
+                    title={
+                        dirty
+                            ? 'Save the layer first'
+                            : 'Add this layer’s look and ground cover to the biome library'
+                    }
+                >
+                    <Sprout />
+                    Save as biome
+                </Button>
+                {applyForm.processing && <Spinner />}
+            </div>
+            <p className="text-xs text-muted-foreground">
+                A biome is a ground material plus everything that grows on it.
+                Applying one replaces this layer’s look and ground cover;
+                painted areas keep their paint.
+            </p>
+            <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Save as biome</DialogTitle>
+                        <DialogDescription>
+                            Stores this layer’s material, colours and ground
+                            cover in the library, for any map.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="grid gap-4">
+                        <div className="grid gap-2">
+                            <Label htmlFor={`biome-name-${layer.id}`}>
+                                Name
+                            </Label>
+                            <Input
+                                id={`biome-name-${layer.id}`}
+                                value={saveForm.data.name}
+                                maxLength={60}
+                                onChange={(e) =>
+                                    saveForm.setData('name', e.target.value)
+                                }
+                            />
+                            <InputError message={saveForm.errors.name} />
+                        </div>
+                        <div className="grid gap-2">
+                            <Label htmlFor={`biome-desc-${layer.id}`}>
+                                Description
+                            </Label>
+                            <Input
+                                id={`biome-desc-${layer.id}`}
+                                value={saveForm.data.description}
+                                maxLength={200}
+                                placeholder="Optional"
+                                onChange={(e) =>
+                                    saveForm.setData(
+                                        'description',
+                                        e.target.value,
+                                    )
+                                }
+                            />
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <Button
+                            type="button"
+                            disabled={
+                                saveForm.processing ||
+                                !saveForm.data.name.trim()
+                            }
+                            onClick={() =>
+                                saveForm.submit(biomesRoutes.store(), {
+                                    preserveScroll: true,
+                                    onSuccess: () => setSaveOpen(false),
+                                })
+                            }
+                        >
+                            {saveForm.processing ? <Spinner /> : <Save />}
+                            Save biome
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+        </div>
+    );
+}
+
+/** The biome library: what each biome grows, delete, restore the starters. */
+function BiomeLibrary({ biomes }: { biomes: BiomeSummary[] }) {
+    const startersForm = useForm({});
+    const deleteForm = useForm({});
+
+    return (
+        <Collapsible className="rounded-xl border bg-card shadow-xs">
+            <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-xl px-4 py-3 text-left text-sm font-medium outline-none hover:bg-muted/40 focus-visible:ring-[3px] focus-visible:ring-ring/50">
+                <ChevronRight className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+                <Sprout className="size-4 text-muted-foreground" />
+                Biome library
+                <span className="text-xs font-normal text-muted-foreground tabular-nums">
+                    {biomes.length}
+                </span>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="grid gap-4 border-t p-4">
+                <p className="text-sm text-muted-foreground">
+                    Reusable layers: a ground material plus the grass, flowers,
+                    rocks and trees that grow on it. Apply one to a layer below
+                    (or in the editor’s Paint tool), then paint that layer to
+                    paint the whole biome.
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {biomes.map((b) => (
+                        <div
+                            key={b.id}
+                            className="flex gap-3 rounded-lg border p-3"
+                        >
+                            {b.material?.thumbnail_url ? (
+                                <MaterialThumb
+                                    src={b.material.thumbnail_url}
+                                    alt=""
+                                    className="size-12 shrink-0 rounded-md border"
+                                />
+                            ) : (
+                                <div
+                                    className="size-12 shrink-0 rounded-md border"
+                                    style={{
+                                        background: `linear-gradient(135deg, ${b.color}, ${b.color_secondary})`,
+                                    }}
+                                    aria-hidden
+                                />
+                            )}
+                            <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                    <span className="truncate text-sm font-medium">
+                                        {b.name}
+                                    </span>
+                                    {b.starter && (
+                                        <Badge variant="secondary">
+                                            Starter
+                                        </Badge>
+                                    )}
+                                </div>
+                                {b.description && (
+                                    <p className="line-clamp-2 text-xs text-muted-foreground">
+                                        {b.description}
+                                    </p>
+                                )}
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                    {b.ground_cover.length
+                                        ? b.ground_cover
+                                              .map((e) => e.name)
+                                              .filter(Boolean)
+                                              .join(' · ')
+                                        : 'No ground cover'}
+                                </p>
+                            </div>
+                            <ConfirmDialog
+                                trigger={
+                                    <Button
+                                        type="button"
+                                        size="icon"
+                                        variant="ghost"
+                                        aria-label={`Delete ${b.name}`}
+                                    >
+                                        <Trash2 />
+                                    </Button>
+                                }
+                                title={`Delete ${b.name}?`}
+                                description="Layers it was applied to keep their look and ground cover."
+                                confirmLabel="Delete biome"
+                                destructive
+                                processing={deleteForm.processing}
+                                onConfirm={(close) =>
+                                    deleteForm.submit(
+                                        biomesRoutes.destroy(b.id),
+                                        {
+                                            preserveScroll: true,
+                                            onSuccess: close,
+                                        },
+                                    )
+                                }
+                            />
+                        </div>
+                    ))}
+                </div>
+                <div>
+                    <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={startersForm.processing}
+                        onClick={() =>
+                            startersForm.submit(biomesRoutes.starters(), {
+                                preserveScroll: true,
+                            })
+                        }
+                    >
+                        {startersForm.processing ? <Spinner /> : <Plus />}
+                        Add starter biomes
+                    </Button>
+                </div>
+            </CollapsibleContent>
+        </Collapsible>
+    );
+}
+
 const SMALL_KINDS = new Set(['grass', 'flower', 'reed', 'bush', 'rock']);
 
 /** Foliage types that grow by themselves wherever this layer is painted. */
@@ -689,6 +985,8 @@ function GroundCoverFields({
     foliageTypes: FoliageOption[];
     error?: string;
 }) {
+    const patch = (index: number, change: Partial<GroundCoverEntry>) =>
+        onChange(value.map((e, i) => (i === index ? { ...e, ...change } : e)));
     const available = foliageTypes
         .filter((t) => !value.some((e) => e.foliage_type_id === t.id))
         .sort(
@@ -705,11 +1003,13 @@ function GroundCoverFields({
                 Ground cover
             </legend>
             <p className="-mt-1 text-xs text-muted-foreground">
-                Grass, flowers or rocks that grow by themselves wherever this
-                layer is painted, following the paint and each type’s slope,
-                altitude and water rules. Nothing is placed by hand: repaint the
-                layer and it regrows. Density multiplies the type’s own density.
-                Also editable live in the editor’s Paint tool.
+                Grass, flowers, rocks or trees that grow by themselves wherever
+                this layer is painted, following the paint and each type’s
+                slope, altitude and water rules. Nothing is placed by hand:
+                repaint the layer and it regrows. Density multiplies the type’s
+                own density; Groves gathers plants into patches and clearings;
+                Min spacing keeps them apart. Also editable live in the editor’s
+                Paint tool.
             </p>
             {value.map((entry, index) => {
                 const type = foliageTypes.find(
@@ -721,24 +1021,48 @@ function GroundCoverFields({
                         key={entry.foliage_type_id}
                         className="flex items-end gap-2"
                     >
-                        <SliderField
-                            className="flex-1"
-                            label={
-                                type?.name ?? `Type ${entry.foliage_type_id}`
-                            }
-                            value={entry.density}
-                            onChange={(v) =>
-                                onChange(
-                                    value.map((e, i) =>
-                                        i === index ? { ...e, density: v } : e,
-                                    ),
-                                )
-                            }
-                            min={0}
-                            max={4}
-                            step={0.05}
-                            unit="×"
-                        />
+                        <div className="grid flex-1 gap-3">
+                            <SliderField
+                                label={
+                                    type?.name ??
+                                    `Type ${entry.foliage_type_id}`
+                                }
+                                value={entry.density}
+                                onChange={(v) => patch(index, { density: v })}
+                                min={0}
+                                max={4}
+                                step={0.05}
+                                unit="×"
+                            />
+                            <div className="grid grid-cols-2 gap-3">
+                                <SliderField
+                                    label="Groves"
+                                    value={entry.clustering ?? 0}
+                                    onChange={(v) =>
+                                        patch(index, { clustering: v })
+                                    }
+                                    min={0}
+                                    max={1}
+                                    step={0.05}
+                                    formatValue={(v) =>
+                                        v < 0.05
+                                            ? 'even'
+                                            : `${Math.round(v * 100)}%`
+                                    }
+                                />
+                                <SliderField
+                                    label="Min spacing"
+                                    value={entry.spacing ?? 0}
+                                    onChange={(v) =>
+                                        patch(index, { spacing: v })
+                                    }
+                                    min={0}
+                                    max={30}
+                                    step={0.5}
+                                    unit="m"
+                                />
+                            </div>
+                        </div>
                         <Button
                             type="button"
                             size="icon"

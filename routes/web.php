@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AiSettingsController;
+use App\Http\Controllers\BiomeController;
 use App\Http\Controllers\CharacterController;
 use App\Http\Controllers\FoliageAiController;
 use App\Http\Controllers\FoliageAssetController;
@@ -38,9 +39,14 @@ Route::prefix('maps/{map}')->name('maps.')->group(function () {
     Route::post('layers/{layer}/texture', [TerrainLayerController::class, 'uploadTexture'])->name('layers.texture.store');
     Route::delete('layers/{layer}/texture', [TerrainLayerController::class, 'removeTexture'])->name('layers.texture.destroy');
     Route::put('layers/{layer}/material', [TerrainLayerController::class, 'assignMaterial'])->name('layers.material');
+    Route::post('layers/{layer}/biome', [BiomeController::class, 'apply'])->name('layers.biome');
 
     Route::post('ai/apply-suggestion', [MapAiController::class, 'applySuggestion'])->name('ai.apply-suggestion');
 });
+
+Route::post('biomes', [BiomeController::class, 'store'])->name('biomes.store');
+Route::post('biomes/starters', [BiomeController::class, 'starters'])->name('biomes.starters');
+Route::delete('biomes/{biome}', [BiomeController::class, 'destroy'])->name('biomes.destroy');
 
 Route::get('materials', [MaterialController::class, 'index'])->name('materials.index');
 Route::post('materials/upload', [MaterialController::class, 'upload'])->name('materials.upload');

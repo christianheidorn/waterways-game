@@ -7,6 +7,7 @@ use App\Enums\TerrainStatus;
 use App\Jobs\GenerateMapTerrain;
 use App\Models\Map;
 use App\Support\EnvironmentDefaults;
+use App\Support\StarterBiomes;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
@@ -32,6 +33,9 @@ class DatabaseSeeder extends Seeder
             Log::warning('Starter materials could not be imported: '.$e->getMessage());
             $this->command?->warn('Starter materials skipped: '.$e->getMessage());
         }
+
+        // After the foliage types and materials they are made of.
+        StarterBiomes::install();
     }
 
     private function createStarterMap(): void

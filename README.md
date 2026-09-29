@@ -149,11 +149,16 @@ Changes apply live and are saved to the studio library after a short pause (`PAT
 Visibility and shadows update at once; density, size and placement rules apply to new painting, and
 _Re-scatter_ regenerates a type.
 
-**Ground cover** (like Unreal's landscape grass): foliage that grows by itself wherever a terrain layer is
-painted, so you never have to place, erase and repaint grass to try out a setting.
+**Ground cover** (like Unreal's landscape grass and procedural foliage): foliage that grows by itself
+wherever a terrain layer is painted, from grass and flowers to rocks and whole forests, so you never have to
+place, erase and repaint plants to try out a setting.
 
-- Each terrain layer lists foliage types with a density multiplier. Set them in the editor's Paint tool
-  (_Ground cover_ under the layer tiles) or on the studio's Terrain layers page.
+- Each terrain layer lists foliage types, each with a density multiplier, **Groves** (0 = an even spread;
+  higher values gather plants into groves and clearings, trees in larger groves than grass, and each type
+  in its own patches) and **Min spacing** (metres between instances, e.g. for trees). Set them in the
+  editor's Paint tool (_Ground cover_ under the layer tiles) or on the studio's Terrain layers page.
+- Placement is stratified: one candidate per grid cell sized for the density, so plants are spread evenly
+  but naturally instead of clumping by chance. Every candidate comes from a stateless hash of its cell.
 - Near the camera, tiles grow instances in proportion to the layer's paint weight (a half-painted border
   gets half the grass). They follow each type's slope, altitude and underwater rules.
 - Nothing is stored. Each tile is seeded, so it always grows the same plants, and tiles the camera leaves
@@ -164,6 +169,20 @@ painted, so you never have to place, erase and repaint grass to try out a settin
   culling on WebGPU and CPU cells on WebGL 2. The F10 foliage table lists it as "‹type› · ground cover".
 - Hand-painted instances of the same type are unaffected, and ground cover is never written to `foliage.json`.
 - Editor changes are saved after a short pause (`PATCH /api/maps/{map}/layers/{layer}/ground-cover`).
+
+**Biomes** turn painting a layer into painting a whole landscape. A biome is a ground material (or
+procedural colours) plus everything that grows on it. The library starts with seven starter biomes: Meadow,
+Temperate forest, Conifer forest, Alpine pasture, Beach, Wetland and Rocky slope. Their plants are picked
+from your foliage library by kind, and their ground from the starter materials.
+
+- **Apply** a biome to a terrain layer in the editor's Paint tool (_Biome_, above the ground cover) or on
+  the studio's Terrain layers page. The layer takes the biome's name, look and ground cover; its slot,
+  paint and auto-paint rules stay. Painting the layer then paints the biome: ground, grass, flowers,
+  shrubs, rocks and trees.
+- **Save as biome** stores the selected layer's look and ground cover in the library, for use on any map.
+- The _Biome library_ on the Terrain layers page lists what each biome grows. You can delete biomes there,
+  and _Add starter biomes_ brings back missing starters, which is also how to get them on an existing
+  install.
 
 **AI foliage palette** (✨ _AI palette_ on the foliage page):
 
@@ -507,12 +526,13 @@ vendor/bin/pint --test      # PHP style
 
 ## Roadmap ideas
 
-**In progress:** biomes and rule-based procedural trees, height-based terrain layer blending, grass that takes
-the terrain colour at its roots, ground cover generated on the GPU (WebGPU), cached shadows, editor debug views.
+**In progress:** grass that takes the terrain colour at its roots, ground cover generated on the GPU
+(WebGPU), cached shadows, editor debug views.
 
 Looks:
 
-- Macro colour variation across the terrain, to hide texture tiling from above.
+- Stronger large-scale colour variation for PBR terrain materials (procedural layers have it; the
+  layer blend is already height-based, with triplanar cliffs and far-distance detail blending).
 - Smooth (dithered) crossfades between foliage LODs instead of hard switches.
 - Visible wind gusts travelling across grass fields and tree canopies.
 - Grass that bends around the player.
@@ -520,7 +540,6 @@ Looks:
 - Bounce light: a coarse irradiance grid (green light under a canopy, warm light off sand).
 - Water: shoreline foam, rivers flowing along their course, caustics on shallow beds.
 - Weather traces: footprints in snow, puddles collecting in hollows during rain.
-- Triplanar mapping for cliffs.
 
 Performance:
 

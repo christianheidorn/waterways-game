@@ -16,6 +16,7 @@ import type {
     GameManifest,
     GameSettings,
     GraphicsSettings,
+    BiomeSummary,
     GroundCoverEntry,
     TerrainLayer,
 } from '../shared/types';
@@ -490,6 +491,9 @@ export class Game {
             updateFoliageType: (id, patch) => this.updateFoliageType(id, patch),
             updateGroundCover: (id, entries) =>
                 this.updateGroundCover(id, entries),
+            biomes: () => this.manifest.biomes ?? [],
+            applyBiome: (layerId, biomeId) => this.applyBiome(layerId, biomeId),
+            saveBiome: (layerId, name) => this.saveBiome(layerId, name),
         });
         this.hud.panelSlot.append(this.panel.el);
         this.graphicsMenu = new GraphicsMenu(
@@ -1171,6 +1175,73 @@ export class Game {
         );
     }
 
+    /** Applies a library biome to a terrain layer (look + ground cover), live. */
+    private async applyBiome(layerId: number, biomeId: number): Promise<void> {
+        const base = this.manifest.endpoints.update_layers;
+
+        if (!base) {
+            return;
+        }
+
+        try {
+            // Pending ground cover edits of this layer would overwrite the biome's.
+            window.clearTimeout(this.coverSaveTimer);
+            await this.flushCoverPatches();
+            const saved = await this.api.postJson<TerrainLayer>(
+                `${base}/${layerId}/biome`,
+                { biome_id: biomeId },
+            );
+            this.setLayers(
+                this.manifest.layers.map((l) => (l.id === layerId ? saved : l)),
+            );
+            this.bridge.send({ type: 'terrainLayerSaved', layer: saved });
+            this.hud.flash(`Layer ${saved.slot + 1} is now ${saved.name}`);
+        } catch (error) {
+            this.hud.flash(
+                `Could not apply the biome: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+    }
+
+    /** Saves a terrain layer's look and ground cover as a new library biome. */
+    private async saveBiome(layerId: number, name: string): Promise<boolean> {
+        const url = this.manifest.endpoints.biomes;
+
+        if (!url) {
+            return false;
+        }
+
+        try {
+            window.clearTimeout(this.coverSaveTimer);
+            await this.flushCoverPatches();
+            const biome = await this.api.postJson<BiomeSummary>(url, {
+                layer_id: layerId,
+                name,
+            });
+            this.manifest.biomes = [
+                ...(this.manifest.biomes ?? []),
+                biome,
+            ].sort((a, b) => a.name.localeCompare(b.name));
+            this.hud.flash(`Saved ${biome.name} to the biome library`);
+
+            return true;
+        } catch (error) {
+            this.hud.flash(
+                `Could not save the biome: ${error instanceof Error ? error.message : String(error)}`,
+            );
+
+            return false;
+        }
+    }
+
+    /** New terrain layers everywhere they are used (terrain shading, ground cover, editor). */
+    private setLayers(layers: TerrainLayer[]): void {
+        this.manifest.layers = layers;
+        this.world.material.setLayers(layers);
+        this.world.foliage.setGroundCover(layers);
+        this.editor.setLayers(layers);
+    }
+
     private async flushCoverPatches(): Promise<void> {
         const base = this.manifest.endpoints.update_layers;
 
@@ -1639,10 +1710,7 @@ export class Game {
                 break;
             }
             case 'updateLayers':
-                this.manifest.layers = message.layers;
-                this.world.material.setLayers(message.layers);
-                this.world.foliage.setGroundCover(message.layers);
-                this.editor.setLayers(message.layers);
+                this.setLayers(message.layers);
                 break;
             case 'updateFoliageTypes':
                 this.manifest.foliage_types = message.foliageTypes;

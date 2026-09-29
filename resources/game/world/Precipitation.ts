@@ -1,4 +1,23 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import type { Node } from 'three/webgpu';
+import {
+    abs,
+    attribute,
+    cameraPosition,
+    cos,
+    cross,
+    length,
+    max,
+    mod,
+    normalize,
+    positionGeometry,
+    sin,
+    smoothstep,
+    uniform,
+    varying,
+    vec2,
+    vec3,
+} from 'three/tsl';
 import type { QualityLevel } from '../shared/types';
 
 /** Maximum particles per effects quality (the active count scales with intensity). */
@@ -18,17 +37,14 @@ const SNOW_COUNT: Record<QualityLevel, number> = {
 const RAIN_BOX = new THREE.Vector3(44, 28, 44);
 const SNOW_BOX = new THREE.Vector3(38, 24, 38);
 
+type LayerUniforms = ReturnType<typeof createLayerUniforms>;
+
 type Layer = {
-    mesh: THREE.Mesh<THREE.InstancedBufferGeometry, THREE.ShaderMaterial>;
-    uniforms: {
-        uCamPos: THREE.IUniform<THREE.Vector3>;
-        uOffset: THREE.IUniform<THREE.Vector3>;
-        uBox: THREE.IUniform<THREE.Vector3>;
-        uVelocity: THREE.IUniform<THREE.Vector3>;
-        uTime: THREE.IUniform<number>;
-        uColor: THREE.IUniform<THREE.Color>;
-        uOpacity: THREE.IUniform<number>;
-    };
+    mesh: THREE.Mesh<
+        THREE.InstancedBufferGeometry,
+        THREE.MeshBasicNodeMaterial
+    >;
+    uniforms: LayerUniforms;
     offset: THREE.Vector3;
     max: number;
 };
@@ -48,18 +64,8 @@ export class Precipitation {
     constructor(quality: QualityLevel = 'medium') {
         this.group.name = 'Precipitation';
         this.quality = quality;
-        this.rain = this.createLayer(
-            RAIN_COUNT[quality],
-            RAIN_BOX,
-            RAIN_VERTEX,
-            RAIN_FRAGMENT,
-        );
-        this.snow = this.createLayer(
-            SNOW_COUNT[quality],
-            SNOW_BOX,
-            SNOW_VERTEX,
-            SNOW_FRAGMENT,
-        );
+        this.rain = this.createLayer(RAIN_COUNT[quality], RAIN_BOX, rainNodes);
+        this.snow = this.createLayer(SNOW_COUNT[quality], SNOW_BOX, snowNodes);
     }
 
     setQuality(quality: QualityLevel): void {
@@ -141,46 +147,40 @@ export class Precipitation {
         }
 
         const u = layer.uniforms;
-        const box = u.uBox.value;
+        const box = u.box.value;
         layer.mesh.geometry.instanceCount = count;
-        u.uVelocity.value.set(vx, vy, vz);
+        u.velocity.value.set(vx, vy, vz);
         // Offset accumulated on the CPU and kept inside the box so float precision never degrades.
         const o = layer.offset;
         o.x = (o.x + vx * dt) % box.x;
         o.y = (o.y + vy * dt) % box.y;
         o.z = (o.z + vz * dt) % box.z;
-        u.uOffset.value.copy(o);
-        u.uCamPos.value.setFromMatrixPosition(camera.matrixWorld);
-        u.uTime.value += dt;
-        u.uColor.value.copy(light);
+        u.offset.value.copy(o);
+        u.camPos.value.setFromMatrixPosition(camera.matrixWorld);
+        u.time.value += dt;
+        u.color.value.copy(light);
         // Light rain is fainter as well as sparser.
-        u.uOpacity.value = opacity * (0.55 + 0.45 * Math.min(1, amount * 1.5));
+        u.opacity.value = opacity * (0.55 + 0.45 * Math.min(1, amount * 1.5));
     }
 
     private createLayer(
         max: number,
         box: THREE.Vector3,
-        vertexShader: string,
-        fragmentShader: string,
+        nodes: (u: LayerUniforms) => ParticleNodes,
     ): Layer {
-        const uniforms = {
-            uCamPos: { value: new THREE.Vector3() },
-            uOffset: { value: new THREE.Vector3() },
-            uBox: { value: box.clone() },
-            uVelocity: { value: new THREE.Vector3(0, -9, 0) },
-            uTime: { value: 0 },
-            uColor: { value: new THREE.Color(1, 1, 1) },
-            uOpacity: { value: 0.3 },
-        };
-        const material = new THREE.ShaderMaterial({
-            uniforms,
-            vertexShader,
-            fragmentShader,
+        const uniforms = createLayerUniforms(box);
+        const shape = nodes(uniforms);
+        const material = new THREE.MeshBasicNodeMaterial({
             transparent: true,
             depthWrite: false,
             blending: THREE.NormalBlending,
             side: THREE.DoubleSide,
+            fog: false,
         });
+        material.positionNode = shape.position;
+        material.colorNode = shape.color;
+        material.opacityNode = shape.opacity;
+        material.alphaTest = 0.003;
         const mesh = new THREE.Mesh(this.createGeometry(max), material);
         mesh.frustumCulled = false;
         mesh.renderOrder = 10;
@@ -225,95 +225,98 @@ export class Precipitation {
     }
 }
 
-const COMMON_VERTEX = /* glsl */ `
-uniform vec3 uCamPos;
-uniform vec3 uOffset;
-uniform vec3 uBox;
-uniform vec3 uVelocity;
-uniform float uTime;
-attribute vec4 aSeed;
-varying vec2 vUv;
-varying float vFade;
-
-// Particle centre wrapped into a box around the camera (world-stable while the camera moves).
-vec3 particleCentre(vec3 extra) {
-    vec3 p = aSeed.xyz * uBox + uOffset + extra;
-    vec3 rel = mod(p - uCamPos + uBox * 0.5, uBox) - uBox * 0.5;
-    // Fade at the box edges and very close to the eye.
-    vec3 edge = abs(rel) / (uBox * 0.5);
-    vFade = (1.0 - smoothstep(0.7, 1.0, max(edge.x, max(edge.y, edge.z)))) * smoothstep(0.8, 3.5, length(rel));
-    return uCamPos + rel;
+function createLayerUniforms(box: THREE.Vector3) {
+    return {
+        camPos: uniform(new THREE.Vector3()),
+        offset: uniform(new THREE.Vector3()),
+        box: uniform(box.clone()),
+        velocity: uniform(new THREE.Vector3(0, -9, 0)),
+        time: uniform(0),
+        color: uniform(new THREE.Color(1, 1, 1)),
+        opacity: uniform(0.3),
+    };
 }
-`;
 
-const RAIN_VERTEX = /* glsl */ `
-${COMMON_VERTEX}
-void main() {
-    vec3 centre = particleCentre(vec3(0.0));
-    vec3 vel = uVelocity;
-    vec3 dir = normalize(vel);
+/** World-space vertex position, colour and opacity of one particle layer. */
+type ParticleNodes = {
+    position: Node<'vec3'>;
+    color: Node<'vec3'>;
+    opacity: Node<'float'>;
+};
+
+const seed = attribute<'vec4'>('aSeed', 'vec4');
+
+/**
+ * Particle centre wrapped into a box around the camera (world-stable while the camera moves), and a
+ * fade at the box edges and very close to the eye.
+ */
+function particleCentre(
+    u: LayerUniforms,
+    extra: Node<'vec3'>,
+): { centre: Node<'vec3'>; fade: Node<'float'> } {
+    const p = seed.xyz.mul(u.box).add(u.offset).add(extra);
+    const half = u.box.mul(0.5);
+    const rel = mod(p.sub(u.camPos).add(half), u.box).sub(half);
+    const edge = abs(rel).div(half);
+    const fade = smoothstep(0.7, 1, max(edge.x, max(edge.y, edge.z)))
+        .oneMinus()
+        .mul(smoothstep(0.8, 3.5, length(rel)));
+
+    return { centre: u.camPos.add(rel), fade };
+}
+
+/** Rain: streaks along the velocity, facing the camera. */
+function rainNodes(u: LayerUniforms): ParticleNodes {
+    const { centre, fade } = particleCentre(u, vec3(0));
+    const dir = normalize(u.velocity);
     // Streak length = distance travelled during a ~1/40 s exposure, varied per drop.
-    float len = length(vel) * (0.05 + aSeed.w * 0.04);
-    vec3 toCam = normalize(cameraPosition - centre);
-    vec3 side = normalize(cross(dir, toCam));
-    float width = 0.011 + aSeed.w * 0.006;
+    const len = length(u.velocity).mul(seed.w.mul(0.04).add(0.05));
+    const toCam = normalize(cameraPosition.sub(centre));
+    const side = normalize(cross(dir, toCam));
     // Keep distant drops at least ~1 px wide instead of letting them alias away.
-    float dist = length(cameraPosition - centre);
-    width = max(width, dist * 0.0014);
-    vec3 world = centre + side * position.x * width - dir * len * position.y;
-    vUv = vec2(position.x + 0.5, position.y);
-    vFade *= 0.6 + aSeed.w * 0.4;
-    gl_Position = projectionMatrix * viewMatrix * vec4(world, 1.0);
-}
-`;
+    const dist = length(cameraPosition.sub(centre));
+    const width = max(seed.w.mul(0.006).add(0.011), dist.mul(0.0014));
+    const position = centre
+        .add(side.mul(positionGeometry.x.mul(width)))
+        .sub(dir.mul(len.mul(positionGeometry.y)));
+    const vFade = varying(fade.mul(seed.w.mul(0.4).add(0.6)));
 
-const RAIN_FRAGMENT = /* glsl */ `
-uniform vec3 uColor;
-uniform float uOpacity;
-varying vec2 vUv;
-varying float vFade;
-void main() {
-    float across = 1.0 - abs(vUv.x * 2.0 - 1.0);
-    float along = smoothstep(0.0, 0.25, vUv.y) * (1.0 - smoothstep(0.6, 1.0, vUv.y));
-    float a = across * along * vFade * uOpacity;
-    if (a < 0.003) discard;
-    gl_FragColor = vec4(uColor * 1.8 + 0.03, a);
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-}
-`;
+    const uv = vec2(positionGeometry.x.add(0.5), positionGeometry.y);
+    const across = abs(uv.x.mul(2).sub(1)).oneMinus();
+    const along = smoothstep(0, 0.25, uv.y).mul(
+        smoothstep(0.6, 1, uv.y).oneMinus(),
+    );
 
-const SNOW_VERTEX = /* glsl */ `
-${COMMON_VERTEX}
-void main() {
-    // Flakes tumble: a small per-flake swirl on top of the wind drift.
-    float ph = aSeed.w * 6.2831;
-    vec3 sway = vec3(sin(uTime * (0.7 + aSeed.w) + ph), 0.0, cos(uTime * (0.6 + aSeed.x) + ph * 1.3)) * 0.35;
-    vec3 centre = particleCentre(sway);
-    vec3 toCam = normalize(cameraPosition - centre);
-    vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), toCam));
-    vec3 up = cross(toCam, right);
-    float size = 0.025 + aSeed.w * 0.035;
-    float dist = length(cameraPosition - centre);
-    size = max(size, dist * 0.0014);
-    vec2 q = vec2(position.x, position.y - 0.5);
-    vec3 world = centre + (right * q.x + up * q.y) * size;
-    vUv = q * 2.0;
-    gl_Position = projectionMatrix * viewMatrix * vec4(world, 1.0);
+    return {
+        position,
+        color: u.color.mul(1.8).add(0.03),
+        opacity: across.mul(along).mul(vFade).mul(u.opacity),
+    };
 }
-`;
 
-const SNOW_FRAGMENT = /* glsl */ `
-uniform vec3 uColor;
-uniform float uOpacity;
-varying vec2 vUv;
-varying float vFade;
-void main() {
-    float d = length(vUv);
-    float a = (1.0 - smoothstep(0.35, 1.0, d)) * vFade * uOpacity;
-    if (a < 0.003) discard;
-    gl_FragColor = vec4(uColor * 2.6 + 0.08, a);
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
+/** Snow: round flakes that tumble on top of the wind drift. */
+function snowNodes(u: LayerUniforms): ParticleNodes {
+    const phase = seed.w.mul(6.2831);
+    const sway = vec3(
+        sin(u.time.mul(seed.w.add(0.7)).add(phase)),
+        0,
+        cos(u.time.mul(seed.x.add(0.6)).add(phase.mul(1.3))),
+    ).mul(0.35);
+    const { centre, fade } = particleCentre(u, sway);
+    const toCam = normalize(cameraPosition.sub(centre));
+    const right = normalize(cross(vec3(0, 1, 0), toCam));
+    const up = cross(toCam, right);
+    const dist = length(cameraPosition.sub(centre));
+    const size = max(seed.w.mul(0.035).add(0.025), dist.mul(0.0014));
+    const q = vec2(positionGeometry.x, positionGeometry.y.sub(0.5));
+    const position = centre.add(right.mul(q.x).add(up.mul(q.y)).mul(size));
+    const vFade = varying(fade);
+
+    const d = length(q.mul(2));
+
+    return {
+        position,
+        color: u.color.mul(2.6).add(0.08),
+        opacity: smoothstep(0.35, 1, d).oneMinus().mul(vFade).mul(u.opacity),
+    };
 }
-`;

@@ -1,34 +1,49 @@
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
 import type { GameRenderer } from '../core/renderer';
+
+type ShadowCaster = THREE.Object3D & { shadow: THREE.LightShadow };
 
 /**
  * Planar reflection for the water level nearest to the viewer (lakes, sea, calm rivers).
  * Renders the scene from a camera mirrored across the plane y = level with an oblique near plane
- * (so nothing below the water leaks into the reflection) into a half-resolution texture.
- * Adapted from three.js' Reflector.
+ * (so nothing below the water leaks into the reflection) into a reduced-resolution texture.
+ * Adapted from three.js' Reflector / ReflectorNode, but driven by the game: the plane is picked from
+ * the water under the focus point and small foliage is left out.
+ *
+ * The water looks the reflection up through `textureMatrix` (world → texture UV of the camera the
+ * reflection was rendered with), so a reflection rendered on an earlier frame (`interval` > 1) stays
+ * anchored to the world while the camera moves.
  */
 export class WaterReflection {
-    readonly target: THREE.WebGLRenderTarget;
+    readonly target: THREE.RenderTarget;
     readonly textureMatrix = new THREE.Matrix4();
     readonly camera = new THREE.PerspectiveCamera();
     level = 0;
     active = false;
+    /** Render every n-th frame (reused in between). */
+    interval = 1;
+    private frame = 0;
+    private renderedLevel = Number.NaN;
     private scale = 0.5;
     private readonly plane = new THREE.Plane();
     private readonly normal = new THREE.Vector3(0, 1, 0);
     private readonly clipPlane = new THREE.Vector4();
     private readonly q = new THREE.Vector4();
-    private readonly view = new THREE.Vector3();
-    private readonly target3 = new THREE.Vector3();
     private readonly lookAt = new THREE.Vector3();
     private readonly rotation = new THREE.Matrix4();
+    private readonly up = new THREE.Vector3();
+    private readonly point = new THREE.Vector3();
+    private readonly shadowLights: ShadowCaster[] = [];
 
     constructor() {
-        this.target = new THREE.WebGLRenderTarget(1, 1, {
+        this.target = new THREE.RenderTarget(1, 1, {
             type: THREE.HalfFloatType,
+            generateMipmaps: false,
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
         });
-        this.target.texture.generateMipmaps = false;
-        this.target.texture.minFilter = THREE.LinearFilter;
+        // Labels the pass in GPU captures and the profiler's render list.
+        this.target.texture.name = 'Water reflection';
     }
 
     setSize(width: number, height: number, scale: number): void {
@@ -44,8 +59,9 @@ export class WaterReflection {
     }
 
     /**
-     * Renders the reflection. `hide` is called before rendering to hide objects that must not be
-     * reflected (water itself, dense grass) and `restore` afterwards.
+     * Renders the reflection (or keeps last frame's on skipped frames). `hide` is called before
+     * rendering to hide objects that must not be reflected (water itself, dense grass) and `restore`
+     * afterwards.
      */
     render(
         renderer: GameRenderer,
@@ -54,11 +70,6 @@ export class WaterReflection {
         hide: () => void,
         restore: () => void,
     ): void {
-        const plane = this.plane.setFromNormalAndCoplanarPoint(
-            this.normal,
-            new THREE.Vector3(0, this.level, 0),
-        );
-
         // Camera below the water: no reflection.
         if (camera.position.y <= this.level + 0.05) {
             this.active = false;
@@ -66,47 +77,95 @@ export class WaterReflection {
             return;
         }
 
+        // A skipped frame reuses the last image unless the plane changed or there is none yet.
+        this.frame = (this.frame + 1) % Math.max(1, this.interval);
+
+        if (
+            this.frame !== 0 &&
+            this.active &&
+            this.renderedLevel === this.level
+        ) {
+            return;
+        }
+
+        this.frame = 0;
+        const reflect = this.mirror(camera, renderer.coordinateSystem);
+
+        hide();
+        const shadows = this.freezeShadows(scene);
+        const prevTarget = renderer.getRenderTarget();
+        const prevMrt = renderer.getMRT();
+        const prevAutoClear = renderer.autoClear;
+        // Cleared by the render pass itself (a separate clear() would be an extra pass on WebGPU).
+        renderer.autoClear = true;
+        renderer.setMRT(null);
+        renderer.setRenderTarget(this.target);
+        renderer.render(scene, reflect);
+        renderer.setRenderTarget(prevTarget);
+        renderer.setMRT(prevMrt);
+        renderer.autoClear = prevAutoClear;
+
+        for (const light of shadows) {
+            light.shadow.autoUpdate = true;
+        }
+
+        restore();
+        this.active = true;
+        this.renderedLevel = this.level;
+    }
+
+    dispose(): void {
+        this.target.dispose();
+    }
+
+    /** Positions the mirrored camera (oblique near plane = water plane) and updates `textureMatrix`. */
+    private mirror(
+        camera: THREE.PerspectiveCamera,
+        coordinateSystem: THREE.CoordinateSystem,
+    ): THREE.PerspectiveCamera {
         const reflect = this.camera;
-        const mirrorPos = new THREE.Vector3(
-            camera.position.x,
-            2 * this.level - camera.position.y,
-            camera.position.z,
-        );
 
         this.rotation.extractRotation(camera.matrixWorld);
         this.lookAt
             .set(0, 0, -1)
             .applyMatrix4(this.rotation)
             .add(camera.position);
-        this.target3.copy(this.lookAt);
-        this.target3.y = 2 * this.level - this.target3.y;
-        const up = new THREE.Vector3(0, 1, 0).applyMatrix4(this.rotation);
-        up.y = -up.y;
+        this.lookAt.y = 2 * this.level - this.lookAt.y;
+        this.up.set(0, 1, 0).applyMatrix4(this.rotation);
+        this.up.y = -this.up.y;
 
-        reflect.position.copy(mirrorPos);
-        reflect.up.copy(up);
-        reflect.lookAt(this.target3);
+        reflect.position.set(
+            camera.position.x,
+            2 * this.level - camera.position.y,
+            camera.position.z,
+        );
+        reflect.up.copy(this.up);
+        reflect.lookAt(this.lookAt);
         reflect.near = camera.near;
         reflect.far = camera.far;
         reflect.fov = camera.fov;
         reflect.aspect = camera.aspect;
         reflect.layers.mask = camera.layers.mask;
+        // The renderer rebuilds the projection when the coordinate system differs, which would drop
+        // the oblique clip plane below.
+        reflect.coordinateSystem = coordinateSystem;
         reflect.updateMatrixWorld();
         reflect.updateProjectionMatrix();
 
+        // Clip space → texture UV with a top-left origin (render target convention on both backends).
         this.textureMatrix.set(
             0.5,
             0,
             0,
             0.5,
             0,
-            0.5,
+            -0.5,
             0,
             0.5,
             0,
             0,
-            0.5,
-            0.5,
+            1,
+            0,
             0,
             0,
             0,
@@ -116,7 +175,12 @@ export class WaterReflection {
         this.textureMatrix.multiply(reflect.matrixWorldInverse);
 
         // Oblique near plane = water plane (Lengyel), with a small bias to hide seams.
-        plane.applyMatrix4(reflect.matrixWorldInverse);
+        const plane = this.plane
+            .setFromNormalAndCoplanarPoint(
+                this.normal,
+                this.point.set(0, this.level, 0),
+            )
+            .applyMatrix4(reflect.matrixWorldInverse);
         this.clipPlane.set(
             plane.normal.x,
             plane.normal.y,
@@ -128,24 +192,37 @@ export class WaterReflection {
         this.q.y = (Math.sign(this.clipPlane.y) + p[9]) / p[5];
         this.q.z = -1;
         this.q.w = (1 + p[10]) / p[14];
-        this.clipPlane.multiplyScalar(2 / this.clipPlane.dot(this.q));
+        const webGpuDepth = coordinateSystem === THREE.WebGPUCoordinateSystem;
+        // WebGPU clip depth is 0..1 (OpenGL: -1..1), which halves the scale of the new third row.
+        this.clipPlane.multiplyScalar(
+            (webGpuDepth ? 1 : 2) / this.clipPlane.dot(this.q),
+        );
         p[2] = this.clipPlane.x;
         p[6] = this.clipPlane.y;
-        p[10] = this.clipPlane.z + 1 - 0.003;
+        p[10] = this.clipPlane.z + (webGpuDepth ? 0 : 1) - 0.003;
         p[14] = this.clipPlane.w;
+        reflect.projectionMatrixInverse.copy(reflect.projectionMatrix).invert();
 
-        hide();
-        const prevTarget = renderer.getRenderTarget();
-        renderer.setRenderTarget(this.target);
-        renderer.clear();
-        renderer.render(scene, reflect);
-        renderer.setRenderTarget(prevTarget);
-        restore();
-        this.active = true;
-        this.view.copy(camera.position);
+        return reflect;
     }
 
-    dispose(): void {
-        this.target.dispose();
+    /**
+     * Shadow maps are view independent here (sun shadow centred on the focus point): the reflection
+     * reuses the ones the main view renders instead of drawing them again for the mirrored camera.
+     */
+    private freezeShadows(scene: THREE.Scene): ShadowCaster[] {
+        const frozen = this.shadowLights;
+        frozen.length = 0;
+
+        for (const child of scene.children) {
+            const light = child as Partial<ShadowCaster>;
+
+            if (light.castShadow && light.shadow?.autoUpdate) {
+                light.shadow.autoUpdate = false;
+                frozen.push(light as ShadowCaster);
+            }
+        }
+
+        return frozen;
     }
 }

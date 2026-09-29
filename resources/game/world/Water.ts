@@ -15,6 +15,7 @@ import {
     floor,
     Fn,
     fract,
+    fwidth,
     If,
     length,
     max,
@@ -1010,14 +1011,36 @@ function createWaterMaterial(
                 .add(vec2(wind.y.negate(), wind.x).mul(waveTime.mul(0.05))),
         );
 
+        // Far away the dominant crests of a layer (two per tile) shrink to a few pixels and its repeats
+        // line up into regular bands across the water: each layer fades out by its screen-space tile
+        // rate (derivatives) before that, and a broad rotated layer takes over from the big one.
+        const tiles = (scale: number) => {
+            const rate = fwidth(uv.mul(scale));
+
+            return smoothstep(0.03, 0.12, max(rate.x, rate.y)).oneMinus();
+        };
+        const bigWeight = tiles(0.27);
+        const broad = waveNormal(
+            vec2(
+                uv.x.mul(0.6).add(uv.y.mul(0.8)),
+                uv.y.mul(0.6).sub(uv.x.mul(0.8)),
+            )
+                .mul(0.071)
+                .add(wind.mul(waveTime.mul(0.004))),
+        );
         const fade = mix(1, 0.35, smoothstep(60, 900, viewDist));
         const strength = u.waveStrength
             .mul(u.wind.mul(0.45).add(0.55))
             .mul(fade);
         const slope = big.xy
             .div(big.z)
-            .mul(0.9)
-            .add(mid.xy.div(mid.z))
+            .mul(bigWeight.mul(0.9))
+            .add(
+                broad.xy
+                    .div(broad.z)
+                    .mul(bigWeight.oneMinus().mul(tiles(0.071)).mul(0.9)),
+            )
+            .add(mid.xy.div(mid.z).mul(tiles(0.9)))
             .add(
                 fine.xy
                     .div(fine.z)

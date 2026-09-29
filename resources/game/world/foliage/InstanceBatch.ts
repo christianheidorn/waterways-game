@@ -85,8 +85,18 @@ export class InstanceBatch {
     }
 
     /**
-     * Frees the views. The renderer then also drops the LOD's shared vertex / index buffers; other
-     * cells drawing that LOD simply upload them again on their next draw.
+     * Drops the views of LOD geometries that are going away. They are not disposed: the renderer
+     * would drop this batch's instance buffer with them, which its other views share.
+     */
+    forget(geometries: THREE.BufferGeometry[]): void {
+        for (const geometry of geometries) {
+            this.views.delete(geometry);
+        }
+    }
+
+    /**
+     * Frees the views, with the LOD vertex / index buffers they share with other batches (the
+     * renderer drops those too): only when every batch goes (see Foliage.acquireBatch).
      */
     dispose(): void {
         for (const view of this.views.values()) {

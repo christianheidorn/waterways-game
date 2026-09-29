@@ -368,6 +368,8 @@ export class Foliage {
     private evalTimer = 0;
     private readonly lastEvalPos = new THREE.Vector3(Infinity, 0, 0);
     private readonly queue: { renderer: TypeRenderer; cell: Cell }[] = [];
+    /** Released instance batches (CPU path), reused before new ones are allocated. */
+    private readonly batchPool: InstanceBatch[] = [];
     private lastCamera: THREE.Camera | null = null;
     /** Renderer used to render missing impostors (set explicitly or picked up from a draw). */
     private gl: GameRenderer | null = null;
@@ -1943,7 +1945,7 @@ export class Foliage {
 
         if (!cell.near || !nearBatch || nearBatch.capacity < batch.capacity) {
             this.removeNear(cell);
-            nearBatch = new InstanceBatch(batch.capacity);
+            nearBatch = this.acquireBatch(batch.capacity);
             const near = new THREE.Mesh(
                 nearBatch.view(renderer.drawLods[0]),
                 lodMaterial(renderer, 0),
@@ -2103,9 +2105,7 @@ export class Foliage {
                 merged.batch.capacity > (total + 8) * 4
             ) {
                 this.removeMerged(renderer, key);
-                const batch = new InstanceBatch(
-                    total + Math.ceil(total * 0.25) + 8,
-                );
+                const batch = this.acquireBatch(total);
                 const mesh = new THREE.Mesh(
                     batch.view(renderer.drawLods[lod]),
                     lodMaterial(renderer, lod),
@@ -2165,7 +2165,7 @@ export class Foliage {
 
         if (merged) {
             this.group.remove(merged.mesh);
-            merged.batch.dispose();
+            this.releaseBatch(merged.batch);
             renderer.merged.delete(key);
         }
     }
@@ -2279,6 +2279,12 @@ export class Foliage {
 
         this.renderers.clear();
         this.gpuFrame?.hiz.dispose();
+
+        for (const batch of this.batchPool) {
+            batch.dispose();
+        }
+
+        this.batchPool.length = 0;
     }
 
     private tryPlace(
@@ -2638,8 +2644,7 @@ export class Foliage {
             count < batch.capacity / 4
         ) {
             this.removeCellMesh(cell);
-            // Headroom so painting doesn't reallocate on every dab.
-            batch = new InstanceBatch(count + Math.ceil(count * 0.25) + 8);
+            batch = this.acquireBatch(count);
             const lod = Math.min(cell.lod, renderer.drawLods.length - 1);
             const mesh = new THREE.Mesh(
                 batch.view(renderer.drawLods[lod]),
@@ -2724,13 +2729,81 @@ export class Foliage {
         };
     }
 
+    /**
+     * An instance batch with room for `count` instances: the smallest released one that fits, or a
+     * new one with headroom (painting grows cells a few instances at a time). Batches are recycled
+     * rather than disposed while the world lives: disposing a batch's views makes three drop the LOD
+     * vertex / index buffers they share with every other cell, and its WebGL backend keeps drawing
+     * those cells through vertex array objects that still point at the deleted buffers.
+     */
+    private acquireBatch(count: number): InstanceBatch {
+        const pool = this.batchPool;
+        let best = -1;
+
+        for (let i = 0; i < pool.length; i++) {
+            const capacity = pool[i].capacity;
+
+            if (
+                capacity >= count &&
+                (best < 0 || capacity < pool[best].capacity)
+            ) {
+                best = i;
+            }
+        }
+
+        if (best < 0) {
+            return new InstanceBatch(count + Math.ceil(count * 0.25) + 8);
+        }
+
+        const batch = pool[best];
+        pool[best] = pool[pool.length - 1];
+        pool.pop();
+
+        return batch;
+    }
+
+    private releaseBatch(batch: InstanceBatch | null): void {
+        if (batch) {
+            this.batchPool.push(batch);
+        }
+    }
+
+    /** Drops every batch's views of LOD geometries that are being disposed. */
+    private forgetGeometries(geometries: Iterable<THREE.BufferGeometry>): void {
+        const list = [...geometries];
+        const batches = new Set(this.batchPool);
+
+        for (const renderer of this.renderers.values()) {
+            for (const cell of [
+                ...renderer.cells.values(),
+                ...renderer.chunks.values(),
+            ]) {
+                if (cell.batch) {
+                    batches.add(cell.batch);
+                }
+
+                if (cell.nearBatch) {
+                    batches.add(cell.nearBatch);
+                }
+            }
+
+            for (const merged of renderer.merged.values()) {
+                batches.add(merged.batch);
+            }
+        }
+
+        for (const batch of batches) {
+            batch.forget(list);
+        }
+    }
+
     private removeNear(cell: Cell): void {
         if (cell.near) {
             this.group.remove(cell.near);
             cell.near = null;
         }
 
-        cell.nearBatch?.dispose();
+        this.releaseBatch(cell.nearBatch);
         cell.nearBatch = null;
     }
 
@@ -2743,7 +2816,7 @@ export class Foliage {
             cell.built = 0;
         }
 
-        cell.batch?.dispose();
+        this.releaseBatch(cell.batch);
         cell.batch = null;
     }
 
@@ -3028,11 +3101,17 @@ export class Foliage {
             this.clearMerged(renderer);
             renderer.gpu?.configure(this.gpuConfig(renderer));
 
-            for (const g of new Set(previous.lods)) {
-                g.dispose();
+            const disposed = new Set(previous.lods);
+
+            if (previous.proxy) {
+                disposed.add(previous.proxy);
             }
 
-            previous.proxy?.dispose();
+            this.forgetGeometries(disposed);
+
+            for (const g of disposed) {
+                g.dispose();
+            }
 
             for (const m of new Set(previous.materials)) {
                 m.dispose();
@@ -3064,8 +3143,10 @@ export class Foliage {
         }
 
         this.clearMerged(renderer);
+        const disposed = new Set([...renderer.lods, ...renderer.drawLods]);
+        this.forgetGeometries(disposed);
 
-        for (const g of new Set([...renderer.lods, ...renderer.drawLods])) {
+        for (const g of disposed) {
             g.dispose();
         }
 

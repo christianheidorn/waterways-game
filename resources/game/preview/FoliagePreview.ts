@@ -339,7 +339,7 @@ export class FoliagePreview {
             trianglesLod0: lod0,
             trianglesLod1: lods[1] ? triangleCount(lods[1]) : lod0,
             lodCount: lods.length,
-            drawCalls: this.renderer.info.render.calls,
+            drawCalls: this.renderer.info.render.drawCalls,
             allowedArea: this.mode === 'scatter' ? this.allowedArea : 0,
             patchArea: this.mode === 'scatter' ? PATCH_SIZE * PATCH_SIZE : 0,
             densityPer100:

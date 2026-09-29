@@ -750,7 +750,7 @@ export class Game {
         const stats: GameStats = {
             fps: 1 / Math.max(1e-4, avg),
             frameMs: cpuMs,
-            drawCalls: info.calls,
+            drawCalls: info.drawCalls,
             triangles: info.triangles,
             position: { x: pos.x, y: pos.y, z: pos.z },
             ...foliageStats(this.world.foliage),

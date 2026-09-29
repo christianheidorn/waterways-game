@@ -156,7 +156,8 @@ export class Atmosphere {
 
         this.flashLight = new THREE.DirectionalLight(0xc8d4ff, 0);
         this.flashLight.name = 'Lightning';
-        this.flashLight.visible = false;
+        // Always in the scene (intensity 0 between strikes): with node materials, a change in the set
+        // of active lights recompiles every material, which stalled each strike for seconds.
         scene.add(this.flashLight);
         scene.add(this.flashLight.target);
 
@@ -257,7 +258,7 @@ export class Atmosphere {
         u.time.value += dt;
         this.envSky.uniforms.cloudOffset.value.copy(u.cloudOffset.value);
 
-        if (this.lightingDirty || this.flash > 0 || this.flashLight.visible) {
+        if (this.lightingDirty || this.flash > 0 || this.flashLight.intensity > 0) {
             this.relight();
         }
 
@@ -547,8 +548,7 @@ export class Atmosphere {
         this.hemi.groundColor.set('#4a4030').multiplyScalar(1 - night * 0.6);
 
         // ---- lightning flash light from the strike direction
-        this.flashLight.visible = flash > 0.005;
-        this.flashLight.intensity = flash * 2.5;
+        this.flashLight.intensity = flash > 0.005 ? flash * 2.5 : 0;
         this.flashLight.position.copy(this.flashDirection).multiplyScalar(1000);
         this.flashLight.target.position.set(0, 0, 0);
         this.flashLight.target.updateMatrixWorld();

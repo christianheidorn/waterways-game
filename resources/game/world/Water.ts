@@ -15,6 +15,7 @@ import {
     floor,
     Fn,
     fract,
+    fwidth,
     If,
     length,
     max,
@@ -38,9 +39,9 @@ import {
     vec2,
     vec3,
     vec4,
-    viewportDepthTexture,
     viewportTexture,
 } from 'three/tsl';
+import { depthPrecision, isSkyDepth } from '../core/depth';
 import { NO_WATER } from '../shared/types';
 import type { EnvironmentSettings } from '../shared/types';
 import { mulberry32 } from '../util/noise';
@@ -89,6 +90,8 @@ export class Water {
         this.group.name = 'Water';
         this.chunksPerSide = (surface.resolution - 1) / CHUNK_CELLS;
         this.step = surface.resolution > 600 ? 2 : 1;
+        this.u.gridSpacing.value = surface.cell * this.step;
+        this.u.mapHalf.value = surface.half;
         const { material, reflection } = createWaterMaterial(
             this.u,
             this.waveTexture,
@@ -692,6 +695,9 @@ function createWaterUniforms() {
         // Weather (Weather.ts): rain ripple intensity and the wind direction (x, z).
         rain: uniform(0),
         windDir: uniform(new THREE.Vector2(0.8, 0.6)),
+        // Surface mesh: vertex spacing of the water chunks (m) and the half size of the map.
+        gridSpacing: uniform(8),
+        mapHalf: uniform(1e6),
     };
 }
 
@@ -716,6 +722,18 @@ class WaterMaterial extends THREE.MeshStandardNodeMaterial {
     /** Scene colour under the water surface and the 0-1 shore blend towards the water shading. */
     underNode: Node<'vec3'> | null = null;
     shoreNode: Node<'float'> | null = null;
+    /** Copy of the scene depth behind the water: its format has to match the depth buffer's. */
+    sceneDepth: THREE.DepthTexture | null = null;
+
+    override setup(builder: NodeBuilder): void {
+        if (this.sceneDepth) {
+            this.sceneDepth.type = builder.renderer.reversedDepthBuffer
+                ? THREE.FloatType
+                : THREE.UnsignedIntType;
+        }
+
+        super.setup(builder);
+    }
 
     override setupEnvironment(
         builder: NodeBuilder,
@@ -825,21 +843,43 @@ function createWaterMaterial(
     // ---- vertex: long swells on deep water, with the matching geometric normal
     const swell = Fn(() => {
         const p = modelWorldMatrix.mul(vec4(positionGeometry, 1)).xz;
+        // Calm towards the map edge: the chunks meet the coarse ocean ring there, and a surface both
+        // meshes keep flat stays watertight (no crack flickering along the seam). The ring itself is far
+        // too coarse to carry these wavelengths anyway.
+        const edge = u.mapHalf.sub(max(abs(p.x), abs(p.y)));
         const amp = u.waveHeight
             .mul(u.wind.mul(0.5).add(0.5))
-            .mul(smoothstep(0.5, 4, waterDepth));
+            .mul(smoothstep(0.5, 4, waterDepth))
+            .mul(smoothstep(0, 60, edge));
         let h: Node<'float'> = float(0);
         let grad: Node<'vec2'> = vec2(0);
 
-        for (const s of SWELLS) {
+        SWELLS.forEach((s, i) => {
             const len = Math.hypot(s.dir[0], s.dir[1]);
             const dir = vec2(s.dir[0] / len, s.dir[1] / len);
             const k = (Math.PI * 2) / s.length;
             const speed = Math.sqrt(9.81 / k);
             const arg = dot(dir, p).sub(waveTime.mul(speed)).mul(k);
-            h = h.add(sin(arg).mul(s.amp));
-            grad = grad.add(dir.mul(cos(arg).mul(s.amp * k)));
-        }
+            // Swells shorter than a few vertex spacings alias into regular bands across the mesh.
+            const resolved = smoothstep(
+                u.gridSpacing.mul(2.5),
+                u.gridSpacing.mul(4),
+                float(s.length),
+            );
+            // Wave groups: a slow modulation along and across the crests, so a swell doesn't read as
+            // endless parallel lines across a lake (its slope is left out of the normal: it is small).
+            const group = sin(
+                dot(vec2(dir.y.negate(), dir.x), p)
+                    .mul((Math.PI * 2) / (s.length * 4.7))
+                    .add(i * 1.7),
+            )
+                .mul(sin(dot(dir, p).mul((Math.PI * 2) / (s.length * 7.3))))
+                .mul(0.4)
+                .add(0.6);
+            const a = resolved.mul(group).mul(s.amp);
+            h = h.add(sin(arg).mul(a));
+            grad = grad.add(dir.mul(cos(arg).mul(a.mul(k))));
+        });
 
         return vec3(h, grad).mul(amp);
     })();
@@ -863,21 +903,37 @@ function createWaterMaterial(
         null,
         createFramebufferTexture(),
     );
-    const sceneDepthBase = viewportDepthTexture();
+    material.sceneDepth = new THREE.DepthTexture(1, 1);
+    const sceneDepthBase = new THREE.ViewportDepthTextureNode(
+        screenUV,
+        null,
+        material.sceneDepth,
+    );
     const sceneColor = (uv: Node<'vec2'>) =>
         sceneColorBase.sample(uv).rgb as Node<'vec3'>;
-    // Perspective depth → positive view-space distance.
-    const sceneDistance = (uv: Node<'vec2'>) =>
-        perspectiveDepthToViewZ(
-            sceneDepthBase.sample(uv).x,
-            cameraNear,
-            cameraFar,
-        ).negate();
+    // Perspective depth → positive view-space distance. Nothing behind the water (open sea beyond
+    // the terrain, out to the far plane) counts as bottomless, not as the far plane: water that
+    // reaches the far plane would otherwise turn shallow (and see-through) right at the horizon.
+    const sceneDistance = (uv: Node<'vec2'>) => {
+        const depth = sceneDepthBase.sample(uv).x;
+
+        return select(
+            isSkyDepth(depth),
+            float(1e6),
+            perspectiveDepthToViewZ(depth, cameraNear, cameraFar).negate(),
+        );
+    };
+    // Thickness below a few depth buffer steps is quantisation noise (banding that TAA jitter turns into
+    // shimmer on distant water): never resolve less than that, which fades far shores to deep water.
+    const resolvable = (thickness: Node<'float'>) =>
+        max(thickness, depthPrecision(fragDepth, cameraNear).mul(4));
 
     const viewDir = normalize(cameraPosition.sub(pos));
     const cosV = max(abs(viewDir.y), 0.08);
     // Path length through the water along the view ray (m) and the approximate vertical depth.
-    const thickness = max(sceneDistance(screenUV).sub(fragDepth), 0);
+    const thickness = resolvable(
+        max(sceneDistance(screenUV).sub(fragDepth), 0),
+    );
     const vertical = thickness.mul(cosV);
 
     // Foam: soft bubbly band along every intersection (shores, rocks, reeds) + rapids on fast rivers.
@@ -955,14 +1011,36 @@ function createWaterMaterial(
                 .add(vec2(wind.y.negate(), wind.x).mul(waveTime.mul(0.05))),
         );
 
+        // Far away the dominant crests of a layer (two per tile) shrink to a few pixels and its repeats
+        // line up into regular bands across the water: each layer fades out by its screen-space tile
+        // rate (derivatives) before that, and a broad rotated layer takes over from the big one.
+        const tiles = (scale: number) => {
+            const rate = fwidth(uv.mul(scale));
+
+            return smoothstep(0.03, 0.12, max(rate.x, rate.y)).oneMinus();
+        };
+        const bigWeight = tiles(0.27);
+        const broad = waveNormal(
+            vec2(
+                uv.x.mul(0.6).add(uv.y.mul(0.8)),
+                uv.y.mul(0.6).sub(uv.x.mul(0.8)),
+            )
+                .mul(0.071)
+                .add(wind.mul(waveTime.mul(0.004))),
+        );
         const fade = mix(1, 0.35, smoothstep(60, 900, viewDist));
         const strength = u.waveStrength
             .mul(u.wind.mul(0.45).add(0.55))
             .mul(fade);
         const slope = big.xy
             .div(big.z)
-            .mul(0.9)
-            .add(mid.xy.div(mid.z))
+            .mul(bigWeight.mul(0.9))
+            .add(
+                broad.xy
+                    .div(broad.z)
+                    .mul(bigWeight.oneMinus().mul(tiles(0.071)).mul(0.9)),
+            )
+            .add(mid.xy.div(mid.z).mul(tiles(0.9)))
             .add(
                 fine.xy
                     .div(fine.z)
@@ -985,8 +1063,15 @@ function createWaterMaterial(
             );
         });
 
-        // Combine with the geometric (swell) normal.
-        const geo = normalize(geoNormal);
+        // Combine with the geometric (swell) normal, flattened with distance: far away its crests
+        // shrink to a few pixels and read as regular bands.
+        const geo = normalize(
+            mix(
+                normalize(geoNormal),
+                vec3(0, 1, 0),
+                smoothstep(150, 900, viewDist).mul(0.6),
+            ),
+        );
 
         return normalize(
             vec3(
@@ -1011,7 +1096,9 @@ function createWaterMaterial(
         screenUV,
         bentUv,
     );
-    const refractThickness = max(sceneDistance(refractUv).sub(fragDepth), 0);
+    const refractThickness = resolvable(
+        max(sceneDistance(refractUv).sub(fragDepth), 0),
+    );
     // Beer–Lambert absorption tinted by the shallow colour (red is absorbed first).
     const sigma = vec3(1)
         .sub(clamp(u.shallow.mul(1.4), 0, 0.98))

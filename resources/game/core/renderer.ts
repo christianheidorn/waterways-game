@@ -15,27 +15,33 @@ export function isWebGpu(renderer: GameRenderer): boolean {
         .isWebGPUBackend;
 }
 
-let compatInstalled = false;
+let compat: Promise<boolean> | null = null;
 
 /**
  * Browser compatibility for three.js' WebGPU backend: it always sets `swizzle: 'rgba'` on texture views
  * (the final spec form). Chromium builds that shipped the experimental `texture-component-swizzle` with
  * the earlier dictionary form throw on that string, which breaks every texture. The identity swizzle is
  * the default, so it is dropped there.
+ *
+ * Resolves to whether a WebGPU device is available (the renderer falls back to WebGL 2 otherwise).
  */
-export async function installWebGpuCompat(): Promise<void> {
-    if (compatInstalled || typeof navigator === 'undefined' || !navigator.gpu) {
-        return;
-    }
+export function installWebGpuCompat(): Promise<boolean> {
+    compat ??= installCompat();
 
-    compatInstalled = true;
+    return compat;
+}
+
+async function installCompat(): Promise<boolean> {
+    if (typeof navigator === 'undefined' || !navigator.gpu) {
+        return false;
+    }
 
     try {
         const adapter = await navigator.gpu.requestAdapter();
         const device = await adapter?.requestDevice();
 
         if (!device) {
-            return;
+            return false;
         }
 
         const texture = device.createTexture({
@@ -70,7 +76,10 @@ export async function installWebGpuCompat(): Promise<void> {
             texture.destroy();
             device.destroy();
         }
+
+        return true;
     } catch {
         // No adapter: the renderer falls back to WebGL 2.
+        return false;
     }
 }

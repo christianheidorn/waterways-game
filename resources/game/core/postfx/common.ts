@@ -2,7 +2,6 @@ import * as THREE from 'three/webgpu';
 import {
     context,
     getScreenPosition,
-    getViewPosition,
     interleavedGradientNoise,
     passTexture,
     perspectiveDepthToViewZ,
@@ -15,6 +14,7 @@ import {
     vec4,
 } from 'three/tsl';
 import type { ColorGrade } from '../../shared/types';
+import { depthToNdcZ, farDepth, isSkyDepth, nearerDepth } from '../depth';
 
 export type FloatNode = THREE.Node<'float'>;
 export type Vec2Node = THREE.Node<'vec2'>;
@@ -97,11 +97,33 @@ export class FrameContext {
     }
 
     isSky(depth: FloatNode): THREE.Node<'bool'> {
-        return depth.greaterThanEqual(0.9999999);
+        return isSkyDepth(depth);
     }
 
+    /** Depth of the nearer of two samples (depth runs far → near on a reversed buffer). */
+    nearer(a: FloatNode, b: FloatNode): FloatNode {
+        return nearerDepth(a, b);
+    }
+
+    /** Depth of the far plane (directions towards the sky). */
+    get farDepth(): FloatNode {
+        return farDepth();
+    }
+
+    /**
+     * View-space position of a depth sample. Like TSL's `getViewPosition`, but also right for a reversed
+     * depth buffer on WebGL 2, where clip space z is 0..1 (EXT_clip_control) instead of -1..1.
+     */
     viewPosition(uv: Vec2Node, depth: FloatNode): Vec3Node {
-        return getViewPosition(uv, depth, this.projectionInverse);
+        const ndc = vec4(
+            uv.x.mul(2).sub(1),
+            uv.y.oneMinus().mul(2).sub(1),
+            depthToNdcZ(depth),
+            1,
+        );
+        const view = this.projectionInverse.mul(ndc);
+
+        return view.xyz.div(view.w);
     }
 
     viewToUv(p: Vec3Node): Vec2Node {

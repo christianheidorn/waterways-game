@@ -13,7 +13,7 @@ import {
     rtt,
     sample,
     uniform,
-    vec2,
+    vec3,
     vec4,
     velocity,
 } from 'three/tsl';
@@ -28,7 +28,6 @@ import { smaa } from 'three/addons/tsl/display/SMAANode.js';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import type SSRNode from 'three/addons/tsl/display/SSRNode.js';
 import { taau } from 'three/addons/tsl/display/TAAUNode.js';
-import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import { antiAliasingMode } from '../shared/graphicsPresets';
 import type { EnvironmentSettings, GraphicsSettings } from '../shared/types';
 import type { GpuProfiler } from './GpuProfiler';
@@ -51,7 +50,24 @@ import { LensFlare } from './postfx/LensFlare';
 import { MotionBlur } from './postfx/MotionBlur';
 import type { OutputFeatures } from './postfx/Output';
 import { OutputStage } from './postfx/Output';
+import { TemporalAA } from './postfx/Taa';
 import type { GameRenderer } from './renderer';
+
+/**
+ * A value for the scene pass' data attachments (velocity, normal, metal / roughness), zeroed (colour and
+ * alpha) for transparent materials that don't write depth: precipitation, lightning, lens flares, editor
+ * overlays. The attachments blend with the material's blending (see build), so such effects leave the
+ * values of the surface behind them (the one in the depth buffer) instead of replacing its normal and
+ * motion with their own. Depth-writing transparents (water) own their pixels like opaque surfaces.
+ */
+const surfaceData = Fn(
+    ([value]: [THREE.Node<'vec3'>], builder: THREE.NodeBuilder) => {
+        const material = builder.material;
+        const owns = material?.transparent && !material.depthWrite ? 0 : 1;
+
+        return vec4(value.mul(owns), owns);
+    },
+) as unknown as (value: THREE.Node<'vec3'>) => THREE.Node<'vec4'>;
 
 /** GTAO parameters per ao_quality: resolution scale, AO samples, world radius. */
 const AO_QUALITY = {
@@ -108,6 +124,8 @@ type Effects = {
     ssrScale: number;
     godRays: GodRays | null;
     composite: Composite | null;
+    /** Temporal AA at the scene resolution (TAAU when upscaling is `temporal`). */
+    taa: TemporalAA | null;
     temporal: TemporalNode | null;
     dof: DepthOfField | null;
     motionBlur: MotionBlur | null;
@@ -133,8 +151,9 @@ type Effects = {
  *  2. GTAO         ambient occlusion at a fraction of the scene resolution.
  *     Contact      screen-space contact shadows (½ res), SSR (½ or full res), light shafts (¼ / ½ res).
  *  3. Composite    HDR lighting composite: × AO × contact shadows, + reflections, + light shafts.
- *  4. TAA / TAAU   temporal AA; below 1× render scale (render_scale × dynamic resolution) the scene renders at
- *                  the lower resolution and TAAU reconstructs the output resolution (like UE's TSR).
+ *  4. TAA / TAAU   temporal AA (postfx/Taa.ts); below 1× render scale (render_scale × dynamic resolution)
+ *                  the scene renders at the lower resolution and TAAU reconstructs the output resolution
+ *                  (like UE's TSR).
  *                  Everything after this runs at the output resolution.
  *  5. DoF          physically based CoC, auto-focus, half resolution bokeh gather, full-res composite.
  *  6. Motion blur  motion vectors, shutter-based length (skipped for stills and on camera cuts).
@@ -173,6 +192,7 @@ export class PostFx {
     private focusPoint: THREE.Vector2 | null = null;
     /** Scene resolution relative to the output resolution. */
     private inputScale = 1;
+    private readonly bufferSize = new THREE.Vector2();
     private aspect = 1;
     private frame = 0;
     // Matrices (un-jittered); no per-frame allocations.
@@ -475,7 +495,17 @@ export class PostFx {
         this.output.exposure.value = baseExposure;
         this.updateOutputKey();
         profiler?.mark('Post-processing');
+
+        if (e.taa) {
+            this.renderer.getDrawingBufferSize(this.bufferSize);
+            e.taa.begin(
+                Math.max(1, Math.floor(this.bufferSize.x * this.inputScale)),
+                Math.max(1, Math.floor(this.bufferSize.y * this.inputScale)),
+            );
+        }
+
         this.pipeline.render();
+        e.taa?.end();
 
         // ---- history
         this.prevViewProj.copy(this.viewProj);
@@ -513,6 +543,8 @@ export class PostFx {
         if (temporal) {
             temporal._historyRenderTarget.setSize(1, 1);
         }
+
+        this.effects?.taa?.resetHistory();
     }
 
     /** Returns true when the graph was rebuilt. */
@@ -581,18 +613,37 @@ export class PostFx {
         const outputs: Record<string, THREE.Node> = { output };
 
         if (needsVelocity) {
-            outputs.velocity = velocity;
+            outputs.velocity = surfaceData(
+                vec3(velocity as unknown as THREE.Node<'vec2'>, 0),
+            );
         }
 
         if (needsNormal) {
-            outputs.normal = packNormalToRGB(normalView);
+            outputs.normal = surfaceData(packNormalToRGB(normalView));
         }
 
         if (s.ssr !== 'off') {
-            outputs.metalrough = vec2(metalness, roughness);
+            outputs.metalrough = surfaceData(vec3(metalness, roughness, 0));
         }
 
-        sp.setMRT(Object.keys(outputs).length > 1 ? mrt(outputs) : null);
+        if (Object.keys(outputs).length > 1) {
+            const attachments = mrt(outputs);
+
+            // The data attachments blend like the colour (see surfaceData): opaque draws overwrite them,
+            // effects drawn over the scene leave the surface's values underneath.
+            for (const name of Object.keys(outputs)) {
+                if (name !== 'output') {
+                    attachments.setBlendMode(
+                        name,
+                        new THREE.BlendMode(THREE.MaterialBlending),
+                    );
+                }
+            }
+
+            sp.setMRT(attachments);
+        } else {
+            sp.setMRT(null);
+        }
 
         if (needsNormal) {
             sp.getTexture('normal').type = THREE.UnsignedByteType;
@@ -720,19 +771,29 @@ export class PostFx {
 
         // ---- anti-aliasing / temporal upscaling
         let temporal: TemporalNode | null = null;
+        let taaPass: TemporalAA | null = null;
 
-        if (taa) {
-            temporal = (s.upscale
-                ? taau(hdr, depth, velocityTex!, camera)
-                : traa(
-                      hdr,
-                      depth,
-                      velocityTex!,
-                      camera,
-                  )) as unknown as TemporalNode;
+        if (taa && s.upscale) {
+            temporal = taau(
+                hdr,
+                depth,
+                velocityTex!,
+                camera,
+            ) as unknown as TemporalNode;
             owned.push(temporal);
             hdr = temporal.getTextureNode();
-            names.push(s.upscale ? 'TAAU' : 'TAA');
+            names.push('TAAU');
+        } else if (taa) {
+            taaPass = new TemporalAA(
+                hdr,
+                depth,
+                velocityTex!,
+                this.output.exposure,
+                camera,
+            );
+            owned.push(taaPass.pass);
+            hdr = taaPass.pass.getTextureNode();
+            names.push('TAA');
         }
 
         // ---- post effects (output resolution; the scene resolution for spatial upscaling)
@@ -806,6 +867,7 @@ export class PostFx {
             ssrScale,
             godRays,
             composite,
+            taa: taaPass,
             temporal,
             dof,
             motionBlur,
@@ -852,6 +914,10 @@ export class PostFx {
 
         if (e.composite) {
             e.composite.pass.scale = low;
+        }
+
+        if (e.taa) {
+            e.taa.pass.scale = low;
         }
 
         e.dof?.setScale(post);

@@ -665,9 +665,29 @@ export class GpuFoliageType {
         });
         this.args = new THREE.IndirectStorageBufferAttribute(argsArray, 1);
 
+        const reset = new Set<THREE.BufferGeometry>();
+        const passes = new Map<
+            THREE.BufferGeometry,
+            {
+                state: {
+                    scene: THREE.Scene | null;
+                    main: number;
+                    shadow: number;
+                };
+                inShadowPass: () => boolean;
+            }
+        >();
+
         for (const { mesh, offsets } of meshes) {
             const geometry = mesh.geometry;
-            geometry.setIndirect(this.args, offsets[0].main);
+
+            if (!reset.has(geometry)) {
+                // Drop the per-pass offset of an earlier chain (see below) before assigning a plain
+                // one; once per geometry (main and reflection meshes share it).
+                reset.add(geometry);
+                Reflect.deleteProperty(geometry, 'indirectOffset');
+                geometry.setIndirect(this.args, offsets[0].main);
+            }
 
             if (
                 config.reflect ||
@@ -676,7 +696,37 @@ export class GpuFoliageType {
             ) {
                 // Every material group has its own index range, LOD0 draws the shadow list (and the
                 // shadow proxy range) in the shadow pass, and the reflection draws share the LOD
-                // geometry (and its indirect offset): pick the arguments per draw.
+                // geometry: pick the arguments per draw. The offset is resolved when the draw is
+                // encoded, not stored in onBeforeRender: the main pass renders the shadow map from
+                // within the node updates of a draw (after its onBeforeRender), which would leave the
+                // shadow offset behind for that main draw: the shadow list's instance count of
+                // main-list instances, in a different order every frame (whole trees flickering in
+                // and out). Meshes sharing the geometry (main and reflection) share this state.
+                let pass = passes.get(geometry);
+
+                if (!pass) {
+                    const state = {
+                        scene: null as THREE.Scene | null,
+                        main: offsets[0].main,
+                        shadow: offsets[0].shadow ?? offsets[0].main,
+                    };
+                    const inShadowPass = () =>
+                        !!(
+                            state.scene?.overrideMaterial as {
+                                isShadowPassMaterial?: boolean;
+                            } | null
+                        )?.isShadowPassMaterial;
+                    Object.defineProperty(geometry, 'indirectOffset', {
+                        configurable: true,
+                        get: () => (inShadowPass() ? state.shadow : state.main),
+                        // setIndirect(null) on dispose: the property is replaced on the next build.
+                        set: () => undefined,
+                    });
+                    pass = { state, inShadowPass };
+                    passes.set(geometry, pass);
+                }
+
+                const { state, inShadowPass } = pass;
                 mesh.onBeforeRender = (
                     _renderer,
                     scene,
@@ -691,15 +741,13 @@ export class GpuFoliageType {
                           )
                         : 0;
                     const entry = offsets[Math.max(0, index)];
-                    const shadow = (
-                        scene.overrideMaterial as {
-                            isShadowPassMaterial?: boolean;
-                        } | null
-                    )?.isShadowPassMaterial;
-                    geometry.indirectOffset =
-                        shadow && entry.shadow !== null
-                            ? entry.shadow
-                            : entry.main;
+                    state.scene = scene;
+
+                    if (inShadowPass()) {
+                        state.shadow = entry.shadow ?? entry.main;
+                    } else {
+                        state.main = entry.main;
+                    }
                 };
             }
         }
@@ -928,6 +976,7 @@ export class GpuFoliageType {
         ]) {
             this.group.remove(mesh);
             // The geometry belongs to the type (shared LOD); only the indirect draw goes.
+            Reflect.deleteProperty(mesh.geometry, 'indirectOffset');
             mesh.geometry.setIndirect(null);
         }
 

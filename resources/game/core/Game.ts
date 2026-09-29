@@ -227,15 +227,18 @@ export class Game {
             loadGraphicsOverrides().renderer_backend ??
             this.manifest.settings.graphics.renderer_backend ??
             'auto';
-        if (requested !== 'webgl') {
-            await installWebGpuCompat();
-        }
+        const webGpu = requested !== 'webgl' && (await installWebGpuCompat());
 
         const renderer = new THREE.WebGPURenderer({
             antialias: false,
             powerPreference: 'high-performance',
             stencil: false,
             forceWebGL: requested === 'webgl',
+            // Reversed float depth (see depth.ts) on WebGPU. The WebGL 2 backend could reverse depth
+            // with EXT_clip_control, but three.js r186's shared getViewPosition() still maps depth to
+            // clip z as 2·depth − 1 there, which breaks the view-space reconstruction of GTAO, SSR, the
+            // AO denoiser and the TAA / TAAU disocclusion test; it keeps the standard 24-bit buffer.
+            reversedDepthBuffer: webGpu,
             trackTimestamp: true,
         });
         await renderer.init();
@@ -582,7 +585,9 @@ export class Game {
             this.playerCamera.reset(this.player.yaw);
             this.player.object.visible = true;
             this.editor.setActive(false);
-            this.camera.near = 0.1;
+            // The third-person camera keeps ≥ 0.4 m from the ground; 0.2 m halves the far depth
+            // steps of WebGL's 24-bit buffer compared to 0.1 m.
+            this.camera.near = 0.2;
 
             if (!initial) {
                 void this.renderer.domElement
@@ -890,6 +895,7 @@ export class Game {
         return this.reflection.prepare(
             this.camera,
             this.renderer.coordinateSystem,
+            this.renderer.reversedDepthBuffer,
         );
     }
 

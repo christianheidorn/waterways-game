@@ -30,6 +30,7 @@ import {
     vec3,
     vec4,
 } from 'three/tsl';
+import { farDepth } from '../core/depth';
 
 type Float = THREE.Node<'float'>;
 type Vec2 = THREE.Node<'vec2'>;
@@ -102,9 +103,10 @@ export class SkyDome extends THREE.Mesh<
         material.fog = false;
         material.lights = false;
         // Projected onto the far plane: never clipped by the camera far distance.
-        material.vertexNode = cameraProjectionMatrix
+        const clip = cameraProjectionMatrix
             .mul(modelViewMatrix)
-            .mul(vec4(positionLocal, 1)).xyww;
+            .mul(vec4(positionLocal, 1));
+        material.vertexNode = vec4(clip.xy, clip.w.mul(farDepth()), clip.w);
         super(new THREE.BoxGeometry(1, 1, 1), material);
         this.uniforms = createUniforms(stars);
         this.derived = createDerived(this.uniforms);

@@ -1822,7 +1822,7 @@ export class Foliage {
             }
         } else {
             // Leaving far range: keep the chunk until every member in range has a mesh.
-            if (!chunk.mesh?.visible || near >= cull) {
+            if (!(chunk.mesh?.visible || chunk.merged) || near >= cull) {
                 return;
             }
 
@@ -2038,9 +2038,9 @@ export class Foliage {
      * Draws sparse shown cells through merged batches: the meshes of one square (MERGE_SIZE) that draw
      * the same LOD (and LOD split role) with the same shadow flag are copied into one instance buffer
      * (the drawn prefix of each, keeping the per-cell ranks of the density fade) and hidden. Cells the
-     * LOD split passes through contribute their LOD1 mesh and their LOD0 subset separately. Batches
-     * are only rewritten when their sources, source versions or drawn counts change; dense cells keep
-     * their own draws.
+     * LOD split passes through contribute their LOD1 mesh and their LOD0 subset separately; far
+     * chunks merge per 2 × 2 chunks. Batches are only rewritten when their sources, source versions
+     * or drawn counts change; dense cells keep their own draws.
      */
     private mergeCells(renderer: TypeRenderer, stamp: number): void {
         const groups = new Map<
@@ -2052,15 +2052,20 @@ export class Foliage {
                 return;
             }
 
-            const span = Math.max(
-                1,
-                Math.round(
-                    (MERGE_SIZE << Math.max(0, lod - 1)) / renderer.cellSize,
-                ),
-            );
+            // Far chunks pair up (their own grid: cx / cz count chunks).
+            const chunk = isChunk(cell);
+            const span = chunk
+                ? 2
+                : Math.max(
+                      1,
+                      Math.round(
+                          (MERGE_SIZE << Math.max(0, lod - 1)) /
+                              renderer.cellSize,
+                      ),
+                  );
 
             // The LOD0 subsets draw with the 'near' role, whole cells at LOD0 too.
-            const key = `${Math.floor(cell.cx / span)},${Math.floor(cell.cz / span)}:${lod}:${mesh.castShadow ? 1 : 0}`;
+            const key = `${chunk ? 'c' : ''}${Math.floor(cell.cx / span)},${Math.floor(cell.cz / span)}:${lod}:${mesh.castShadow ? 1 : 0}`;
             let group = groups.get(key);
 
             if (!group) {
@@ -2075,10 +2080,8 @@ export class Foliage {
         for (const cell of renderer.shown) {
             cell.merged = false;
 
-            if (!isChunk(cell)) {
-                add(cell, cell.mesh, cell.lod);
-                add(cell, cell.near, 0);
-            }
+            add(cell, cell.mesh, cell.lod);
+            add(cell, cell.near, 0);
         }
 
         for (const [key, { lod, cells, sources }] of groups) {

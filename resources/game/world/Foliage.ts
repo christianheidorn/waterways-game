@@ -1261,6 +1261,7 @@ export class Foliage {
     }
 
     update(dt: number, camera: THREE.Camera): void {
+        this.globals.prevTime.value = this.globals.time.value;
         this.globals.time.value += dt;
         this.globals.camPos.value.copy(camera.position);
         this.lastCamera = camera;

@@ -15,6 +15,7 @@ import {
     normalLocal,
     normalViewGeometry,
     positionGeometry,
+    positionPrevious,
     sin,
     smoothstep,
     step,
@@ -52,6 +53,8 @@ type FloatUniform = THREE.UniformNode<'float', number>;
 /** Uniforms shared by every foliage material (one set per Foliage instance). */
 export type FoliageGlobals = {
     time: FloatUniform;
+    /** Wind time of the previous frame (motion vectors of swaying foliage for TAA / motion blur). */
+    prevTime: FloatUniform;
     wind: FloatUniform;
     /** Horizontal direction the wind blows towards (unit x/z). */
     windDir: THREE.UniformNode<'vec2', THREE.Vector2>;
@@ -72,6 +75,7 @@ export type FoliageTypeUniforms = {
 export function createFoliageGlobals(): FoliageGlobals {
     return {
         time: uniform(0),
+        prevTime: uniform(0),
         wind: uniform(0.4),
         windDir: uniform(new THREE.Vector2(0.84, 0.54)),
         camPos: uniform(new THREE.Vector3()),
@@ -127,30 +131,35 @@ function foliagePosition(
         const r1 = row1.toVar();
         const r2 = row2.toVar();
         const instPos = vec3(r0.w, r1.w, r2.w).toVar();
-        const p = positionGeometry.toVar();
         const phase = dot(instPos.xz, vec2(0.071, 0.113));
-        const gust = sin(g.time.mul(0.7).add(instPos.x.mul(0.01)))
-            .mul(0.5)
-            .add(0.5);
-        const sway = sin(g.time.mul(1.9).add(phase))
-            .mul(0.6)
-            .add(sin(g.time.mul(3.7).add(phase.mul(1.7))).mul(0.25))
-            .mul(gust.mul(0.6).add(0.4));
         const w = attribute('wind', 'float');
         const bend = w.mul(w).mul(g.wind).mul(stiffness);
         // Sway along the wind plus a steady lean downwind. Instances are randomly yawed, so the
         // world-space wind direction is brought into instance space first (transpose × wind).
         const windLocal = r0.xyz.mul(g.windDir.x).add(r2.xyz.mul(g.windDir.y));
         const windDir = normalize(windLocal.xz.add(vec2(1e-5))).toVar();
-        const lean = bend.mul(0.22).mul(gust.mul(0.5).add(0.5));
-        const offset = windDir
-            .mul(sway.mul(bend).mul(0.35).add(lean))
-            .add(
-                vec2(windDir.y.negate(), windDir.x).mul(
-                    sway.mul(bend).mul(0.1),
-                ),
-            );
-        p.assign(vec3(p.x.add(offset.x), p.y, p.z.add(offset.y)));
+        const swayed = (time: Node<'float'>) => {
+            const gust = sin(time.mul(0.7).add(instPos.x.mul(0.01)))
+                .mul(0.5)
+                .add(0.5);
+            const sway = sin(time.mul(1.9).add(phase))
+                .mul(0.6)
+                .add(sin(time.mul(3.7).add(phase.mul(1.7))).mul(0.25))
+                .mul(gust.mul(0.6).add(0.4));
+            const lean = bend.mul(0.22).mul(gust.mul(0.5).add(0.5));
+            const offset = windDir
+                .mul(sway.mul(bend).mul(0.35).add(lean))
+                .add(
+                    vec2(windDir.y.negate(), windDir.x).mul(
+                        sway.mul(bend).mul(0.1),
+                    ),
+                );
+            const q = positionGeometry;
+
+            return vec3(q.x.add(offset.x), q.y, q.z.add(offset.y));
+        };
+        const p = swayed(g.time).toVar();
+        const pPrev = swayed(g.prevTime).toVar();
         const camDist = distance(instPos.xz, g.camPos.xz);
         const fadeEnd = u.fadeEnd.mul(g.fadeScale);
         const fadeK = float(1)
@@ -189,6 +198,7 @@ function foliagePosition(
         }
 
         p.mulAssign(fadeK);
+        pPrev.mulAssign(fadeK);
         // Rotation × uniform scale: the transformed normal only needs renormalising.
         normalLocal.assign(
             normalize(
@@ -200,11 +210,17 @@ function foliagePosition(
             ),
         );
 
-        return vec3(
-            dot(r0.xyz, p).add(r0.w),
-            dot(r1.xyz, p).add(r1.w),
-            dot(r2.xyz, p).add(r2.w),
-        );
+        const toWorld = (v: Node<'vec3'>) =>
+            vec3(
+                dot(r0.xyz, v).add(r0.w),
+                dot(r1.xyz, v).add(r1.w),
+                dot(r2.xyz, v).add(r2.w),
+            );
+        // Velocity pass: without this, three would take the untransformed geometry as the previous
+        // position (motion vectors pointing at the origin smear TAA / TAAU and motion blur).
+        positionPrevious.assign(toWorld(pPrev));
+
+        return toWorld(p);
     })();
 }
 

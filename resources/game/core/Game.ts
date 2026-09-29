@@ -2,6 +2,7 @@ import * as THREE from 'three/webgpu';
 import { Editor } from '../editor/Editor';
 import type { DirtyChannel } from '../editor/Editor';
 import { EditorPanel } from '../editor/ui/EditorPanel';
+import { ViewModes } from '../editor/ViewModes';
 import { Player } from '../player/Player';
 import { ThirdPersonCamera } from '../player/ThirdPersonCamera';
 import type {
@@ -33,6 +34,7 @@ import {
 } from '../ui/GraphicsMenu';
 import { PhotoMode } from '../ui/PhotoMode';
 import { Hud, LoadingScreen } from '../ui/Hud';
+import { ViewModeMenu } from '../ui/ViewModeMenu';
 import { Atmosphere } from '../world/Atmosphere';
 import { Foliage, placementAllowed } from '../world/Foliage';
 import { Heightfield } from '../world/Heightfield';
@@ -107,6 +109,7 @@ export class Game {
     private playerCamera!: ThirdPersonCamera;
     private editor!: Editor;
     private panel!: EditorPanel;
+    private viewModes!: ViewModes;
     private mode: GameMode;
     private timer = new THREE.Timer();
     private dirty = new Set<DirtyChannel>();
@@ -443,6 +446,14 @@ export class Game {
             redo: () => this.editor.redo(),
         });
 
+        this.viewModes = new ViewModes({
+            material: this.world.material,
+            foliage: this.world.foliage,
+            postFx: this.postFx,
+            heights: this.world.heights,
+            layers: () => this.manifest.layers,
+        });
+
         this.editor = new Editor(
             {
                 ...this.world,
@@ -468,6 +479,7 @@ export class Game {
                 requestPlay: (fromCamera) =>
                     this.setMode('play', false, fromCamera),
                 requestSave: () => void this.save(),
+                cycleViewMode: (step) => this.viewModes.cycle(step),
                 isPointerOverUi: () => this.isPointerOverUi(),
             },
             settings.editor,
@@ -511,6 +523,12 @@ export class Game {
             },
             this.config.embedded,
         );
+        const viewModeMenu = new ViewModeMenu(
+            this.hud.el,
+            this.viewModes,
+            this.config.embedded,
+        );
+        this.viewModes.onChange = () => viewModeMenu.sync();
         this.photoMode = new PhotoMode(this.hud.el, {
             environment: () => this.manifest.environment,
             previewEnvironment: (patch) =>
@@ -648,6 +666,7 @@ export class Game {
             this.camera.near = 0.5;
         }
 
+        this.viewModes.setSuspended(mode === 'play');
         this.camera.updateProjectionMatrix();
         this.escapeArmed = false;
         this.hud.setMode(mode, this.pointerLocked);
@@ -702,6 +721,7 @@ export class Game {
             this.updatePlay(dt);
         } else {
             this.editor.update(dt);
+            this.viewModes.update(dt);
         }
 
         const focus =
@@ -1423,6 +1443,10 @@ export class Game {
     private markDirty(channel: DirtyChannel): void {
         const wasClean = this.dirty.size === 0;
         this.dirty.add(channel);
+
+        if (channel === 'heightmap') {
+            this.viewModes.invalidateHeights();
+        }
 
         if (wasClean) {
             this.hud.setSaveState('dirty');

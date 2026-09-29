@@ -39,6 +39,7 @@ import {
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
 import type { FoliageKind } from '../../shared/types';
+import { LIGHTING_ONLY_ALBEDO } from '../TerrainDebugView';
 
 /**
  * Foliage node materials (WebGPU and WebGL 2): wind sway, distance fade, density falloff and the
@@ -93,6 +94,8 @@ export type FoliageGlobals = {
     sunDir: THREE.UniformNode<'vec3', THREE.Vector3>;
     /** Terrain colour for the roots; null without a terrain (e.g. the foliage preview). */
     groundColor: GroundColorSource | null;
+    /** 1 replaces the albedo with a neutral grey (the editor's lighting-only view). */
+    lightingOnly: FloatUniform;
 };
 
 /** Per-type uniforms (updated in place, e.g. when the cull distance changes). */
@@ -119,6 +122,7 @@ export function createFoliageGlobals(
         sunLight: uniform(new THREE.Color(0, 0, 0)),
         sunDir: uniform(new THREE.Vector3(0, 1, 0)),
         groundColor,
+        lightingOnly: uniform(0),
     };
 }
 
@@ -395,7 +399,26 @@ export function createFoliageMaterial(
         leafTranslucency(material, options.globals);
     }
 
+    lightingOnlyAlbedo(material, options.globals);
+
     return material;
+}
+
+/**
+ * Lighting-only view: the diffuse colour is replaced after the material has set it up (texture,
+ * vertex and instance colours included; alpha and its cutout stay), so only the lighting remains.
+ */
+function lightingOnlyAlbedo(
+    material: THREE.MeshStandardNodeMaterial,
+    g: FoliageGlobals,
+): void {
+    const setup = material.setupDiffuseColor.bind(material);
+    material.setupDiffuseColor = (builder) => {
+        setup(builder);
+        diffuseColor.rgb.assign(
+            mix(diffuseColor.rgb, vec3(LIGHTING_ONLY_ALBEDO), g.lightingOnly),
+        );
+    };
 }
 
 /**

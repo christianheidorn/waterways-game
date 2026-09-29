@@ -71,6 +71,27 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
   is previewed on the terrain.
 - **Undo:** tile-based copy-on-write undo/redo covers heights, splat, water and foliage.
 - **Viewport:** Unreal-style camera controls and an optional 100 m grid.
+- **View modes** (like Unreal's viewport _View Mode_ menu): the eye button at the top right (next to the
+  graphics button) or V / Shift+V switch how the viewport draws the world, to see why something looks or
+  performs the way it does. A legend under the button explains the colours.
+
+    | View mode       | Shows                                                                                                                  |
+    | --------------- | ---------------------------------------------------------------------------------------------------------------------- |
+    | Lit             | The final rendering (default)                                                                                          |
+    | Lighting only   | Terrain and foliage with a neutral grey albedo: judge sun, sky light, shadows and AO without the materials             |
+    | Layers          | Each terrain layer in its own colour (legend with the layer names), blended by paint weight so transitions show        |
+    | Slope           | Steepness: green (flat) → yellow (30°) → red (45°) → purple (60°+); handy with the foliage slope rules                 |
+    | Height          | Hypsometric bands with contour lines; the interval follows the map's height range (1, 2 or 5 × 10ⁿ m, bold every 5th)  |
+    | Foliage density | Heat map of instances per 100 m² (8 m cells, log scale) of placed foliage and the ground cover grown around the camera |
+    | Wireframe       | The terrain triangles at their current LOD (drawn in the shader from each chunk's vertex spacing)                      |
+
+    The visualisations are unlit (readable at night) and skip fog, exposure, colour grading, bloom and the
+    screen-space lighting (AO, contact shadows, SSR, light shafts), so the colours match the legend; foliage
+    and water stay visible and lit. Every mode is built into the terrain shader behind a uniform, so switching
+    is instant (no shader compile). View modes are an editor tool: Play always renders lit (the mode comes back
+    in Build mode) and nothing is saved with the map. The density grid is refreshed at most twice a second
+    while foliage changes (painting, ground cover growing as the camera moves).
+
 - **Saving:** Ctrl+S saves, with an optional autosave. Each save also stores a thumbnail for the studio.
 
 ## Terrain materials, AI and land cover
@@ -476,6 +497,7 @@ Open <http://localhost:8000>. The dashboard shows the seeded **Waterways Valley*
 | Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) | Undo / redo                                                 |
 | Ctrl+S                         | Save                                                        |
 | G                              | Toggle grid                                                 |
+| V / Shift+V                    | Next / previous view mode (Lit, Lighting only, Layers, …)   |
 | P / Alt+P                      | Play from the camera / from the player start                |
 | F10                            | Graphics menu (presets, scalability, frame rate)            |
 
@@ -503,7 +525,8 @@ resources/game/            The game (TypeScript + Three.js WebGPURenderer with T
                            GPU culling, Hi-Z, impostors)
   tools/FoliageBaker.ts    In-browser foliage asset optimiser (LODs, impostor, cards, thumbnail)
   player/                  Character controller, third-person camera, procedural / glTF character
-  editor/                  Editor (tools, strokes), Brush, History (undo), FlyCamera, terrainOps, UI panel
+  editor/                  Editor (tools, strokes), Brush, History (undo), FlyCamera, terrainOps, UI panel,
+                           ViewModes (view modes; their shader side is world/TerrainDebugView)
 ```
 
 **Studio ↔ game communication**
@@ -537,7 +560,7 @@ vendor/bin/pint --test      # PHP style
 
 ## Roadmap ideas
 
-**In progress:** ground cover generated on the GPU (WebGPU), cached shadows, editor debug views.
+**In progress:** ground cover generated on the GPU (WebGPU), cached shadows.
 
 Looks:
 

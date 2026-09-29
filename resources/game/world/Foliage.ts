@@ -417,6 +417,8 @@ export class Foliage {
     /** Re-check the ground cover tiles on the next update (else only after the camera moved). */
     private coverScan = true;
     private readonly lastCoverPos = new THREE.Vector3(Infinity, 0, 0);
+    /** Bumped whenever instance data changes (see revision). */
+    private dataRevision = 0;
 
     /** `groundColor`: terrain colour the roots of grass etc. blend into (none: they keep their own). */
     constructor(groundColor: GroundColorSource | null = null) {
@@ -866,6 +868,7 @@ export class Foliage {
         }
 
         this.needsEval = true;
+        this.dataRevision++;
     }
 
     load(file: FoliageFile | null): void {
@@ -956,6 +959,50 @@ export class Foliage {
         }
 
         return count;
+    }
+
+    /**
+     * Changes whenever instances are added, removed or moved (painting, loading, ground cover growing
+     * or dropped behind the camera), so readers of countInstances() know when to refresh.
+     */
+    get revision(): number {
+        return this.dataRevision;
+    }
+
+    /**
+     * Adds the number of instances per cell of a square world grid to `out` (`res`² cells of `cell` m
+     * from the north-west corner x0, z0; row-major, rows along +z). Counts hand-placed foliage and the
+     * ground cover grown so far (around the camera); instances outside the grid are ignored. Read-only
+     * and proportional to the instance count (a few ms for a million instances), so call it on demand.
+     */
+    countInstances(
+        x0: number,
+        z0: number,
+        cell: number,
+        res: number,
+        out: Float32Array,
+    ): void {
+        const inv = 1 / cell;
+
+        for (const renderer of this.renderers.values()) {
+            for (const c of renderer.cells.values()) {
+                const data = c.data;
+
+                for (let i = 0; i < data.length; i += FOLIAGE_STRIDE) {
+                    const col = Math.floor((data[i] - x0) * inv);
+                    const row = Math.floor((data[i + 2] - z0) * inv);
+
+                    if (col >= 0 && row >= 0 && col < res && row < res) {
+                        out[row * res + col]++;
+                    }
+                }
+            }
+        }
+    }
+
+    /** Editor lighting-only view: every foliage type shaded with a neutral grey albedo. */
+    setLightingOnly(enabled: boolean): void {
+        this.globals.lightingOnly.value = enabled ? 1 : 0;
     }
 
     setWind(strength: number, dirX?: number, dirZ?: number): void {
@@ -3007,6 +3054,7 @@ export class Foliage {
     private markDirty(renderer: TypeRenderer, cell: Cell): void {
         cell.dirty = true;
         this.needsEval = true;
+        this.dataRevision++;
 
         if (renderer.gpu) {
             renderer.gpuDirty.add(cell);
@@ -3568,6 +3616,7 @@ export class Foliage {
 
     private disposeRenderer(renderer: TypeRenderer): void {
         renderer.disposed = true;
+        this.dataRevision++;
 
         for (const cell of [
             ...renderer.cells.values(),

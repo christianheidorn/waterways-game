@@ -165,6 +165,17 @@ painted, so you never have to place, erase and repaint grass to try out a settin
 - Hand-painted instances of the same type are unaffected, and ground cover is never written to `foliage.json`.
 - Editor changes are saved after a short pause (`PATCH /api/maps/{map}/layers/{layer}/ground-cover`).
 
+**Roots take the terrain's colour** (what Unreal does with runtime virtual texturing). Grass fades into the
+ground at its base instead of standing on it like a carpet, whether it is ground cover or painted. The terrain
+keeps one average colour per layer: the material's mean albedo × tint, or the procedural colour pair
+(`TerrainMaterial.groundColor`). Each foliage vertex reads the splat map at its instance's root and blends those
+colours, darkened on wet shores and after rain and whitened by snow cover. Near the ground the blade also
+turns as rough as soil and gets less sky light, as if the blades around it shaded it. Without that, the
+roots would come out paler and bluer than the ground next to them. The blade's own colour takes over
+towards ~40% of its height. Grass takes the most, then flowers, reeds, bushes and a hint at the foot of rocks;
+trees are left alone. It costs three texture samples per vertex on both backends and both foliage paths. It
+never runs in the shadow pass, and layer, material and weather changes apply without rebuilding a shader.
+
 **AI foliage palette** (✨ _AI palette_ on the foliage page):
 
 1. Pick a map and/or describe a region.

@@ -198,7 +198,10 @@ export async function renderImpostor(
 
 /** Node copy for the capture; double-sided leaves skip the back-face normal flip (as in game). */
 function captureMaterial(material: THREE.Material): THREE.Material {
-    const clone = toNodeMaterial(material);
+    const clone = toNodeMaterial(
+        material,
+        new THREE.MeshStandardNodeMaterial(),
+    );
     keepBackFaceNormals(clone);
 
     return clone;

@@ -24,6 +24,7 @@ import type {
     FoliageGlobals,
     FoliageTypeUniforms,
     InstanceSource,
+    RootTint,
 } from './FoliageMaterial';
 import { createFoliageMaterial, RANK_FADE } from './FoliageMaterial';
 import type { HiZ } from './HiZ';
@@ -140,6 +141,7 @@ export type GpuTypeConfig = {
     fade: boolean;
     falloff: { start: number; min: number } | null;
     stiffness: number;
+    root: RootTint | null;
     uniforms: FoliageTypeUniforms;
     /**
      * Distance (m) added to every LOD switch: kinds whose LODs used to switch per cell keep their
@@ -618,6 +620,7 @@ export class GpuFoliageType {
                             globals: this.frame.globals,
                             uniforms: config.uniforms,
                             stiffness: config.stiffness,
+                            root: config.root,
                             fade: config.fade,
                             role: 'none',
                             instance,

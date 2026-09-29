@@ -28,9 +28,16 @@ import {
     createFoliageGlobals,
     createFoliageMaterial,
     RANK_FADE,
+    rootTintFor,
     windStiffness,
 } from './foliage/FoliageMaterial';
-import type { FoliageTypeUniforms, LodRole } from './foliage/FoliageMaterial';
+import type {
+    FoliageGlobals,
+    FoliageTypeUniforms,
+    GroundColorSource,
+    LodRole,
+    RootTint,
+} from './foliage/FoliageMaterial';
 import { generateGroundCoverTile } from './foliage/groundCover';
 import type {
     GroundCoverContext,
@@ -381,7 +388,7 @@ export class Foliage {
     private renderers = new Map<number, TypeRenderer>();
     /** Instances of types that are currently not in the type list (kept for saving / re-adding). */
     private orphaned = new Map<number, number[]>();
-    private readonly globals = createFoliageGlobals();
+    private readonly globals: FoliageGlobals;
     private gltf = new GLTFLoader();
     private random = mulberry32(Date.now() & 0xffff);
     private density = 1;
@@ -411,7 +418,9 @@ export class Foliage {
     private coverScan = true;
     private readonly lastCoverPos = new THREE.Vector3(Infinity, 0, 0);
 
-    constructor() {
+    /** `groundColor`: terrain colour the roots of grass etc. blend into (none: they keep their own). */
+    constructor(groundColor: GroundColorSource | null = null) {
+        this.globals = createFoliageGlobals(groundColor);
         this.group.name = 'Foliage';
         // Static: an auto-updated group would recompute every cell mesh's world matrix each frame.
         this.group.matrixAutoUpdate = false;
@@ -1948,6 +1957,7 @@ export class Foliage {
             fade: renderer.fade,
             falloff: renderer.falloff,
             stiffness: windStiffness(renderer.type.kind),
+            root: rootTint(renderer),
             uniforms: renderer.uniforms,
             // Split kinds switch LOD0 → LOD1 per instance (+ shadow slack as the near subset had);
             // the others switched per cell (nearest point), so their LODs reach about half a cell
@@ -3340,6 +3350,7 @@ export class Foliage {
             fade: renderer.fade,
             role,
             instance: attributeInstance,
+            root: rootTint(renderer),
         });
     }
 
@@ -4313,6 +4324,17 @@ function batchOf(mesh: THREE.Mesh): InstanceBatch {
 /** Instances a cell / near mesh draws (its instanced geometry view). */
 function instanceCountOf(mesh: THREE.Mesh): number {
     return (mesh.geometry as THREE.InstancedBufferGeometry).instanceCount;
+}
+
+/** Root tint of a type, measured on its LOD0 (procedural mesh or model). */
+function rootTint(renderer: TypeRenderer): RootTint | null {
+    const lod0 = renderer.lods[0];
+
+    if (!lod0.boundingBox) {
+        lod0.computeBoundingBox();
+    }
+
+    return rootTintFor(renderer.type.kind, lod0.boundingBox!.max.y);
 }
 
 /** Bounding sphere around every LOD (instance space, scale 1): the GPU culling bound. */

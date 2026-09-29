@@ -352,7 +352,8 @@ export class Game {
         this.scene.add(water.group);
 
         this.progress(0.9, 'Growing foliage');
-        const foliage = new Foliage();
+        // Grass etc. blend into the terrain colour at their roots.
+        const foliage = new Foliage((xz) => material.groundColor(xz));
         // WebGPU: GPU-driven culling + indirect draws (culled in renderFrame).
         foliage.setRenderer(this.renderer);
         foliage.setTypes(m.foliage_types);

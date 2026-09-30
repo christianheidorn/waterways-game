@@ -8,6 +8,12 @@ import { Props } from '../world/Props';
 import { AgentBridge } from './AgentBridge';
 import { createAgentHost } from './AgentCommands';
 import { runWorldEdit } from '../editor/agent/runWorldEdit';
+import { profilePerformance } from '../editor/agent/profilePerformance';
+import type {
+    FrameSample,
+    PerformanceHost,
+    ProfileSystem,
+} from '../editor/agent/profilePerformance';
 import type { AgentContext } from './AgentCommands';
 import { Player } from '../player/Player';
 import { ThirdPersonCamera } from '../player/ThirdPersonCamera';
@@ -135,6 +141,13 @@ export class Game {
     private pointerLocked = false;
     private escapeArmed = false;
     private resizeObserver: ResizeObserver | null = null;
+    /** Performance profile (agents): per-frame listener, hidden systems, forced per-pass timings. */
+    private frameListener: ((frame: FrameSample) => void) | null = null;
+    private readonly profileHidden = new Set<ProfileSystem>();
+    private profileDetailed = false;
+    private holdResolution = false;
+    private propsWereVisible = true;
+    private waterWasVisible = true;
     private editorCameraState: {
         position: THREE.Vector3;
         quaternion: THREE.Quaternion;
@@ -247,9 +260,110 @@ export class Game {
                 paint_layer_slot: this.editor.state.paintLayer,
             }),
             stats: () => ({ ...this.lastStats }),
+            profile: (options) =>
+                profilePerformance(this.performanceHost(), options),
         };
         this.agentBridge = new AgentBridge(this.api, url, createAgentHost(ctx));
         this.agentBridge.start();
+    }
+
+    /** The game as the performance profile (profile_performance) sees and switches it. */
+    private performanceHost(): PerformanceHost {
+        return {
+            backend: this.backend,
+            gpuTimers: this.profiler?.supported ?? false,
+            scene: this.scene,
+            camera: this.camera,
+            terrain: this.world.terrain.group,
+            water: this.world.water.group,
+            hasWater: () => this.world.water.hasWater(),
+            foliage: this.world.foliage,
+            props: this.world.props,
+            layers: () => this.manifest.layers,
+            foliageTypes: () => this.manifest.foliage_types,
+            shadows: () => ({
+                quality: this.manifest.settings.graphics.shadow_quality,
+                terrain_casts:
+                    this.manifest.settings.graphics.shadow_quality === 'high' ||
+                    this.manifest.settings.graphics.shadow_quality === 'ultra',
+                foliage_shadow_distance_m:
+                    this.manifest.settings.graphics.foliage_shadow_distance,
+                ...this.atmosphere.sunShadows.describe(),
+            }),
+            resolution: () => {
+                const g = this.manifest.settings.graphics;
+
+                return {
+                    output: `${this.postFx.outputSize.x}×${this.postFx.outputSize.y}`,
+                    render: `${this.postFx.renderSize.x}×${this.postFx.renderSize.y}`,
+                    render_scale: round2(this.effectiveRenderScale()),
+                    configured_render_scale: g.render_scale,
+                    dynamic_resolution: g.dynamic_resolution,
+                    device_pixel_ratio: round2(window.devicePixelRatio),
+                    quality_preset: g.quality_preset,
+                };
+            },
+            onFrame: (listener) => {
+                this.frameListener = listener;
+            },
+            setHidden: (system, hidden) =>
+                this.setProfileHidden(system, hidden),
+            setDetailed: (detailed) => {
+                this.profileDetailed = detailed;
+            },
+            sections: () => this.profiler?.sections() ?? [],
+            holdResolution: (hold) => {
+                this.holdResolution = hold;
+            },
+        };
+    }
+
+    /** Switches a system off (or back on, exactly as it was) for the performance profile. */
+    private setProfileHidden(system: ProfileSystem, hidden: boolean): void {
+        if (hidden === this.profileHidden.has(system)) {
+            return;
+        }
+
+        if (hidden) {
+            this.profileHidden.add(system);
+        } else {
+            this.profileHidden.delete(system);
+        }
+
+        switch (system) {
+            case 'props': {
+                const group = this.world.props.group;
+
+                if (hidden) {
+                    this.propsWereVisible = group.visible;
+                    group.visible = false;
+                } else {
+                    group.visible = this.propsWereVisible;
+                }
+                break;
+            }
+            case 'water': {
+                const group = this.world.water.group;
+
+                if (hidden) {
+                    this.waterWasVisible = group.visible;
+                    group.visible = false;
+                } else {
+                    group.visible = this.waterWasVisible;
+                }
+                break;
+            }
+            case 'foliage':
+            case 'ground_cover':
+                this.world.foliage.setHidden(
+                    this.profileHidden.has('foliage'),
+                    this.profileHidden.has('ground_cover'),
+                );
+                break;
+            case 'shadows':
+                this.atmosphere.sunShadows.setPaused(hidden);
+                break;
+        }
     }
 
     /** Re-reads parts of the manifest after an agent changed them on the server, and applies them. */
@@ -981,7 +1095,8 @@ export class Game {
         const profiler = this.profiler;
 
         if (profiler) {
-            profiler.detailed = !!this.graphicsMenu?.isOpen;
+            profiler.detailed =
+                this.profileDetailed || !!this.graphicsMenu?.isOpen;
             profiler.begin('Update (CPU)');
         }
 
@@ -1024,8 +1139,20 @@ export class Game {
         this.renderFrame(dt);
         this.updateDynamicResolution(dt);
         this.input.endFrame();
-        this.trackStats(dt, performance.now() - start);
+        const cpuMs = performance.now() - start;
+        this.trackStats(dt, cpuMs);
         this.tickAutosave(dt);
+
+        if (this.frameListener) {
+            const info = this.renderer.info.render;
+            this.frameListener({
+                cpuMs,
+                intervalMs: this.frameIntervalMs,
+                gpuMs: this.profiler?.lastMs ?? null,
+                drawCalls: info.drawCalls,
+                triangles: info.triangles,
+            });
+        }
     }
 
     private updatePlay(dt: number): void {
@@ -1149,7 +1276,9 @@ export class Game {
     private renderFrame(dt: number): void {
         const water = this.world.water;
         const profiler = this.profiler;
-        const reflection = water.hasWater() ? this.prepareReflection(dt) : null;
+        // The performance profile switches the water off entirely, reflection included.
+        const withWater = water.hasWater() && !this.profileHidden.has('water');
+        const reflection = withWater ? this.prepareReflection(dt) : null;
         // GPU foliage culling reads last frame's scene depth (Hi-Z), before any pass draws foliage;
         // it culls for the reflection camera too when the reflection renders this frame.
         this.world.foliage.cull(
@@ -1160,7 +1289,7 @@ export class Game {
             reflection,
         );
 
-        if (water.hasWater()) {
+        if (withWater) {
             profiler?.mark('Water reflection');
             this.renderReflection();
         }
@@ -1381,7 +1510,8 @@ export class Game {
     private updateDynamicResolution(dt: number): void {
         const g = this.manifest.settings.graphics;
 
-        if (!g.dynamic_resolution) {
+        // Held while the performance profile measures (a changing resolution would hide costs).
+        if (!g.dynamic_resolution || this.holdResolution) {
             return;
         }
 
@@ -2064,4 +2194,8 @@ function foliageStats(foliage: Foliage): Partial<GameStats> & {
         foliageTriangles: f.triangles,
         foliageTypes: f.types,
     };
+}
+
+function round2(v: number): number {
+    return Math.round(v * 100) / 100;
 }

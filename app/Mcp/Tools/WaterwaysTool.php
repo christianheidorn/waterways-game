@@ -93,8 +93,9 @@ abstract class WaterwaysTool extends Tool
      * snapshot, and saves it unless `save` is false.
      *
      * @param  array<string, mixed>  $payload  kind, action, shape, params (see editor/agent/runWorldEdit.ts)
+     * @param  (callable(): array<string, mixed>)|null  $notes  extra result fields, asked for after the edit
      */
-    protected function worldEdit(Map $map, Request $request, string $label, array $payload): Response
+    protected function worldEdit(Map $map, Request $request, string $label, array $payload, ?callable $notes = null): Response
     {
         $snapshot = $this->snapshots()->autoBefore($map, $label);
         $save = $request->get('save') !== false;
@@ -105,6 +106,7 @@ abstract class WaterwaysTool extends Tool
             ...$result,
             'saved' => $save,
             'snapshot_taken' => $snapshot?->id,
+            ...($notes !== null ? $notes() : []),
             'tip' => 'Check the result with take_screenshot or get_map_image.',
         ]);
     }

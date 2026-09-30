@@ -2,6 +2,10 @@
 
 namespace App\Mcp\Tools;
 
+use App\Mcp\Assets\PropBudget;
+use App\Models\Map;
+use App\Models\PropModel;
+use App\Services\Terrain\TerrainStorage;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
 use Illuminate\Support\Facades\Validator;
 use Laravel\Mcp\Request;
@@ -65,12 +69,14 @@ class PlaceProps extends WaterwaysTool
                 'offset' => isset($p['offset']) ? (float) $p['offset'] : null,
             ], fn ($v) => $v !== null), $data['placements']);
 
-            return $this->worldEdit($this->map($request), $request, 'place_props', [
+            $map = $this->map($request);
+
+            return $this->worldEdit($map, $request, 'place_props', [
                 'kind' => 'props',
                 'action' => 'place',
                 'placements' => $placements,
                 'prop_models' => $this->propModelRefs($models),
-            ]);
+            ], fn () => $this->budgetNotes($map, $request, $models, array_count_values(array_column($placements, 'model'))));
         }
 
         $shape = $this->validatedShape($input);
@@ -88,8 +94,12 @@ class PlaceProps extends WaterwaysTool
             'models.required' => 'Give either placements, or a shape with models and count to scatter.',
         ])->validate();
         $models = $this->resolvePropModels($data['models']);
+        $map = $this->map($request);
+        $ids = array_values(array_unique(array_map(fn ($m) => $m->id, $models)));
+        // Scattered copies are spread over the models.
+        $share = (int) ceil($data['count'] / max(1, count($ids)));
 
-        return $this->worldEdit($this->map($request), $request, 'place_props scatter', [
+        return $this->worldEdit($map, $request, 'place_props scatter', [
             'kind' => 'props',
             'action' => 'scatter',
             'shape' => $shape,
@@ -104,6 +114,35 @@ class PlaceProps extends WaterwaysTool
                 'avoid_water' => isset($data['avoid_water']) ? (bool) $data['avoid_water'] : null,
                 'seed' => $data['seed'] ?? null,
             ], fn ($v) => $v !== null),
-        ]);
+        ], fn () => $this->budgetNotes($map, $request, $models, array_fill_keys($ids, $share)));
+    }
+
+    /**
+     * Performance warnings for the models just placed: over-budget models, and many copies of heavy or
+     * vegetation models (from the saved props when the edit was saved, else the requested counts).
+     *
+     * @param  array<int, PropModel>  $models
+     * @param  array<int, int>  $placed  copies requested per model id
+     * @return array<string, mixed>
+     */
+    private function budgetNotes(Map $map, Request $request, array $models, array $placed): array
+    {
+        $totals = $placed;
+        if ($request->get('save') !== false) {
+            $file = json_decode((string) app(TerrainStorage::class)->read($map, 'props'), true);
+            $saved = collect(is_array($file) && is_array($file['props'] ?? null) ? $file['props'] : [])->countBy('model')->all();
+            $totals = array_intersect_key($saved, $placed) + $placed;
+        }
+
+        $warnings = [];
+        foreach (collect($models)->unique('id') as $model) {
+            $model->measure();
+            $warning = PropBudget::placementWarning($model, (int) ($totals[$model->id] ?? 0));
+            if ($warning !== null) {
+                $warnings[] = $warning;
+            }
+        }
+
+        return $warnings !== [] ? ['performance_warnings' => $warnings] : [];
     }
 }

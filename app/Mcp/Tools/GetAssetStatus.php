@@ -2,6 +2,7 @@
 
 namespace App\Mcp\Tools;
 
+use App\Mcp\Assets\PropBudget;
 use App\Mcp\ToolError;
 use App\Models\FoliageAsset;
 use App\Models\Material;
@@ -44,6 +45,9 @@ class GetAssetStatus extends WaterwaysTool
      */
     public static function propSummary(PropModel $prop): array
     {
+        $prop->measure();
+        $warnings = PropBudget::warnings($prop);
+
         return [
             'type' => 'prop_model',
             'id' => $prop->id,
@@ -54,6 +58,11 @@ class GetAssetStatus extends WaterwaysTool
             'message' => $prop->status_message,
             'target_height_m' => $prop->target_height,
             'dimensions_m' => $prop->dimensions,
+            // Per placed copy; each mesh is a draw call per copy and render pass.
+            'triangles' => $prop->triangles,
+            'meshes' => $prop->meshes,
+            'materials' => $prop->materials,
+            ...($warnings !== [] ? ['budget_warnings' => $warnings] : []),
             'tags' => $prop->tags ?? [],
             'model_url' => $prop->toGameArray()['model_url'],
             'thumbnail_url' => $prop->toGameArray()['thumbnail_url'],

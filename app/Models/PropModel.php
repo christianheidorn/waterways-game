@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Mcp\Assets\GltfInspector;
 use Database\Factories\PropModelFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -22,10 +23,13 @@ use Illuminate\Support\Facades\Storage;
  * @property string|null $thumbnail_path
  * @property float|null $target_height
  * @property array{x: float, y: float, z: float}|null $dimensions
+ * @property int|null $triangles
+ * @property int|null $meshes
+ * @property int|null $materials
  * @property list<string>|null $tags
  * @property string|null $prompt
  */
-#[Fillable(['name', 'category', 'source', 'status', 'status_message', 'model_path', 'thumbnail_path', 'target_height', 'dimensions', 'tags', 'prompt'])]
+#[Fillable(['name', 'category', 'source', 'status', 'status_message', 'model_path', 'thumbnail_path', 'target_height', 'dimensions', 'triangles', 'meshes', 'materials', 'tags', 'prompt'])]
 class PropModel extends Model
 {
     /** @use HasFactory<PropModelFactory> */
@@ -41,6 +45,9 @@ class PropModel extends Model
         return [
             'target_height' => 'float',
             'dimensions' => 'array',
+            'triangles' => 'integer',
+            'meshes' => 'integer',
+            'materials' => 'integer',
             'tags' => 'array',
         ];
     }
@@ -56,6 +63,34 @@ class PropModel extends Model
     }
 
     /**
+     * Fills triangles / meshes / materials from the stored GLB when they were never measured (models
+     * made before they were recorded). Returns whether they are known.
+     */
+    public function measure(): bool
+    {
+        if ($this->triangles !== null) {
+            return true;
+        }
+
+        $disk = Storage::disk('public');
+        if (! $this->isReady() || ! $disk->exists((string) $this->model_path)) {
+            return false;
+        }
+
+        $document = GltfInspector::document((string) $disk->get((string) $this->model_path));
+        if ($document === null) {
+            return false;
+        }
+
+        // Not a change the user made: keep updated_at (it versions the model URL).
+        $this->timestamps = false;
+        $this->forceFill(GltfInspector::stats($document))->save();
+        $this->timestamps = true;
+
+        return true;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function toGameArray(): array
@@ -68,6 +103,9 @@ class PropModel extends Model
             'thumbnail_url' => $this->thumbnail_path ? '/storage/'.$this->thumbnail_path.'?v='.($this->updated_at?->timestamp ?? 0) : null,
             'target_height' => $this->target_height,
             'dimensions' => $this->dimensions,
+            'triangles' => $this->triangles,
+            'meshes' => $this->meshes,
+            'materials' => $this->materials,
         ];
     }
 }

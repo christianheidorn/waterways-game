@@ -7,6 +7,7 @@ use App\Mcp\Assets\EditorBakes;
 use App\Mcp\Assets\GltfInspector;
 use App\Mcp\Assets\LoadedModel;
 use App\Mcp\Assets\ModelSource;
+use App\Mcp\Assets\PropBudget;
 use App\Mcp\ToolError;
 use App\Models\FoliageAsset;
 use App\Models\FoliageType;
@@ -27,7 +28,7 @@ use RuntimeException;
 #[Description(<<<'TXT'
 Imports a 3D model (glTF 2.0: .glb, or .gltf) into the project, as a prop (kind "prop": a placeable object such as a hut, bridge, fence or boulder; see place_props) or as a foliage asset (kind "foliage": a plant or rock model for foliage types).
 Source: exactly one of `path` (a file on the user's computer, e.g. a .glb exported by Blender MCP to ~/Desktop/hut.glb), `url` (http/https download) or `base64` (small .glb files, ≤ 15 MB). Limit 100 MB. Props must be .glb; foliage also accepts .gltf with its .bin / textures next to it.
-Props are ready right away (dimensions are measured from the file). Model tips: metres, +Y up, the pivot at the base; set target_height to the real-world height so the game scales it.
+Props are ready right away (dimensions, triangles, meshes and materials are measured from the file; over budget — more than 20k triangles or 8 materials — the result warns). Trees, bushes and plants belong in foliage (LODs, impostors, GPU culling), not props. Model tips: metres, +Y up, the pivot at the base; set target_height to the real-world height so the game scales it.
 Foliage assets must be optimised ("baked": LODs, impostor) in a browser: when an editor is open this happens there automatically (the tool waits up to ~90 s), else the asset waits until the user opens the studio's Foliage page or an editor (then call bake_foliage_asset). create_type: true also creates a foliage type using the asset (edit it with save_foliage_type, add it to ground cover with update_terrain_layer).
 TXT)]
 class ImportModel extends WaterwaysTool
@@ -84,7 +85,9 @@ class ImportModel extends WaterwaysTool
 
         $height = $this->height($request);
         $dimensions = GltfInspector::dimensions($model->document);
+        $stats = GltfInspector::stats($model->document);
         $prop = PropModel::query()->create([
+            ...$stats,
             'name' => $this->assetName($request, $model),
             'category' => $category,
             'source' => $request->get('url') ? 'url' : 'upload',
@@ -100,10 +103,15 @@ class ImportModel extends WaterwaysTool
         // Open editors show the new model in their Place → Props palette.
         $this->bridge()->notifyAll('refresh', ['parts' => ['prop_models']]);
 
+        $warnings = PropBudget::warnings($prop);
+
         return $this->json([
             'prop_model' => GetAssetStatus::propSummary($prop),
             'note' => $dimensions === null ? 'The size of the model could not be measured from the file.' : null,
-            'next' => 'Place it with place_props (model '.$prop->id.').',
+            ...($warnings !== [] ? ['warnings' => $warnings] : []),
+            'next' => $warnings !== []
+                ? 'The model is over the prop budget ('.number_format(PropBudget::TRIANGLES).' triangles, '.PropBudget::MATERIALS.' materials): fix it first, or place only a few copies with place_props (model '.$prop->id.') and check profile_performance.'
+                : 'Place it with place_props (model '.$prop->id.').',
         ]);
     }
 

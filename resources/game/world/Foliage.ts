@@ -431,6 +431,8 @@ export class Foliage {
     private readonly lastCoverPos = new THREE.Vector3(Infinity, 0, 0);
     /** Bumped whenever instance data changes (see revision). */
     private dataRevision = 0;
+    /** Hidden for a performance measurement (see setHidden): placed foliage / ground cover. */
+    private readonly hidden = { placed: false, cover: false };
 
     /** `groundColor`: terrain colour the roots of grass etc. blend into (none: they keep their own). */
     constructor(groundColor: GroundColorSource | null = null) {
@@ -1497,6 +1499,34 @@ export class Foliage {
     }
 
     /**
+     * Placed instances of a type inside a world rect, each counted with `weight(x, z)` (0-1). Ground
+     * cover is not counted.
+     */
+    countWhere(
+        typeId: number,
+        rect: { x0: number; z0: number; x1: number; z1: number },
+        weight: (x: number, z: number) => number,
+    ): number {
+        const renderer = this.renderers.get(typeId);
+
+        if (!renderer || renderer.cover) {
+            return 0;
+        }
+
+        let sum = 0;
+
+        for (const cell of this.cellsInRect(renderer, rect)) {
+            const data = cell.data;
+
+            for (let i = 0; i < data.length; i += FOLIAGE_STRIDE) {
+                sum += weight(data[i], data[i + 2]);
+            }
+        }
+
+        return sum;
+    }
+
+    /**
      * Removes instances of the given types (null: all) inside a world rect, each with the probability
      * `chance(x, z)` (0-1). Ground cover is never erased (it follows the terrain layers). Returns the
      * number removed.
@@ -1944,6 +1974,66 @@ export class Foliage {
         if (this.gl) {
             this.renderPendingImpostor(this.gl);
         }
+
+        if (this.hidden.placed || this.hidden.cover) {
+            this.applyHidden();
+        }
+    }
+
+    /**
+     * Hides placed foliage and / or ground cover without changing any data (the performance profile
+     * measures what they cost): they are not drawn in any pass, and their GPU culling / growth passes
+     * pause. Everything is shown again as before once both are false.
+     */
+    setHidden(placed: boolean, cover: boolean): void {
+        const wasHidden = this.hidden.placed || this.hidden.cover;
+        this.hidden.placed = placed;
+        this.hidden.cover = cover;
+        this.applyHidden();
+
+        if (wasHidden && !placed && !cover) {
+            // Layer 0 is the only one foliage uses: restore it on everything (also meshes made meanwhile).
+            this.group.traverse((o) => o.layers.enable(0));
+            this.needsEval = true;
+        }
+    }
+
+    private isHidden(renderer: TypeRenderer): boolean {
+        return renderer.cover ? this.hidden.cover : this.hidden.placed;
+    }
+
+    /** GPU path: per-type groups; CPU path: the cell / chunk / merged meshes leave layer 0 (not drawn). */
+    private applyHidden(): void {
+        for (const renderer of this.renderers.values()) {
+            const hide = this.isHidden(renderer);
+
+            if (renderer.gpu) {
+                renderer.gpu.group.visible = !hide;
+                continue;
+            }
+
+            const meshes: (THREE.Mesh | null)[] = [];
+
+            for (const cell of renderer.cells.values()) {
+                meshes.push(cell.mesh, cell.near);
+            }
+
+            for (const chunk of renderer.chunks.values()) {
+                meshes.push(chunk.mesh, chunk.near);
+            }
+
+            for (const merged of renderer.merged.values()) {
+                meshes.push(merged.mesh);
+            }
+
+            for (const mesh of meshes) {
+                if (hide) {
+                    mesh?.layers.disable(0);
+                } else {
+                    mesh?.layers.enable(0);
+                }
+            }
+        }
     }
 
     /**
@@ -2009,7 +2099,8 @@ export class Foliage {
         this.coverField?.sync();
 
         for (const type of this.renderers.values()) {
-            if (type.gpu) {
+            // Hidden types (setHidden) keep their pending work for when they show again.
+            if (type.gpu && !this.isHidden(type)) {
                 nodes.push(...type.gpu.computeNodes());
             }
         }
@@ -2020,7 +2111,9 @@ export class Foliage {
 
         // After the passes were submitted: the read-backs copy this frame's results.
         for (const type of this.renderers.values()) {
-            type.gpu?.updateStats(renderer, dt);
+            if (!this.isHidden(type)) {
+                type.gpu?.updateStats(renderer, dt);
+            }
         }
 
         frame.setPrevious(camera);

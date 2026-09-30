@@ -11,7 +11,7 @@ use Laravel\Mcp\Server\Attributes\Description;
 use Laravel\Mcp\Server\Attributes\Name;
 
 #[Name('edit_foliage')]
-#[Description('Places or removes individual foliage (saved with the map), live in the open editor (one undo step; saved unless save is false). "scatter" places the given types inside a shape, following each type\'s slope / altitude / water rules, at `density` × the type\'s own density, optionally in groves (`clustering` 0-1). "clear" removes placed instances of the given types (all when omitted) inside a shape, e.g. for a clearing, a road or a building site. For large natural areas prefer ground cover (paint a layer whose biome grows the plants): it regrows by itself when the terrain changes.')]
+#[Description('Places or removes individual foliage (saved with the map), live in the open editor (one undo step; saved unless save is false). "scatter" fills a shape with the given types up to `density` × the type\'s own density (instances already there count, so scattering again does not stack), following each type\'s slope / altitude / water rules, optionally in groves (`clustering` 0-1). "clear" removes placed instances of the given types (all when omitted) inside a shape, e.g. for a clearing, a road or a building site. For large natural areas prefer ground cover (paint a layer whose biome grows the plants): it regrows by itself when the terrain changes.')]
 class EditFoliage extends WaterwaysTool
 {
     use ShapeArgument;

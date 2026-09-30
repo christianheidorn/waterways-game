@@ -169,6 +169,8 @@ export class SunShadows {
     private readonly nearCascade: ShadowCascade;
     private readonly liveRoots: THREE.Object3D[] = [];
     private enabled = false;
+    /** Maps are not re-rendered (performance profile); they keep their last contents. */
+    private paused = false;
     private distance = 220;
     private nearRadius = 55;
     /** Focus and light direction the far cascade was last placed for (valid: no refresh needed). */
@@ -239,6 +241,50 @@ export class SunShadows {
         this.farValid = false;
     }
 
+    /**
+     * Stops (true) or resumes re-rendering the shadow maps, to measure what they cost: the scene keeps
+     * sampling the last maps, so no shader changes. Resuming refreshes the far cascade.
+     */
+    setPaused(paused: boolean): void {
+        if (paused === this.paused) {
+            return;
+        }
+
+        this.paused = paused;
+        this.near.shadow.autoUpdate = !paused;
+
+        if (paused) {
+            this.far.shadow.autoUpdate = false;
+        } else {
+            this.farValid = false;
+        }
+    }
+
+    /** Cascades and map sizes, for the performance profile. */
+    describe(): Record<string, unknown> {
+        return {
+            enabled: this.enabled,
+            distance_m: this.distance,
+            cascades: this.enabled
+                ? [
+                      {
+                          name: 'near',
+                          radius_m: this.nearRadius,
+                          map_size: this.near.shadow.mapSize.x,
+                          updates: 'every frame',
+                      },
+                      {
+                          name: 'far',
+                          radius_m: this.distance,
+                          map_size: this.far.shadow.mapSize.x,
+                          updates:
+                              'cached: re-rendered when the view moves far, the sun turns or casters change (edits, props, ground cover growth)',
+                      },
+                  ]
+                : [],
+        };
+    }
+
     /** Objects (and their descendants) that move on their own: only the near cascade draws them. */
     addLiveCaster(object: THREE.Object3D): void {
         this.liveRoots.push(object);
@@ -251,7 +297,7 @@ export class SunShadows {
 
     /** Places the cascades around the focus; `direction` points towards the light. */
     update(dt: number, focus: THREE.Vector3, direction: THREE.Vector3): void {
-        if (!this.enabled) {
+        if (!this.enabled || this.paused) {
             return;
         }
 

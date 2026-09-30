@@ -23,6 +23,7 @@ use Throwable;
 #[Description(<<<'TXT'
 Generates a textured 3D model with Meshy (uses the project's Meshy key and credits; a model takes about 2–6 minutes), as a prop (kind "prop") or a foliage asset (kind "foliage"). Runs in the background (needs the queue worker that `composer dev` starts): returns the id at once; poll get_asset_status every 30 s.
 Engines: "meshy_text" (default: from the prompt), "meshy_image" (props: from image_path, e.g. a reference drawn with generate_image purpose "reference"; foliage: the OpenRouter image model paints a concept first), "card" (foliage only, not rocks: one OpenRouter image baked into crossed cards; cheap, good for grass, flowers, small plants; needs target_height).
+Trees, bushes and plants should be kind "foliage" (LODs, impostors, GPU culling, ground cover); props are for buildings, structures and unique objects and are remeshed to about 15k triangles.
 Finished props are ready to place. Finished foliage assets are "awaiting_bake": call bake_foliage_asset (needs an open editor) to make them usable.
 For full control over a model's shape, build it in Blender (Blender MCP) and use import_model instead.
 TXT)]

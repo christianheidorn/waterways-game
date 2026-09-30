@@ -5,6 +5,10 @@ import type { TerrainViewMode } from '../world/TerrainDebugView';
 import type { Heightfield } from '../world/Heightfield';
 import { bakeFoliageAssetInBackground } from '../editor/agent/bakeFoliageAsset';
 import type { FoliageBakeJob } from '../editor/agent/bakeFoliageAsset';
+import type {
+    ProfileOptions,
+    ProfileSystem,
+} from '../editor/agent/profilePerformance';
 
 /** What the agent commands need from the game (built by Game; keeps them out of its internals). */
 export type AgentContext = {
@@ -37,6 +41,8 @@ export type AgentContext = {
     reload: () => void;
     editorState: () => Record<string, unknown>;
     stats: () => Record<string, unknown>;
+    /** Measures the frame and what each system costs (editor/agent/profilePerformance). */
+    profile: (options: ProfileOptions) => Promise<Record<string, unknown>>;
 };
 
 const VIEW_MODES: readonly TerrainViewMode[] = [
@@ -222,6 +228,47 @@ export function createAgentHost(ctx: AgentContext): AgentBridgeHost {
         return result;
     };
 
+    /** profile_performance: from the current view or a given camera, which is put back afterwards. */
+    const profile = async (payload: Record<string, unknown>) => {
+        requireVisible();
+        const saved = {
+            position: ctx.camera.position.clone(),
+            quaternion: ctx.camera.quaternion.clone(),
+        };
+        const moves =
+            payload.position !== undefined ||
+            (payload.view !== undefined && payload.view !== 'current');
+
+        if (moves) {
+            requireEdit('placing the camera');
+            place(payload);
+        }
+
+        try {
+            await settle(moves);
+
+            return {
+                mode: ctx.mode(),
+                camera: cameraState(),
+                ...(await ctx.profile({
+                    sampleFrames: Number(payload.sample_frames) || undefined,
+                    warmupFrames: Number(payload.warmup_frames) || undefined,
+                    systems: Array.isArray(payload.systems)
+                        ? (payload.systems as ProfileSystem[])
+                        : undefined,
+                    budgetMs: Number(payload.budget_ms) || undefined,
+                })),
+            };
+        } finally {
+            if (moves && !payload.keep_camera) {
+                ctx.camera.position.copy(saved.position);
+                ctx.camera.quaternion.copy(saved.quaternion);
+                ctx.camera.updateMatrixWorld();
+                ctx.syncFlyCamera();
+            }
+        }
+    };
+
     /** Waits a few frames, and after a camera move until foliage around it has grown. */
     const settle = async (moved: boolean) => {
         const start = performance.now();
@@ -246,6 +293,8 @@ export function createAgentHost(ctx: AgentContext): AgentBridgeHost {
                     return { ...state(), stats: ctx.stats() };
                 case 'screenshot':
                     return screenshot(payload);
+                case 'profile':
+                    return profile(payload);
                 case 'camera':
                     requireEdit('moving the camera');
                     place(payload);

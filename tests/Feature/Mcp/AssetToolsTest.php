@@ -79,6 +79,34 @@ class AssetToolsTest extends TestCase
         return 'glTF'.pack('V2', 2, 12 + strlen($body)).$body;
     }
 
+    /**
+     * A GLB whose JSON describes a heavy model (the inspector reads only the JSON): 12 meshes with 10
+     * materials, 30k triangles in all.
+     */
+    private function heavyGlb(): string
+    {
+        $bin = str_repeat("\0", 12);
+        $primitives = array_map(fn ($i) => ['attributes' => ['POSITION' => 0], 'indices' => 1, 'material' => $i % 10], range(0, 11));
+        $json = json_encode([
+            'asset' => ['version' => '2.0'],
+            'scene' => 0,
+            'scenes' => [['nodes' => [0]]],
+            'nodes' => [['mesh' => 0]],
+            'meshes' => [['primitives' => $primitives]],
+            'materials' => array_fill(0, 10, ['name' => 'm']),
+            'accessors' => [
+                ['bufferView' => 0, 'componentType' => 5126, 'count' => 1, 'type' => 'VEC3', 'min' => [0, 0, 0], 'max' => [1, 12, 1]],
+                ['bufferView' => 0, 'componentType' => 5125, 'count' => 7500, 'type' => 'SCALAR'],
+            ],
+            'bufferViews' => [['buffer' => 0, 'byteLength' => strlen($bin)]],
+            'buffers' => [['byteLength' => strlen($bin)]],
+        ]);
+        $json .= str_repeat(' ', (4 - strlen($json) % 4) % 4);
+        $body = pack('V2', strlen($json), 0x4E4F534A).$json.pack('V2', strlen($bin), 0x004E4942).$bin;
+
+        return 'glTF'.pack('V2', 2, 12 + strlen($body)).$body;
+    }
+
     private function file(string $name, string $contents): string
     {
         file_put_contents($this->dir.'/'.$name, $contents);
@@ -103,6 +131,53 @@ class AssetToolsTest extends TestCase
         $this->assertNotNull($doc);
         $this->assertSame(['x' => 2.0, 'y' => 4.0, 'z' => 1.0], GltfInspector::dimensions($doc));
         $this->assertNull(GltfInspector::document('not a model'));
+    }
+
+    public function test_stats_count_triangles_meshes_and_materials_through_the_hierarchy(): void
+    {
+        $this->assertSame(['triangles' => 1, 'meshes' => 1, 'materials' => 1], GltfInspector::stats(GltfInspector::document($this->glb()) ?? []));
+
+        $doc = [
+            'asset' => ['version' => '2.0'],
+            'scenes' => [['nodes' => [0, 3]]],
+            'nodes' => [
+                ['children' => [1, 2]],
+                ['mesh' => 0],
+                // The same mesh again: drawn twice.
+                ['mesh' => 0, 'translation' => [3, 0, 0]],
+                ['mesh' => 1, 'extensions' => ['EXT_mesh_gpu_instancing' => ['attributes' => ['TRANSLATION' => 4]]]],
+                // Not in the scene.
+                ['mesh' => 0],
+            ],
+            'meshes' => [
+                ['primitives' => [
+                    ['attributes' => ['POSITION' => 0], 'indices' => 1, 'material' => 0],
+                    ['attributes' => ['POSITION' => 0], 'material' => 1],
+                    ['attributes' => ['POSITION' => 0], 'mode' => 1],
+                ]],
+                ['primitives' => [['attributes' => ['POSITION' => 2], 'indices' => 3, 'mode' => 5, 'material' => 0]]],
+            ],
+            'accessors' => [['count' => 30], ['count' => 300], ['count' => 12], ['count' => 12], ['count' => 5]],
+        ];
+
+        // Mesh 0: 100 + 10 triangles (+ lines) twice; mesh 1: a 12-index strip (10) × 5 instances.
+        $this->assertSame(['triangles' => 270, 'meshes' => 7, 'materials' => 3], GltfInspector::stats($doc));
+    }
+
+    public function test_import_model_warns_about_props_over_budget(): void
+    {
+        WaterwaysServer::tool(ImportModel::class, ['kind' => 'prop', 'path' => $this->file('pine_tree.glb', $this->heavyGlb()), 'category' => 'nature'])
+            ->assertOk()
+            ->assertSee(['"triangles": 30000', '"materials": 10', 'warnings', 'decimate', 'Merge materials', 'import trees, bushes and plants as foliage', 'profile_performance']);
+
+        $prop = PropModel::query()->sole();
+        $this->assertSame([30000, 12, 10], [$prop->triangles, $prop->meshes, $prop->materials]);
+        $this->assertSame(30000, $prop->toGameArray()['triangles']);
+
+        // Models from before triangles were recorded are measured from their file on first look.
+        $prop->forceFill(['triangles' => null, 'meshes' => null, 'materials' => null])->save();
+        WaterwaysServer::tool(ListPropModels::class, [])->assertOk()->assertSee(['"triangles": 30000', 'budget_warnings']);
+        $this->assertSame(30000, $prop->refresh()->triangles);
     }
 
     public function test_import_model_stores_a_prop_from_a_local_glb(): void
@@ -351,8 +426,11 @@ class AssetToolsTest extends TestCase
         $this->assertTrue($prop->isReady(), (string) $prop->status_message);
         $this->assertSame("props/{$prop->id}/model.glb", $prop->model_path);
         $this->assertSame(['x' => 2, 'y' => 4, 'z' => 1], $prop->dimensions);
+        $this->assertSame(1, $prop->triangles);
+        $this->assertNull($prop->status_message, 'Within budget: no warning');
         Http::assertSent(fn (HttpRequest $r) => $r->url() === 'https://api.meshy.ai/openapi/v2/text-to-3d' && $r['mode'] === 'preview'
-            && str_contains($r['prompt'], 'stone bridge') && str_contains($r['prompt'], 'game-ready 3D prop'));
+            && str_contains($r['prompt'], 'stone bridge') && str_contains($r['prompt'], 'game-ready 3D prop')
+            && $r['target_polycount'] === GenerateMeshyProp::POLYCOUNT);
     }
 
     public function test_get_asset_status_reports_materials_and_unknown_ids(): void

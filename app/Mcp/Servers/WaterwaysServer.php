@@ -32,6 +32,7 @@ use App\Mcp\Tools\ManageSnapshots;
 use App\Mcp\Tools\OpenEditor;
 use App\Mcp\Tools\PaintTerrain;
 use App\Mcp\Tools\PlaceProps;
+use App\Mcp\Tools\ProfilePerformance;
 use App\Mcp\Tools\RegenerateTerrain;
 use App\Mcp\Tools\RemoveProps;
 use App\Mcp\Tools\SampleTerrain;
@@ -74,13 +75,15 @@ Building the world (live in the open editor, each call one undo step, saved by d
 - edit_water: lake (flood a basin to a level), river (along a path, downhill from its first point), erase.
 - paint_terrain: paint layers (optionally only on matching slope / height); painted layers grow their ground cover, so apply a biome to a slot and paint it to plant forests, meadows, beaches.
 - edit_foliage: scatter or clear individual plants in an area.
+- Vegetation (trees, bushes, plants, grass) is foliage: foliage types placed with edit_foliage or grown as ground cover (apply_biome / update_terrain_layer + paint_terrain). Foliage gets LODs, impostors and GPU culling, so thousands of trees stay cheap. Props (place_props) are for buildings, structures and unique objects: every copy draws its full model in every pass, so never plant forests with props.
 - A good order: landforms → water → paint layers / biomes → details; look (take_screenshot) after each step; control_editor undo reverts the last step.
+- Check performance with profile_performance after large placements (many props, dense foliage, new biomes): it measures fps, GPU time per pass and what each system (props, foliage, ground cover, water, shadows) costs in ms, and names heavy models.
 
 Requests from the user
 - The user can outline an area in the editor and ask for something to be built there (with a note, reference images and a screenshot). list_requests shows open ones; get_request gives everything (the outline works directly as a polygon shape); update_request reports in_progress / needs_input / done with a message and result screenshots.
 
 Assets (3D models, images, materials)
-- import_model brings a .glb into the project as a prop or foliage model: e.g. one you built with Blender MCP and exported to a file on this computer (metres, +Y up, pivot at the base).
+- import_model brings a .glb into the project as a prop or foliage model: e.g. one you built with Blender MCP and exported to a file on this computer (metres, +Y up, pivot at the base). Keep props within budget (about 20k triangles, ≤ 8 materials; list_prop_models and get_asset_status show triangles / meshes / materials): decimate heavy models in Blender first. Trees and plants go in as foliage.
 - generate_image (OpenRouter), generate_material (PBR terrain materials from a prompt or an image) and generate_model (Meshy text / image to 3D) use the project's configured services and cost credits; generation runs in the background: poll get_asset_status.
 - Foliage models must be baked (LODs) before use: bake_foliage_asset does it in the open editor.
 
@@ -125,6 +128,7 @@ class WaterwaysServer extends Server
         SaveLayerAsBiome::class,
         SaveFoliageType::class,
         PlaceProps::class,
+        ProfilePerformance::class,
         RemoveProps::class,
         ListProps::class,
         ManageSnapshots::class,

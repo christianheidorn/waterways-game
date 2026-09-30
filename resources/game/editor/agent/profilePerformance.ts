@@ -240,6 +240,11 @@ function summarize(samples: FrameSample[]): Summary {
 
 /** What switching a system off saved (positive = the system costs this much). */
 function cost(on: Summary, off: Summary): Record<string, unknown> {
+    // Too slow to render a frame within the time slot (e.g. no GPU): no measurement, not "free".
+    if (on.frames === 0 || off.frames === 0) {
+        return { unmeasured: 'no frames rendered in time', frames: off.frames };
+    }
+
     return {
         cost_ms: round2(on.frame_ms - off.frame_ms),
         gpu_ms:
@@ -414,36 +419,58 @@ function describeProps(host: PerformanceHost): Record<string, unknown> {
         }
     }
 
+    // Instanced props (Props.stats): triangles per LOD and how many copies each LOD drew last frame.
+    const stats = new Map(props.stats().map((st) => [st.model, st]));
     const models = [...counts.entries()]
         .map(([id, count]) => {
             const ref = library.get(id);
+            const st = stats.get(id);
             const sample = samples.get(id);
             const measured = sample ? objectStats(sample) : null;
-            const triangles = measured?.triangles ?? ref?.triangles ?? null;
+            const triangles =
+                st?.triangles[0] ??
+                measured?.triangles ??
+                ref?.triangles ??
+                null;
+            const drawn = st?.visible.reduce((a, b) => a + b, 0) ?? null;
+            const drawnTriangles = st
+                ? st.visible.reduce(
+                      (sum, n, lod) => sum + n * (st.triangles[lod] ?? 0),
+                      0,
+                  )
+                : null;
 
             return {
                 model_id: id,
                 name: ref?.name ?? `model ${id}`,
                 instances: count,
-                in_view: samples.size ? (visible.get(id) ?? 0) : null,
+                in_view:
+                    drawn ?? (samples.size ? (visible.get(id) ?? 0) : null),
                 triangles_per_instance: triangles,
-                meshes_per_instance: measured?.meshes ?? ref?.meshes ?? null,
+                lod_triangles: st?.triangles ?? null,
+                drawn_per_lod: st?.visible ?? null,
+                meshes_per_instance:
+                    st?.parts ?? measured?.meshes ?? ref?.meshes ?? null,
                 materials_per_instance:
                     measured?.materials ?? ref?.materials ?? null,
                 casts_shadow: measured?.castShadow ?? null,
                 triangles_total: triangles !== null ? triangles * count : null,
-                // Without instancing every mesh of every prop is its own draw, in each pass.
-                draw_calls_per_pass: measured?.instanced
-                    ? null
-                    : measured
-                      ? measured.meshes * count
-                      : null,
+                // With LODs and distance culling: what one pass actually draws.
+                triangles_drawn: drawnTriangles,
+                // Instanced: one draw per material per LOD in use, whatever the number of copies.
+                draw_calls_per_pass: st
+                    ? st.parts * st.visible.filter((n) => n > 0).length
+                    : measured?.instanced
+                      ? null
+                      : measured
+                        ? measured.meshes * count
+                        : null,
             };
         })
         .sort(
             (a, b) =>
-                (b.triangles_total ?? b.instances) -
-                (a.triangles_total ?? a.instances),
+                (b.triangles_drawn ?? b.triangles_total ?? b.instances) -
+                (a.triangles_drawn ?? a.triangles_total ?? a.instances),
         );
     const group = objectStats(props.group);
 

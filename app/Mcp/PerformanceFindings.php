@@ -32,6 +32,14 @@ class PerformanceFindings
         $gpu = isset($frame['gpu_ms']) ? (float) $frame['gpu_ms'] : null;
         $noise = (float) ($profile['noise_ms'] ?? 0);
 
+        if ($frame !== [] && (int) ($frame['frames'] ?? 1) === 0) {
+            return [
+                'No frame finished during the measurement: the editor renders too slowly here (for example a machine without a GPU, or a hidden / background tab), so nothing could be measured. The breakdown of what is in the scene (systems) still applies.',
+                ...self::props($profile),
+                ...self::foliage($profile),
+            ];
+        }
+
         if ($frame !== []) {
             $findings[] = sprintf(
                 'The frame takes %s ms (%d fps; CPU %s ms, GPU %s)%s, %s draw calls, %s triangles.',
@@ -141,11 +149,15 @@ class PerformanceFindings
             if (! is_numeric($tris)) {
                 continue;
             }
-            $total = (int) $tris * $count;
+            // Instanced props with LODs report what one pass really draws.
+            $lods = is_numeric($m['triangles_drawn'] ?? null);
+            $total = $lods ? (int) $m['triangles_drawn'] : (int) $tris * $count;
             $vegetation = preg_match('/\b(tree|pine|fir|spruce|oak|birch|palm|conifer|bush|shrub|plant|grass|flower)s?\b/i', (string) ($m['name'] ?? '')) === 1;
-            if ($tris > PropBudget::TRIANGLES || $total > PropBudget::PLACED_TRIANGLES) {
+            if (($lods ? $total > PropBudget::PLACED_TRIANGLES : ($tris > PropBudget::TRIANGLES || $total > PropBudget::PLACED_TRIANGLES))) {
                 $out[] = sprintf(
-                    'Prop model "%s" has %s triangles × %s placed = %s triangles per pass (no LODs: the view, each shadow cascade and the water reflection draw them all). %s',
+                    $lods
+                        ? 'Prop model "%s" has %s triangles; its %s copies draw %s triangles per pass even with LODs (the view, the near shadow cascade and the water reflection). %s'
+                        : 'Prop model "%s" has %s triangles × %s placed = %s triangles per pass (no LODs: the view, each shadow cascade and the water reflection draw them all). %s',
                     $m['name'] ?? '?', self::count((int) $tris), number_format($count), self::count($total),
                     $vegetation
                         ? 'Vegetation belongs in foliage: import it as a foliage asset (import_model kind "foliage", create_type) and scatter it with edit_foliage or a ground cover biome; foliage gets LODs, impostors and GPU culling.'

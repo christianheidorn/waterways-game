@@ -121,4 +121,16 @@ class PerformanceToolsTest extends TestCase
         $this->assertStringContainsString('capped', $findings[2]);
         $this->assertCount(3, $findings);
     }
+
+    public function test_a_profile_without_rendered_frames_says_nothing_could_be_measured(): void
+    {
+        $findings = PerformanceFindings::analyse([
+            'frame' => ['frames' => 0, 'fps' => 0, 'cpu_ms' => 0, 'gpu_ms' => null, 'frame_ms' => 0, 'draw_calls' => 0, 'triangles' => 0],
+            'noise_ms' => 0,
+            'costs' => [['system' => 'props', 'unmeasured' => 'no frames rendered in time', 'frames' => 0]],
+        ]);
+
+        $this->assertStringContainsString('No frame finished during the measurement', $findings[0]);
+        $this->assertStringNotContainsString('Negligible', implode(' ', $findings));
+    }
 }

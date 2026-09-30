@@ -186,9 +186,21 @@ terrain while the Request tool is open, coloured by status.
 
 Props are individual models (huts, bridges, fences, rocks, …) from the prop library (`prop_models`), placed on
 the map and saved with it (`props.json`). Their height follows the terrain, so sculpting afterwards keeps them
-grounded. In the editor, **Place → Props** shows the library: click to place, Shift+click removes the nearest
-prop, with random or fixed rotation and a size slider. Agents use `place_props` / `remove_props` /
-`list_props`.
+grounded. Agents use `place_props` / `remove_props` / `list_props`.
+
+In the editor, **Place → Props**:
+
+- **Place:** pick a model (the cards show rendered previews); a see-through preview under the cursor shows where
+  and how it lands. R / Shift+R turns it by 15°, or set the rotation slider (random rotation is a toggle), and the
+  size. Click to place, Shift+click removes the nearest prop.
+- **Select & edit:** click a placed prop to select it, drag to move it, R / Shift+R to turn it; the panel has
+  rotation, size and height above ground, Duplicate (Ctrl+D) and Delete. Esc deselects. Every change is one undo
+  step.
+
+Rendering: each model is merged per material and simplified into up to three LODs when it loads; all copies of a
+model are drawn instanced (one draw per material and LOD), pick their LOD by distance relative to the model's
+size and are hidden far away. Many copies of a model are cheap in draw calls, but triangles still add up:
+vegetation (forests) belongs in foliage types, which also get impostors and GPU culling.
 
 ## Assets
 

@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Mcp\Assets\AgentImages;
 use App\Mcp\Assets\GltfInspector;
+use App\Mcp\Assets\PropBudget;
 use App\Mcp\EditorBridge;
 use App\Models\PropModel;
 use App\Services\Ai\MeshyClient;
@@ -42,7 +43,12 @@ class GenerateMeshyProp implements ShouldQueue
 
     private const POLL_SECONDS = 10;
 
-    private const POLYCOUNT = 30000;
+    /**
+     * Target triangles of a generated prop (remeshed by Meshy): inside PropBudget::TRIANGLES, since
+     * every placed copy draws the whole model in each pass. Foliage models get their own budgets
+     * (FoliagePrompts::MESHY_POLYCOUNT) and LODs.
+     */
+    public const POLYCOUNT = 15000;
 
     /**
      * @param  array{route?: string, prompt?: string, style?: int, image_path?: string|null, model?: string|null}  $options
@@ -156,9 +162,15 @@ class GenerateMeshyProp implements ShouldQueue
                 $prop->forceFill([
                     'model_path' => $path,
                     'dimensions' => GltfInspector::dimensions($document),
+                    ...GltfInspector::stats($document),
                     'status' => 'ready',
                     'status_message' => null,
                 ])->save();
+                $warnings = PropBudget::warnings($prop);
+                if ($warnings !== []) {
+                    // Shown by get_asset_status (and the studio) as the model's message.
+                    $prop->forceFill(['status_message' => Str::limit(implode(' ', $warnings), 1000)])->save();
+                }
                 MeshyClient::forgetBalance();
                 // Open editors show the new model in their Place → Props palette.
                 app(EditorBridge::class)->notifyAll('refresh', ['parts' => ['prop_models']]);

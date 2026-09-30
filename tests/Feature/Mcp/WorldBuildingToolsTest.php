@@ -66,6 +66,24 @@ class WorldBuildingToolsTest extends TestCase
         return $edit['payload'];
     }
 
+    public function test_placing_many_heavy_or_vegetation_props_warns_about_performance(): void
+    {
+        $pine = PropModel::factory()->create(['name' => 'Pine', 'triangles' => 180000, 'meshes' => 2, 'materials' => 2]);
+        $hut = PropModel::factory()->create(['name' => 'Hut', 'triangles' => 4000, 'meshes' => 1, 'materials' => 1]);
+        app(TerrainStorage::class)->write($this->map, 'props', json_encode(['version' => 1, 'props' => array_map(
+            fn ($i) => ['id' => "p{$i}", 'model' => $pine->id, 'x' => $i, 'z' => 0, 'yaw' => 0, 'scale' => 1, 'offset' => 0],
+            range(1, 40),
+        )]));
+
+        WaterwaysServer::tool(PlaceProps::class, [
+            'shape' => ['type' => 'circle', 'center' => ['x' => 0, 'z' => 0], 'radius' => 50],
+            'models' => ['Pine'], 'count' => 20,
+        ])->assertOk()->assertSee(['performance_warnings', '40 copies of prop \"Pine\"', 'foliage', 'profile_performance']);
+
+        WaterwaysServer::tool(PlaceProps::class, ['placements' => [['model' => 'Hut', 'x' => 5, 'z' => 6]]])
+            ->assertOk()->assertDontSee('performance_warnings');
+    }
+
     public function test_sculpt_sends_a_normalised_shape_and_operation_to_the_editor(): void
     {
         WaterwaysServer::tool(SculptTerrain::class, [

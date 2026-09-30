@@ -521,7 +521,14 @@ export type ScatterParams = {
     seed?: number;
 };
 
-/** Places foliage inside the mask following each type's rules (hand-placed data: saved with the map). */
+/** Most instances one scatter places per type (hand-placed data is saved with the map). */
+const SCATTER_MAX = 200000;
+
+/**
+ * Places foliage inside the mask following each type's rules (hand-placed data: saved with the map).
+ * It fills up to the asked density: instances already there count, so scattering the same area again
+ * does not stack layer upon layer (small kinds are placed without a spacing check, and would).
+ */
 export function scatterFoliage(
     foliage: Foliage,
     ctx: FoliagePlacementContext,
@@ -538,11 +545,17 @@ export function scatterFoliage(
     const z1 = hf.rowToZ(mask.rect.z1);
     const placed: Record<string, number> = {};
     const area = mask.area;
+    const rect = { x0, z0, x1, z1 };
+    const weight = (x: number, z: number) => mask.weightAt(x, z);
 
     for (const type of p.types) {
+        const existing = foliage.countWhere(type.id, rect, weight);
         const target = Math.min(
-            200000,
-            Math.round((area * type.density * density) / 100),
+            SCATTER_MAX,
+            Math.max(
+                0,
+                Math.round((area * type.density * density) / 100 - existing),
+            ),
         );
         const spacing =
             Math.sqrt(100 / Math.max(0.01, type.density * density)) * 0.45;
@@ -578,6 +591,10 @@ export function scatterFoliage(
         }
 
         placed[type.name] = count;
+
+        if (existing >= 1) {
+            placed[`${type.name} (already there)`] = Math.round(existing);
+        }
     }
 
     return placed;

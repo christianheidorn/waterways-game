@@ -421,6 +421,10 @@ export type PropModelRef = {
     /** Real-world height the model is scaled to (m); null = its own size. */
     target_height: number | null;
     dimensions: { x: number; y: number; z: number } | null;
+    /** Triangles, meshes (draws) and materials of one instance, measured on import (null: unknown). */
+    triangles?: number | null;
+    meshes?: number | null;
+    materials?: number | null;
 };
 
 /** One placed prop. The height follows the terrain (plus `offset`), so sculpting keeps it grounded. */

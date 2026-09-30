@@ -87,6 +87,96 @@ class GltfInspector
     }
 
     /**
+     * Rendering cost of the model as the game draws it: triangles (summed over every mesh primitive of
+     * every node of the default scene, so a mesh used by several nodes counts each time, times
+     * EXT_mesh_gpu_instancing instances), meshes (primitives: each one draw call per instance and
+     * render pass) and distinct materials.
+     *
+     * @param  array<string, mixed>  $doc
+     * @return array{triangles: int, meshes: int, materials: int}
+     */
+    public static function stats(array $doc): array
+    {
+        $nodes = is_array($doc['nodes'] ?? null) ? $doc['nodes'] : [];
+        $scenes = is_array($doc['scenes'] ?? null) ? $doc['scenes'] : [];
+        $scene = $scenes[(int) ($doc['scene'] ?? 0)] ?? null;
+        $roots = is_array($scene['nodes'] ?? null) ? $scene['nodes'] : array_keys($nodes);
+
+        $triangles = 0;
+        $meshes = 0;
+        $materials = [];
+        $stack = array_map(fn ($i) => [(int) $i, 0], $roots);
+        $visits = 0;
+
+        while ($stack !== [] && $visits++ < 100000) {
+            [$index, $depth] = array_pop($stack);
+            $node = $nodes[$index] ?? null;
+            if (! is_array($node) || $depth > 64) {
+                continue;
+            }
+
+            $mesh = is_int($node['mesh'] ?? null) ? ($doc['meshes'][$node['mesh']] ?? null) : null;
+            if (is_array($mesh)) {
+                $instances = self::gpuInstances($doc, $node);
+                foreach (is_array($mesh['primitives'] ?? null) ? $mesh['primitives'] : [] as $primitive) {
+                    if (! is_array($primitive)) {
+                        continue;
+                    }
+                    $triangles += self::primitiveTriangles($doc, $primitive) * $instances;
+                    $meshes++;
+                    $materials[is_int($primitive['material'] ?? null) ? $primitive['material'] : 'default'] = true;
+                }
+            }
+
+            foreach (is_array($node['children'] ?? null) ? $node['children'] : [] as $child) {
+                $stack[] = [(int) $child, $depth + 1];
+            }
+        }
+
+        return ['triangles' => $triangles, 'meshes' => $meshes, 'materials' => count($materials)];
+    }
+
+    /**
+     * Triangles of one primitive: indices / 3 (or vertices / 3 without indices) for triangle lists,
+     * n − 2 for strips and fans, none for points and lines.
+     *
+     * @param  array<string, mixed>  $doc
+     * @param  array<string, mixed>  $primitive
+     */
+    private static function primitiveTriangles(array $doc, array $primitive): int
+    {
+        $mode = (int) ($primitive['mode'] ?? 4);
+        $accessor = is_int($primitive['indices'] ?? null)
+            ? ($doc['accessors'][$primitive['indices']] ?? null)
+            : ($doc['accessors'][$primitive['attributes']['POSITION'] ?? -1] ?? null);
+        $count = max(0, (int) ($accessor['count'] ?? 0));
+
+        return match ($mode) {
+            4 => intdiv($count, 3),
+            5, 6 => max(0, $count - 2),
+            default => 0,
+        };
+    }
+
+    /**
+     * Instances of a node's mesh drawn through EXT_mesh_gpu_instancing (1 without it).
+     *
+     * @param  array<string, mixed>  $doc
+     * @param  array<string, mixed>  $node
+     */
+    private static function gpuInstances(array $doc, array $node): int
+    {
+        $attributes = $node['extensions']['EXT_mesh_gpu_instancing']['attributes'] ?? null;
+        if (! is_array($attributes) || $attributes === []) {
+            return 1;
+        }
+
+        $accessor = $doc['accessors'][reset($attributes)] ?? null;
+
+        return max(1, (int) ($accessor['count'] ?? 1));
+    }
+
+    /**
      * @param  array<string, mixed>  $doc
      * @return list<array{0: array{float, float, float}, 1: array{float, float, float}}>
      */

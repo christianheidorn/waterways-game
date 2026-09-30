@@ -96,6 +96,13 @@ Changes to settings and libraries work without an open editor, and appear live w
 | `paint_terrain`                                                     | Live: paint or erase a layer (slot or name) in a shape, optionally only on matching slope / height, with natural `breakup`. Painted layers grow their ground cover, so this plants biomes                                                                                                                   |
 | `edit_water`                                                        | Live: `lake` floods a basin to a level (or `fill_to_rim`); if it would spill, it reports how high the basin holds and where it overflows. `river` carves a channel along a path, downhill from its first point. `erase` removes water                                                                       |
 | `edit_foliage`                                                      | Live: `scatter` types in a shape (their rules, density, groves) or `clear` placed foliage (e.g. for clearings or roads)                                                                                                                                                                                     |
+| `list_prop_models`                                                  | The prop model library (placeable objects) with status, size and tags                                                                                                                                                                                                                                       |
+| `import_model`                                                      | Imports a glTF model from a local `path` (e.g. exported by Blender MCP), a `url` or `base64` (≤ 100 MB) as a **prop** (`props/{id}/model.glb`, size measured, ready at once) or a **foliage** asset (optionally with a foliage type; baked in the open editor right away)                                   |
+| `bake_foliage_asset`                                                | Live: optimises a foliage asset waiting for its bake (LODs, impostor, thumbnail) in the open editor, as the studio's Foliage page does. Any open map works                                                                                                                                                  |
+| `generate_image`                                                    | An image from the project's OpenRouter image model (purposes `reference`, `texture`, `sprite` or free), optionally guided by earlier images. Returns it and stores it under `agent-images/` with its local file path, for reuse (references, materials, Blender)                                            |
+| `generate_material`                                                 | A PBR terrain material from a prompt (queued AI generation, like the studio) or from an image (processed right away); assign it with `update_terrain_layer`                                                                                                                                                 |
+| `generate_model`                                                    | Meshy text / image to 3D in the background: props (stored as ready props), or foliage assets (also as OpenRouter plant cards)                                                                                                                                                                               |
+| `get_asset_status`                                                  | Status, message and preview URLs of a prop model, foliage asset or material                                                                                                                                                                                                                                 |
 
 ### Shapes
 
@@ -115,6 +122,23 @@ A typical session goes like this:
 4. **Layers:** apply biomes to slots and paint them, and paint rock on steep ground.
 5. **Details:** roads, clearings and scattered rocks.
 6. **Check:** after each step, look with `take_screenshot` or `get_map_image`.
+
+### Assets
+
+Agents can make the assets they need and bring them into the game:
+
+- **Blender:** with Blender MCP connected too, the agent models an object, exports it as `.glb` (metres, +Y up,
+  pivot at the base) to a file, and imports it with `import_model` `path`. The MCP server runs on your machine, so it
+  reads the file directly.
+- **Images:** `generate_image` draws references (for modelling), textures or sprites with the project's OpenRouter
+  key. Images are stored under `storage/app/public/agent-images/`; the result includes the local file path.
+- **Materials:** `generate_material` from a prompt or from an image, then `update_terrain_layer` `material_id`.
+- **Meshy:** `generate_model` creates props or foliage models with the project's Meshy key.
+- **Foliage bake:** foliage models are optimised in a browser. The studio's Foliage page does this by itself;
+  for agents, the open editor does it too (`bake_foliage_asset`, and `import_model` when an editor is open).
+
+Generation runs in the queue worker (`composer dev` starts it); agents poll `get_asset_status`. API keys never
+reach the agent; without a key, the tools say which one to add under Settings → AI.
 
 ## How it works
 
@@ -136,6 +160,12 @@ A typical session goes like this:
     - `runWorldEdit.ts` runs each edit as one undo step (`Editor.scriptedEdit`).
 - **Map images and samples** (`App\Mcp\TerrainData`, `App\Mcp\MapImageRenderer`) read the saved grids and
   are drawn with PHP's GD extension.
+- **Assets** (`App\Mcp\Assets`): `ModelSource` checks and loads models (extension, size, glTF magic and JSON),
+  `GltfInspector` measures them from the POSITION accessor bounds through the node hierarchy, `EditorBakes` runs
+  the foliage bake in an editor (`bake_foliage_asset` command → `editor/agent/bakeFoliageAsset.ts`, which runs
+  `tools/FoliageBaker.ts` and uploads to `/api/foliage/assets/{id}/bake`), and `AgentImages` stores generated
+  images. Meshy props are made by `App\Jobs\GenerateMeshyProp`; everything else reuses the studio's services and
+  jobs.
 - **Tests:** `tests/Feature/Mcp` drives every tool through the MCP test client. A fake editor answers
   bridge commands.
 
@@ -148,3 +178,5 @@ A typical session goes like this:
 | **3. Claude requests**   | An editor tool to outline an area, attach a reference image and a note. Agents list open requests with world coordinates and a screenshot, build them, and mark them done with before / after images for review                                             | Next     |
 | **4. Props and assets**  | A props system in the game (placing models with snapping and rotation, later collision), GLB import (e.g. from Blender MCP) as props or foliage types, image and texture generation through the project's OpenRouter key, Meshy generation, placement tools | Planned  |
 | **5. Headless sessions** | The server starts its own hidden editor when none is open, so agents can build and render unattended                                                                                                                                                        | Planned  |
+
+Phase 4, assets: done (model import as props or foliage, foliage baking in the editor, image, material and Meshy model generation, asset status).

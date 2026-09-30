@@ -486,7 +486,9 @@ How it works (`resources/game/world/`):
 Claude (Desktop or Code) or any MCP client can connect to the project and build with it. It can set up maps,
 layers, biomes, foliage, weather and settings, and shape the world: sculpt landforms, dig lakes and rivers,
 paint layers and biomes, and scatter or clear foliage, all live in the editor you have open. It sees the
-world through screenshots and top-down map images with coordinate grids. Setup, safety (automatic snapshots, local only) and the tool list are in [docs/MCP.md](docs/MCP.md).
+world through screenshots and top-down map images with coordinate grids. It can also bring in assets: import
+GLB models (e.g. built with Blender MCP) as props or foliage, and generate images, terrain materials and Meshy
+models with the project's AI keys. Setup, safety (automatic snapshots, local only) and the tool list are in [docs/MCP.md](docs/MCP.md).
 In short: `claude mcp add waterways -- php artisan mcp:start waterways` in the project folder (or add that
 command to Claude Desktop), then open the map in the studio.
 

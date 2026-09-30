@@ -399,7 +399,7 @@ call with `compare_to: "before-trees"` adds `comparison`: the frame numbers (fps
 triangles), GPU time per pass and cost per system, each with before, after, change, change in % and a verdict
 (`better`, `same` within the measurement noise, `worse`), and a `summary` in plain words ("GPU time vs
 "before-trees": 34.2 → 12.1 ms (-22.1 ms, better)."). It says so when the backend or resolution differ from the
-baseline. Measure both from the same camera (`position` / `look_at`). `baselines` lists the saved names in every
+baseline, and compares nothing when either profile finished no frame. Measure both from the same camera (`position` / `look_at`). `baselines` lists the saved names in every
 result; `delete_baseline` removes one without measuring.
 
 **Compressed assets.** `optimize_assets` (or `php artisan waterways:optimize-assets`) writes `model.opt.glb` next

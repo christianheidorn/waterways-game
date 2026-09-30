@@ -189,5 +189,10 @@ class PerformanceToolsTest extends TestCase
         $this->assertSame('same', $comparison['frame']['gpu_ms']['verdict']);
         $this->assertSame(['name' => 'Bloom', 'before' => null, 'after' => 0.4], $comparison['passes'][1]);
         $this->assertStringContainsString('Not like for like: backend', implode(' ', $comparison['summary']));
+
+        $empty = ['frame' => ['frames' => 0, 'fps' => 0, 'gpu_ms' => null]];
+        $comparison = PerformanceBaselines::compare($base, $empty, 'x', '2026-01-01');
+        $this->assertArrayNotHasKey('frame', $comparison);
+        $this->assertStringContainsString('no frame finished while measuring this profile', $comparison['summary'][0]);
     }
 }

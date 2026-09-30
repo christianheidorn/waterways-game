@@ -82,6 +82,19 @@ class PerformanceBaselines
     public static function compare(array $before, array $after, string $name, string $savedAt): array
     {
         $noise = max((float) ($before['noise_ms'] ?? 0), (float) ($after['noise_ms'] ?? 0), 0.2);
+        $unmeasured = array_keys(array_filter(
+            ['the baseline' => $before, 'this profile' => $after],
+            fn (array $p) => ($p['frame']['frames'] ?? null) === 0,
+        ));
+
+        if ($unmeasured !== []) {
+            return [
+                'baseline' => $name,
+                'baseline_saved_at' => $savedAt,
+                'summary' => ['Nothing to compare: no frame finished while measuring '.implode(' and ', $unmeasured).'. Profile again with the editor tab visible.'],
+            ];
+        }
+
         $frame = [];
 
         foreach (self::FRAME_KEYS as $key) {

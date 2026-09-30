@@ -535,24 +535,33 @@ Open <http://localhost:8000>. The dashboard shows the seeded **Waterways Valley*
 
 **Build mode**
 
-| Input                          | Action                                                      |
-| ------------------------------ | ----------------------------------------------------------- |
-| LMB                            | Apply tool (Shift inverts: lower / erase)                   |
-| RMB + mouse, WASD / QE         | Fly camera (wheel while flying changes speed, Shift boosts) |
-| MMB drag                       | Pan                                                         |
-| Alt + LMB                      | Orbit around the point under the cursor                     |
-| Wheel                          | Zoom towards the cursor                                     |
-| F                              | Focus the point under the cursor                            |
-| 1–7                            | Sculpt / Paint / Foliage / Water / Place / Request / World  |
-| `[` `]`, `-` `=`               | Brush size, strength                                        |
-| Ctrl + click                   | Pick the flatten target or water level                      |
-| Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) | Undo / redo                                                 |
-| Ctrl+S                         | Save                                                        |
-| G                              | Toggle grid                                                 |
-| V / Shift+V                    | Next / previous view mode (Lit, Lighting only, Layers, …)   |
-| P / Alt+P                      | Play from the camera / from the player start                |
-| J (or the Walk button)         | Walk at the cursor with collision; Esc flies again          |
-| F10                            | Graphics menu (presets, scalability, frame rate)            |
+| Input                          | Action                                                             |
+| ------------------------------ | ------------------------------------------------------------------ |
+| LMB                            | Apply tool (Shift inverts: lower / erase)                          |
+| RMB + mouse, WASD / QE         | Fly camera (wheel while flying changes speed, Shift boosts)        |
+| MMB drag                       | Pan                                                                |
+| Alt + LMB                      | Orbit around the point under the cursor                            |
+| Wheel                          | Zoom towards the cursor                                            |
+| F                              | Focus the point under the cursor                                   |
+| 1–8                            | Sculpt / Paint / Foliage / Water / Place / Request / Roads / World |
+| `[` `]`, `-` `=`               | Brush size, strength                                               |
+| Ctrl + click                   | Pick the flatten target or water level                             |
+| Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) | Undo / redo                                                        |
+| Ctrl+S                         | Save                                                               |
+| G                              | Toggle grid                                                        |
+| V / Shift+V                    | Next / previous view mode (Lit, Lighting only, Layers, …)          |
+| P / Alt+P                      | Play from the camera / from the player start                       |
+| J (or the Walk button)         | Walk at the cursor with collision; Esc flies again                 |
+| F10                            | Graphics menu (presets, scalability, frame rate)                   |
+
+**Building:** the **Roads** tool (7) draws roads, paths and tracks: click points, Enter builds (a graded bed with
+soft banks and a lean into curves, the chosen layer painted, trees cleared). Click a road to select it, drag its
+points, Shift+click it to add a point, Ctrl+click a point to remove it, Delete removes the road; changing its
+width, profile or layer re-carves it as one undo step. The Water tool's **River** works the same way and keeps
+rivers editable. **Sculpt → Stamp** puts down landforms (mountain, volcano, crater, mesa, dunes, ridge, canyon,
+hills) with size, height, rotation (R) and blend mode; a grid previews the result under the cursor. **Place →
+Props** snaps to a grid, tilts props with the slope, snaps fences and walls end-to-end, and places rows along a
+path (Along a path: click points, Enter). Everything is also available to AI agents over MCP (docs/MCP.md).
 
 **Play mode:** click to capture the mouse. WASD to move, Shift to run, Space to jump or surface, C to dive,
 wheel to zoom. Esc releases the mouse; press Esc again to return to building.

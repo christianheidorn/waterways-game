@@ -29,6 +29,8 @@ class TerrainStorage
         'foliage' => 'foliage.json',
         // Placed props: {version, props: [{id, model, x, z, yaw, scale, offset}]}.
         'props' => 'props.json',
+        // Roads and rivers as editable splines: {version, roads: [...], rivers: [...]} (see the game's Splines).
+        'splines' => 'splines.json',
         'landcover' => 'landcover.u8',
     ];
 

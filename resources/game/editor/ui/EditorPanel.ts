@@ -257,7 +257,7 @@ export class EditorPanel {
                 : `[${list.map((r) => `${r.id}${r.status}${r.updated_at}`).join()}]`;
         const props =
             s.group === 'place'
-                ? `${s.placeTool}${this.actions
+                ? `${s.placeTool}${s.propMode}${s.selectedProp ?? ''}${this.foliageThumbs.version}${this.actions
                       .propModels()
                       .map((m) => m.id)
                       .join()}`
@@ -1865,9 +1865,11 @@ export class EditorPanel {
                 break;
             case 'place':
                 tool =
-                    s.placeTool === 'props'
-                        ? 'Click to place the prop · Shift+click removes the nearest'
-                        : 'Click to set the player start';
+                    s.placeTool !== 'props'
+                        ? 'Click to set the player start'
+                        : s.propMode === 'select'
+                          ? 'Click a prop to select it · drag to move · R turns · Delete removes'
+                          : 'Click to place the prop · R turns · Shift+click removes the nearest';
                 break;
             case 'request':
                 tool =

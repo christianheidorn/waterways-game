@@ -1,4 +1,5 @@
 import type { Editor } from '../Editor';
+import type { PropModelRef } from '../../shared/types';
 import type { GridRect } from '../../world/Heightfield';
 import { ShapeMask } from './shapes';
 import type { ShapeSpec } from './shapes';
@@ -182,6 +183,11 @@ export function runWorldEdit(
         }
         case 'props': {
             const action = payload.action;
+
+            // The models may be newer than the editor (imported or generated after it loaded).
+            if (Array.isArray(payload.prop_models)) {
+                world.props.addModels(payload.prop_models as PropModelRef[]);
+            }
 
             if (action === 'place') {
                 return editor.scriptedEdit(

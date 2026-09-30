@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Mcp\Assets\AgentImages;
 use App\Mcp\Assets\GltfInspector;
+use App\Mcp\EditorBridge;
 use App\Models\PropModel;
 use App\Services\Ai\MeshyClient;
 use App\Services\Ai\MeshyException;
@@ -159,6 +160,8 @@ class GenerateMeshyProp implements ShouldQueue
                     'status_message' => null,
                 ])->save();
                 MeshyClient::forgetBalance();
+                // Open editors show the new model in their Place → Props palette.
+                app(EditorBridge::class)->notifyAll('refresh', ['parts' => ['prop_models']]);
 
                 return null;
         }

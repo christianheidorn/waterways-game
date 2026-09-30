@@ -205,9 +205,11 @@ class WorldBuildingToolsTest extends TestCase
         WaterwaysServer::tool(PlaceProps::class, [
             'placements' => [['model' => 'hut', 'x' => 5, 'z' => 6, 'rotation' => 90], ['model' => (string) $rock->id, 'x' => 0, 'z' => 0, 'scale' => 2]],
         ])->assertOk();
+        $this->assertSame([$hut->id, $rock->id], array_column($this->lastEdit()['prop_models'], 'id'), 'Model refs for editors that loaded before the import');
         $this->assertEquals([
             'kind' => 'props',
             'action' => 'place',
+            'prop_models' => [$hut->toGameArray(), $rock->toGameArray()],
             'placements' => [
                 ['model' => $hut->id, 'x' => 5.0, 'z' => 6.0, 'rotation' => 90.0],
                 ['model' => $rock->id, 'x' => 0.0, 'z' => 0.0, 'scale' => 2.0],

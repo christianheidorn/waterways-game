@@ -97,11 +97,13 @@ class ImportModel extends WaterwaysTool
         $path = "props/{$prop->id}/model.glb";
         Storage::disk('public')->put($path, (string) file_get_contents($model->path));
         $prop->forceFill(['model_path' => $path, 'status' => 'ready'])->save();
+        // Open editors show the new model in their Place → Props palette.
+        $this->bridge()->notifyAll('refresh', ['parts' => ['prop_models']]);
 
         return $this->json([
             'prop_model' => GetAssetStatus::propSummary($prop),
             'note' => $dimensions === null ? 'The size of the model could not be measured from the file.' : null,
-            'next' => 'Place it with place_props (prop_model_id '.$prop->id.').',
+            'next' => 'Place it with place_props (model '.$prop->id.').',
         ]);
     }
 

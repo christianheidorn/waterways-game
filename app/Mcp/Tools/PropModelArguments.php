@@ -34,4 +34,16 @@ trait PropModelArguments
 
         return $models;
     }
+
+    /**
+     * The models as the game loads them, sent along with an edit so an editor that loaded before they were
+     * imported or generated can place them.
+     *
+     * @param  array<int, PropModel>  $models
+     * @return array<int, array<string, mixed>>
+     */
+    protected function propModelRefs(array $models): array
+    {
+        return collect($models)->unique('id')->map(fn (PropModel $model) => $model->toGameArray())->values()->all();
+    }
 }

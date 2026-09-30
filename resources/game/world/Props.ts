@@ -56,6 +56,15 @@ export class Props {
         }
     }
 
+    /** Adds or updates models without dropping the others (models sent along with an agent's edit). */
+    addModels(models: PropModelRef[]): void {
+        const ids = new Set(models.map((m) => m.id));
+        this.setModels([
+            ...this.library.filter((m) => !ids.has(m.id)),
+            ...models,
+        ]);
+    }
+
     /** Footprint radius (m) of a model at a scale, from its library dimensions (a guess when unknown). */
     modelRadius(model: number, scale: number): number {
         const m = this.models.get(model);

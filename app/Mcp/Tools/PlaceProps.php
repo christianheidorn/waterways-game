@@ -69,6 +69,7 @@ class PlaceProps extends WaterwaysTool
                 'kind' => 'props',
                 'action' => 'place',
                 'placements' => $placements,
+                'prop_models' => $this->propModelRefs($models),
             ]);
         }
 
@@ -92,6 +93,7 @@ class PlaceProps extends WaterwaysTool
             'kind' => 'props',
             'action' => 'scatter',
             'shape' => $shape,
+            'prop_models' => $this->propModelRefs($models),
             'params' => array_filter([
                 'models' => array_values(array_unique(array_map(fn ($m) => $m->id, $models))),
                 'count' => (int) $data['count'],

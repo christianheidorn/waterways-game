@@ -104,6 +104,23 @@ export class Input {
         return this.pressed.has(code);
     }
 
+    /** Presses (or releases) a key as if the user did; used by AI agents walking the player. */
+    hold(code: string, down: boolean): void {
+        if (down) {
+            if (!this.keys.has(code)) {
+                this.pressed.add(code);
+            }
+
+            this.keys.add(code);
+        } else {
+            this.keys.delete(code);
+        }
+
+        if (code === 'ShiftLeft' || code === 'ShiftRight') {
+            this.shift = down;
+        }
+    }
+
     /** Call at the end of each frame. */
     endFrame(): void {
         this.deltaX = 0;

@@ -13,7 +13,7 @@ use Laravel\Mcp\Server\Attributes\Description;
 use Laravel\Mcp\Server\Attributes\Name;
 
 #[Name('update_request')]
-#[Description('Reports progress on a build request; the user sees the status and message in the editor\'s Request tool. status: in_progress (you started), needs_input (you have a question: put it in `message`), done (describe what you built in `message`). attach_screenshot: true renders the area from the user\'s original camera in the open editor and stores it as a result image (or pass `camera` / `view` like take_screenshot).')]
+#[Description('Reports progress on a build request; the user sees the status and message in the editor\'s Request tool. status: in_progress (you started), needs_input (you have a question: put it in `message`), done (describe what you built in `message`), dismissed (closes it without doing it, like the editor\'s Dismiss) or open (reopens it). Delete requests with delete_library_item. attach_screenshot: true renders the area from the user\'s original camera in the open editor and stores it as a result image (or pass `camera` / `view` like take_screenshot).')]
 class UpdateRequest extends WaterwaysTool
 {
     use CameraArguments;
@@ -22,7 +22,7 @@ class UpdateRequest extends WaterwaysTool
     {
         return [
             'id' => $schema->integer()->required(),
-            'status' => $schema->string()->enum(['in_progress', 'needs_input', 'done'])->required(),
+            'status' => $schema->string()->enum(['in_progress', 'needs_input', 'done', 'dismissed', 'open'])->required(),
             'message' => $schema->string()->description('What you did, or your question for the user.'),
             'attach_screenshot' => $schema->boolean()->description('Store a screenshot of the result (needs the map open in an editor).'),
             ...$this->cameraSchema($schema),
@@ -33,7 +33,7 @@ class UpdateRequest extends WaterwaysTool
     {
         $data = $request->validate([
             'id' => ['required', 'integer'],
-            'status' => ['required', 'in:in_progress,needs_input,done'],
+            'status' => ['required', 'in:in_progress,needs_input,done,dismissed,open'],
             'message' => ['nullable', 'string', 'max:5000'],
             'attach_screenshot' => ['sometimes', 'boolean'],
         ]);

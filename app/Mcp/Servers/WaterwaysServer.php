@@ -7,7 +7,10 @@ use App\Mcp\Tools\ApplyBiome;
 use App\Mcp\Tools\BakeFoliageAsset;
 use App\Mcp\Tools\CloseEditor;
 use App\Mcp\Tools\ControlEditor;
+use App\Mcp\Tools\ControlPlayer;
 use App\Mcp\Tools\CreateMap;
+use App\Mcp\Tools\CreateRequest;
+use App\Mcp\Tools\DeleteLibraryItem;
 use App\Mcp\Tools\DeleteTerrainLayer;
 use App\Mcp\Tools\EditFoliage;
 use App\Mcp\Tools\EditWater;
@@ -23,11 +26,13 @@ use App\Mcp\Tools\GetRequest;
 use App\Mcp\Tools\GetSettings;
 use App\Mcp\Tools\ImportModel;
 use App\Mcp\Tools\ListBiomes;
+use App\Mcp\Tools\ListCharacters;
 use App\Mcp\Tools\ListFoliageTypes;
 use App\Mcp\Tools\ListMaterials;
 use App\Mcp\Tools\ListPropModels;
 use App\Mcp\Tools\ListProps;
 use App\Mcp\Tools\ListRequests;
+use App\Mcp\Tools\ManageCharacter;
 use App\Mcp\Tools\ManageSnapshots;
 use App\Mcp\Tools\OpenEditor;
 use App\Mcp\Tools\PaintTerrain;
@@ -40,10 +45,15 @@ use App\Mcp\Tools\SaveFoliageType;
 use App\Mcp\Tools\SaveLayerAsBiome;
 use App\Mcp\Tools\SculptTerrain;
 use App\Mcp\Tools\SetCamera;
+use App\Mcp\Tools\SetDeviceGraphics;
+use App\Mcp\Tools\SetMapThumbnail;
+use App\Mcp\Tools\TakePhoto;
 use App\Mcp\Tools\TakeScreenshot;
 use App\Mcp\Tools\UpdateEnvironment;
 use App\Mcp\Tools\UpdateGameSettings;
+use App\Mcp\Tools\UpdateLibraryItem;
 use App\Mcp\Tools\UpdateMap;
+use App\Mcp\Tools\UpdateProps;
 use App\Mcp\Tools\UpdateRequest;
 use App\Mcp\Tools\UpdateTerrainLayer;
 use Laravel\Mcp\Server;
@@ -87,6 +97,11 @@ Assets (3D models, images, materials)
 - generate_image (OpenRouter), generate_material (PBR terrain materials from a prompt or an image) and generate_model (Meshy text / image to 3D) use the project's configured services and cost credits; generation runs in the background: poll get_asset_status.
 - Foliage models must be baked (LODs) before use: bake_foliage_asset does it in the open editor.
 
+Everything else the UI offers
+- Placed props: update_props moves, turns, resizes or re-rolls them. Player start direction: update_map spawn facing / look_at.
+- Play mode: control_player teleports, walks (real movement), looks around and jumps; take_screenshot shows the player's view. Photo mode: take_photo (cinematic still with a temporary look). Graphics menu (per device): set_device_graphics. Map card image: set_map_thumbnail.
+- Libraries: list_characters / manage_character (player character), update_library_item (materials, foliage assets, starter biomes), delete_library_item (destructive: ask first). Ask the user something about an area with create_request.
+
 Safety
 - Before an agent tool changes a map, a snapshot is taken automatically (at most every 10 minutes); map_snapshots lists, creates and restores them. regenerate_terrain discards the user's terrain work: confirm with them first.
 - Prefer small, verifiable steps; tell the user what you changed.
@@ -94,7 +109,7 @@ MD)]
 class WaterwaysServer extends Server
 {
     /** Every tool in one tools/list page (clients then see the whole tool set at once). */
-    public int $defaultPaginationLength = 50;
+    public int $defaultPaginationLength = 100;
 
     protected array $tools = [
         GetProjectOverview::class,
@@ -141,5 +156,16 @@ class WaterwaysServer extends Server
         GetAssetStatus::class,
         OpenEditor::class,
         CloseEditor::class,
+        // UI ↔ MCP parity (docs/MCP.md)
+        UpdateProps::class,
+        TakePhoto::class,
+        SetDeviceGraphics::class,
+        ControlPlayer::class,
+        SetMapThumbnail::class,
+        ListCharacters::class,
+        ManageCharacter::class,
+        UpdateLibraryItem::class,
+        DeleteLibraryItem::class,
+        CreateRequest::class,
     ];
 }

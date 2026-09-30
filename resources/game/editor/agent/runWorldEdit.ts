@@ -14,12 +14,15 @@ import {
     removeProps,
     scatterFoliage,
     scatterProps,
+    updateProps,
     sculptTerrain,
 } from './worldEdits';
 import type {
     PaintParams,
+    PropChange,
     PropPlacement,
     PropScatterParams,
+    PropUpdate,
     SculptParams,
 } from './worldEdits';
 
@@ -222,6 +225,21 @@ export function runWorldEdit(
             }
 
             const ids = (payload.ids as string[] | null | undefined) ?? null;
+
+            if (action === 'update') {
+                return editor.scriptedEdit(
+                    'Agent: edit props',
+                    whole,
+                    ['props'],
+                    () =>
+                        updateProps(world.props, hf, mask, {
+                            updates: payload.updates as PropUpdate[] | null,
+                            ids,
+                            models: (payload.models as number[] | null) ?? null,
+                            change: payload.change as PropChange | null,
+                        }),
+                );
+            }
 
             if (!mask && !ids) {
                 throw new EditError('Give a shape or prop ids to remove.');

@@ -12,14 +12,15 @@ use Laravel\Mcp\Server\Attributes\Description;
 use Laravel\Mcp\Server\Attributes\Name;
 
 #[Name('update_game_settings')]
-#[Description('Changes global game settings of one group: "player" (movement, camera), "graphics" (quality preset, draw distance, shadows, foliage distance / density, post effects, …) or "editor". Pass only the fields to change (see get_settings). Applies live in open editors. Note players can override graphics per device (F10).')]
+#[Description('Changes global game settings of one group: "player" (movement, camera), "graphics" (quality preset, draw distance, shadows, foliage distance / density, post effects, …) or "editor". Pass only the fields to change (see get_settings), or reset: true to put the whole group back to its defaults. Applies live in open editors. Note players can override graphics per device (F10).')]
 class UpdateGameSettings extends WaterwaysTool
 {
     public function schema(JsonSchema $schema): array
     {
         return [
             'group' => $schema->string()->enum(array_keys(GameSettingsSchema::groups()))->required(),
-            'values' => $schema->object()->description('Field → new value.')->required(),
+            'values' => $schema->object()->description('Field → new value.'),
+            'reset' => $schema->boolean()->description('Reset the whole group to its defaults (like the studio\'s Reset button).'),
         ];
     }
 
@@ -32,7 +33,18 @@ class UpdateGameSettings extends WaterwaysTool
             return Response::error("Unknown settings group \"{$key}\".");
         }
 
+        if ($request->get('reset') === true) {
+            app(GameSettingsRepository::class)->reset($key);
+            $this->bridge()->notifyAll('refresh', ['parts' => ['settings']]);
+
+            return $this->json(['reset' => $key, 'values' => app(GameSettingsRepository::class)->get($key)]);
+        }
+
         $values = (array) $request->get('values', []);
+
+        if ($values === []) {
+            return Response::error('Pass the fields to change in `values`, or reset: true.');
+        }
         $unknown = array_diff(array_keys($values), array_keys($group->defaults()));
 
         if ($unknown !== []) {

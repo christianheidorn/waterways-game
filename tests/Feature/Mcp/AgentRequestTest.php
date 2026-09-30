@@ -103,7 +103,7 @@ class AgentRequestTest extends TestCase
         // The editor refreshes its list.
         $this->assertSame(['type' => 'refresh', 'payload' => ['parts' => ['requests']]], AgentCommand::query()->latest('id')->first()->only('type', 'payload'));
 
-        WaterwaysServer::tool(UpdateRequest::class, ['id' => $request->id, 'status' => 'open'])->assertHasErrors();
+        WaterwaysServer::tool(UpdateRequest::class, ['id' => $request->id, 'status' => 'finished'])->assertHasErrors();
     }
 
     /** @return list<mixed> */

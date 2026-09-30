@@ -1,5 +1,5 @@
 import { NO_WATER } from '../../shared/types';
-import type { FoliageType } from '../../shared/types';
+import type { FoliageType, PropInstance } from '../../shared/types';
 import type { Foliage, FoliagePlacementContext } from '../../world/Foliage';
 import {
     clusterFactor,
@@ -1014,4 +1014,148 @@ export function removeProps(
         .map((q) => q.id);
 
     return { removed: props.remove(doomed) };
+}
+
+/** Exact new values for one placed prop (update_props). */
+export type PropUpdate = {
+    id: string;
+    x?: number;
+    z?: number;
+    /** Degrees. */
+    rotation?: number;
+    scale?: number;
+    offset?: number;
+};
+
+/** One change applied to every selected prop (update_props). */
+export type PropChange = {
+    move_x?: number;
+    move_z?: number;
+    /** Degrees added to the rotation. */
+    rotate_by?: number;
+    scale_by?: number;
+    /** Degrees; sets the rotation. */
+    rotation?: number;
+    scale?: number;
+    offset?: number;
+    /** Re-rolls the rotation of each prop. */
+    random_rotation?: boolean;
+    /** Re-rolls the scale of each prop in [scale_min, scale_max]. */
+    scale_min?: number;
+    scale_max?: number;
+    seed?: number;
+};
+
+type PropPatch = Partial<
+    Pick<PropInstance, 'x' | 'z' | 'yaw' | 'scale' | 'offset'>
+>;
+
+/**
+ * Edits placed props (update_props): exact values per id, or one change for every prop selected by
+ * ids, a shape and / or models (moved, turned, resized, raised, or rotation / scale re-rolled).
+ */
+export function updateProps(
+    props: Props,
+    hf: Heightfield,
+    mask: ShapeMask | null,
+    params: {
+        updates?: PropUpdate[] | null;
+        ids?: string[] | null;
+        models?: number[] | null;
+        change?: PropChange | null;
+    },
+): { updated: number; ids: string[]; missing?: string[] } {
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const clampScale = (s: number) => Math.min(20, Math.max(0.05, s));
+    const planned: Array<{ id: string; patch: PropPatch }> = [];
+    const missing: string[] = [];
+
+    if (params.updates?.length) {
+        for (const u of params.updates) {
+            if (!props.get(u.id)) {
+                missing.push(u.id);
+                continue;
+            }
+
+            const patch: PropPatch = {};
+
+            if (u.x !== undefined) patch.x = u.x;
+            if (u.z !== undefined) patch.z = u.z;
+            if (u.rotation !== undefined) patch.yaw = toRad(u.rotation);
+            if (u.scale !== undefined) patch.scale = clampScale(u.scale);
+            if (u.offset !== undefined) patch.offset = u.offset;
+            planned.push({ id: u.id, patch });
+        }
+    } else {
+        const c = params.change ?? {};
+        const ids = params.ids ?? null;
+
+        if (!ids && !mask) {
+            throw new EditError('Give prop ids or a shape to select props.');
+        }
+
+        if (ids) {
+            missing.push(...ids.filter((id) => !props.get(id)));
+        }
+
+        const random = mulberry32(c.seed ?? Date.now() & 0x7fffffff);
+        const selected = props
+            .list()
+            .filter(
+                (q) =>
+                    (ids ? ids.includes(q.id) : true) &&
+                    (params.models ? params.models.includes(q.model) : true) &&
+                    (mask ? mask.weightAt(q.x, q.z) >= 0.5 : true),
+            );
+
+        for (const q of selected) {
+            let yaw = q.yaw;
+            let scale = q.scale;
+
+            if (c.rotation !== undefined) yaw = toRad(c.rotation);
+            if (c.random_rotation) yaw = random() * Math.PI * 2;
+            if (c.rotate_by !== undefined) yaw += toRad(c.rotate_by);
+            if (c.scale !== undefined) scale = c.scale;
+
+            if (c.scale_min !== undefined || c.scale_max !== undefined) {
+                const lo = c.scale_min ?? c.scale_max!;
+                const hi = Math.max(lo, c.scale_max ?? lo);
+                scale = lo + random() * (hi - lo);
+            }
+
+            if (c.scale_by !== undefined) scale *= c.scale_by;
+
+            const patch: PropPatch = {
+                x: q.x + (c.move_x ?? 0),
+                z: q.z + (c.move_z ?? 0),
+                yaw: ((yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2),
+                scale: clampScale(scale),
+            };
+
+            if (c.offset !== undefined) patch.offset = c.offset;
+            planned.push({ id: q.id, patch });
+        }
+    }
+
+    for (const { id, patch } of planned) {
+        const q = props.get(id)!;
+        const x = patch.x ?? q.x;
+        const z = patch.z ?? q.z;
+
+        if (!hf.contains(x, z)) {
+            throw new EditError(
+                `Prop ${id} would end up outside the map at (${round1(x)}, ${round1(z)}).`,
+            );
+        }
+    }
+
+    for (const { id, patch } of planned) {
+        props.update(id, patch);
+    }
+
+    return {
+        updated: planned.length,
+        ids: planned.map((p) => p.id),
+        ...(missing.length ? { missing } : {}),
+    };
 }

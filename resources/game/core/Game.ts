@@ -262,6 +262,48 @@ export class Game {
             stats: () => ({ ...this.lastStats }),
             profile: (options) =>
                 profilePerformance(this.performanceHost(), options),
+            graphics: {
+                current: () => this.manifest.settings.graphics,
+                defaults: () => this.graphicsDefaults,
+                apply: (g) => {
+                    this.applyGraphicsOverride(g);
+                    this.graphicsMenu?.sync();
+                },
+            },
+            photo: {
+                environment: () => this.manifest.environment,
+                previewEnvironment: (env) => this.applyEnvironment(env),
+                setCinematic: (on) => this.setPhotoCinematic(on),
+                fov: () => this.camera.fov,
+                setFov: (fov) => {
+                    this.camera.fov = fov;
+                    this.camera.updateProjectionMatrix();
+                },
+                focusAt: (x, y) => this.focusAt(x, y),
+                capture: (scale) => this.capturePhoto(scale),
+            },
+            player: {
+                mode: () => this.mode,
+                play: () => this.setMode('play'),
+                position: () => this.player.position,
+                yaw: () => this.player.yaw,
+                swimming: () => this.player.swimming,
+                teleport: (x, z, yaw) =>
+                    this.player.spawn(x, z, yaw, this.playerEnv()),
+                view: () => ({
+                    yaw: this.playerCamera.yaw,
+                    pitch: this.playerCamera.pitch,
+                }),
+                setView: (yaw, pitch) => {
+                    this.playerCamera.yaw = yaw;
+
+                    if (pitch !== undefined) {
+                        this.playerCamera.pitch = pitch;
+                    }
+                },
+                hold: (code, down) => this.input.hold(code, down),
+                contains: (x, z) => this.world.heights.contains(x, z),
+            },
         };
         this.agentBridge = new AgentBridge(this.api, url, createAgentHost(ctx));
         this.agentBridge.start();

@@ -9,6 +9,17 @@ import type {
     ProfileOptions,
     ProfileSystem,
 } from '../editor/agent/profilePerformance';
+import {
+    changeGraphics,
+    controlPlayer,
+    graphicsState,
+    takePhoto,
+} from '../editor/agent/liveControls';
+import type {
+    GraphicsHost,
+    PhotoHost,
+    PlayerHost,
+} from '../editor/agent/liveControls';
 
 /** What the agent commands need from the game (built by Game; keeps them out of its internals). */
 export type AgentContext = {
@@ -43,6 +54,10 @@ export type AgentContext = {
     stats: () => Record<string, unknown>;
     /** Measures the frame and what each system costs (editor/agent/profilePerformance). */
     profile: (options: ProfileOptions) => Promise<Record<string, unknown>>;
+    /** The graphics menu (set_device_graphics), photo mode (take_photo) and play mode (control_player). */
+    graphics: GraphicsHost;
+    photo: PhotoHost;
+    player: PlayerHost;
 };
 
 const VIEW_MODES: readonly TerrainViewMode[] = [
@@ -269,6 +284,40 @@ export function createAgentHost(ctx: AgentContext): AgentBridgeHost {
         }
     };
 
+    /** take_photo: photo-mode capture from the current view or a given camera, put back afterwards. */
+    const photo = async (payload: Record<string, unknown>) => {
+        requireVisible();
+        const saved = {
+            position: ctx.camera.position.clone(),
+            quaternion: ctx.camera.quaternion.clone(),
+        };
+        const moves =
+            payload.position !== undefined ||
+            (payload.view !== undefined && payload.view !== 'current');
+
+        if (moves) {
+            requireEdit('placing the camera');
+            place(payload);
+        }
+
+        try {
+            await settle(moves);
+
+            return {
+                mode: ctx.mode(),
+                camera: cameraState(),
+                ...(await takePhoto(ctx.photo, payload)),
+            };
+        } finally {
+            if (moves && !payload.keep_camera) {
+                ctx.camera.position.copy(saved.position);
+                ctx.camera.quaternion.copy(saved.quaternion);
+                ctx.camera.updateMatrixWorld();
+                ctx.syncFlyCamera();
+            }
+        }
+    };
+
     /** Waits a few frames, and after a camera move until foliage around it has grown. */
     const settle = async (moved: boolean) => {
         const start = performance.now();
@@ -300,6 +349,16 @@ export function createAgentHost(ctx: AgentContext): AgentBridgeHost {
                     place(payload);
 
                     return { camera: cameraState() };
+                case 'photo':
+                    return photo(payload);
+                case 'graphics':
+                    return payload.read
+                        ? graphicsState(ctx.graphics)
+                        : changeGraphics(ctx.graphics, payload);
+                case 'player':
+                    requireVisible();
+
+                    return controlPlayer(ctx.player, payload);
                 case 'set_view_mode':
                     setView(payload.view_mode);
 

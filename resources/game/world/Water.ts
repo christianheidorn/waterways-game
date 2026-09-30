@@ -42,6 +42,7 @@ import {
     viewportTexture,
 } from 'three/tsl';
 import { depthPrecision, isSkyDepth } from '../core/depth';
+import { gridWaterLevel } from './foliage/placement';
 import { NO_WATER } from '../shared/types';
 import type { EnvironmentSettings } from '../shared/types';
 import { mulberry32 } from '../util/noise';
@@ -220,34 +221,8 @@ export class Water {
             return this.ocean ? this.ocean.position.y : null;
         }
 
-        const { gx, gz } = this.surface.toGrid(x, z);
-        const c = Math.round(gx);
-        const r = Math.round(gz);
-        const v = this.surface.get(c, r);
-
-        if (v <= NO_WATER + 1) {
-            return null;
-        }
-
-        // Interpolate between wet neighbours for smooth swimming heights.
-        let sum = 0;
-        let count = 0;
-
-        for (let dz = 0; dz <= 1; dz++) {
-            for (let dx = 0; dx <= 1; dx++) {
-                const s = this.surface.get(
-                    Math.floor(gx) + dx,
-                    Math.floor(gz) + dz,
-                );
-
-                if (s > NO_WATER + 1) {
-                    sum += s;
-                    count++;
-                }
-            }
-        }
-
-        return count ? sum / count : v;
+        // Interpolated between wet neighbours for smooth swimming heights.
+        return gridWaterLevel(this.surface, x, z);
     }
 
     /** Rebuilds the water meshes that overlap the rect (after water painting or terrain sculpting). */

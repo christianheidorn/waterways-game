@@ -102,6 +102,8 @@ class FoliageAssetApiController extends Controller
             'source_triangles' => isset($raw['source_triangles']) && is_numeric($raw['source_triangles']) ? (int) $raw['source_triangles'] : null,
             'texture_size' => isset($raw['texture_size']) && is_numeric($raw['texture_size']) ? (int) $raw['texture_size'] : null,
             'lod_distances' => $list('lod_distances', 0, 1, 6),
+            // Far LOD kind: octahedral impostor (older bakes: crossed cards, no key).
+            'impostor' => ($raw['impostor'] ?? null) === 'octahedral' ? 'octahedral' : null,
         ], fn ($v) => $v !== null && $v !== []);
     }
 }

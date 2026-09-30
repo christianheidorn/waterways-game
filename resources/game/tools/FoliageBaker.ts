@@ -7,7 +7,7 @@
  *   scene
  *   ├── LOD0   (Group of meshes, one per material — full detail within a per-kind triangle budget)
  *   ├── LOD1   (≈ 20 % of LOD0, or 2 crossed cards for image assets)
- *   └── LOD2   (crossed-card impostor rendered from the model; a ≈ 4 % mesh for rocks)
+ *   └── LOD2   (octahedral impostor rendered from the model; a ≈ 4 % mesh for rocks)
  *
  * Units are metres, the pivot sits at the base (min Y = 0) and bake metadata lives in the scene extras
  * (`scene.userData.waterways`). See resources/game/world/Foliage.ts for the runtime side.
@@ -49,6 +49,8 @@ export type BakeMeta = {
     source_triangles: number;
     texture_size: number;
     lod_distances: number[];
+    /** Far LOD: 'octahedral' impostor (current bakes); absent for rocks, cards and older bakes. */
+    impostor?: 'octahedral';
 };
 
 export type BakeResult = {
@@ -79,12 +81,16 @@ const LOD0_BUDGET: Record<FoliageKind, number> = {
 };
 const LOD_REDUCTION = 0.2;
 
-/** Fraction of the cull distance where each LOD starts (last entry = impostor, except rocks). */
+/**
+ * Fraction of the cull distance where each LOD starts (last entry = impostor, except rocks). The
+ * octahedral impostor holds up from any direction, so it starts closer than the old crossed cards did
+ * (0.45 / 0.55).
+ */
 const MODEL_LOD_DISTANCES: Record<FoliageKind, number[]> = {
-    conifer: [0, 0.18, 0.45],
-    broadleaf: [0, 0.18, 0.45],
-    palm: [0, 0.18, 0.45],
-    bush: [0, 0.25, 0.55],
+    conifer: [0, 0.15, 0.3],
+    broadleaf: [0, 0.15, 0.3],
+    palm: [0, 0.15, 0.3],
+    bush: [0, 0.22, 0.4],
     grass: [0, 0.2, 0.4],
     flower: [0, 0.2, 0.4],
     reed: [0, 0.2, 0.4],
@@ -429,7 +435,9 @@ async function bakeModel(
 
         if (impostor) {
             report('Rendering impostor', 0);
-            lodGroups.push(renderImpostor(lod0, ctx, `LOD${lodGroups.length}`));
+            lodGroups.push(
+                renderOctahedralImpostor(lod0, ctx, `LOD${lodGroups.length}`),
+            );
             report('Rendering impostor', 1);
             await tick();
         }
@@ -448,6 +456,7 @@ async function bakeModel(
             source_triangles: sourceTriangles,
             texture_size: 0,
             lod_distances: lodDistances.slice(0, lodGroups.length),
+            ...(impostor ? { impostor: 'octahedral' as const } : {}),
         };
 
         report('Exporting GLB', 0);
@@ -1658,18 +1667,79 @@ function makeGeometry(
     return geometry;
 }
 
-// ---------------------------------------------------------- impostor
+// ---------------------------------------------------------- octahedral impostor
 
-const IMPOSTOR_ANGLES = [0, 60, 120];
+/** Views per side of the octahedral impostor (N × N over the upper hemisphere). */
+const OCTAHEDRAL_FRAMES = 8;
+/** Texels per view (atlas = frames × cell, capped by the bake's texture size). */
+const OCTAHEDRAL_CELL = 128;
 
-/** Renders the model from 3 horizontal directions into an atlas and builds 3 crossed quads. */
-function renderImpostor(
+const OCTA_VERTEX = /* glsl */ `
+varying vec2 vUv;
+varying vec3 vNormal;
+varying float vDepth;
+varying vec3 vColor;
+uniform vec3 viewDir;
+uniform vec3 center;
+uniform float radius;
+
+void main() {
+    vUv = uv;
+    vNormal = normalize(mat3(modelMatrix) * normal);
+    vec4 world = modelMatrix * vec4(position, 1.0);
+    vDepth = clamp(dot(world.xyz - center, viewDir) / radius * 0.5 + 0.5, 0.0, 1.0);
+#ifdef USE_COLOR
+    vColor = color.rgb;
+#else
+    vColor = vec3(1.0);
+#endif
+    gl_Position = projectionMatrix * viewMatrix * world;
+}
+`;
+
+const OCTA_FRAGMENT = /* glsl */ `
+varying vec2 vUv;
+varying vec3 vNormal;
+varying float vDepth;
+varying vec3 vColor;
+uniform sampler2D map;
+uniform float hasMap;
+uniform vec3 diffuse;
+uniform float alphaTest;
+uniform float normals;
+
+void main() {
+    vec4 texel = hasMap > 0.5 ? texture2D(map, vUv) : vec4(1.0);
+
+    if (texel.a < max(alphaTest, 0.01)) {
+        discard;
+    }
+
+    // Leaves keep their geometry normal on back faces (as in game).
+    gl_FragColor = normals > 0.5
+        ? vec4(normalize(vNormal) * 0.5 + 0.5, vDepth)
+        : vec4(texel.rgb * diffuse * vColor, 1.0);
+}
+`;
+
+/**
+ * Renders an octahedral impostor: OCTAHEDRAL_FRAMES² orthographic views of the model's bounding
+ * sphere, one per vertex of a hemi-octahedral grid over the upper hemisphere, into an albedo atlas
+ * (alpha = coverage) and a normal atlas (rgb = model-space normal, a = depth along the view). The
+ * mesh is one quad covering the sphere; the game turns it towards the camera and blends the 4 views
+ * around the view direction (world/foliage/FoliageMaterial.ts octahedralImpostor). The layout lives
+ * in the material's extras (`impostor: "octahedral"`, frames, radius, center).
+ */
+function renderOctahedralImpostor(
     model: THREE.Object3D,
     ctx: BakeContext,
     name: string,
 ): THREE.Group {
+    const box = new THREE.Box3().setFromObject(model);
+    const center = box.getCenter(new THREE.Vector3());
     let radius = 0;
-    let height = 0;
+    const p = new THREE.Vector3();
+    model.updateMatrixWorld(true);
     model.traverse((obj) => {
         const mesh = obj as THREE.Mesh;
 
@@ -1680,170 +1750,269 @@ function renderImpostor(
         const pos = mesh.geometry.getAttribute('position');
 
         for (let i = 0; i < pos.count; i++) {
-            radius = Math.max(radius, Math.hypot(pos.getX(i), pos.getZ(i)));
-            height = Math.max(height, pos.getY(i));
+            p.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+            radius = Math.max(radius, p.distanceTo(center));
         }
     });
-    radius = Math.max(radius, 0.01) * 1.03;
-    height = Math.max(height, 0.01) * 1.02;
+    radius = Math.max(radius, 0.01) * 1.02;
 
-    // Cell layout: tall models side by side, wide ones stacked.
-    const aspect = (2 * radius) / height;
-    let cw: number;
-    let ch: number;
-
-    if (aspect <= 1) {
-        ch = Math.min(512, ctx.maxTextureSize);
-        cw = Math.max(16, Math.round(ch * aspect));
-
-        if (cw * 3 > ctx.maxTextureSize) {
-            const f = ctx.maxTextureSize / (cw * 3);
-            cw = Math.floor(cw * f);
-            ch = Math.floor(ch * f);
-        }
-    } else {
-        cw = Math.min(512, ctx.maxTextureSize);
-        ch = Math.max(16, Math.round(cw / aspect));
-
-        if (ch * 3 > ctx.maxTextureSize) {
-            const f = ctx.maxTextureSize / (ch * 3);
-            cw = Math.floor(cw * f);
-            ch = Math.floor(ch * f);
-        }
-    }
-
-    const horizontal = aspect <= 1;
-    const atlasW = horizontal ? cw * 3 : cw;
-    const atlasH = horizontal ? ch : ch * 3;
+    const n = OCTAHEDRAL_FRAMES;
+    const cell = Math.max(
+        16,
+        Math.min(OCTAHEDRAL_CELL, Math.floor(ctx.maxTextureSize / n)),
+    );
+    const size = cell * n;
     const ss = 2;
     const renderer = ctx.getRenderer();
-    const target = new THREE.WebGLRenderTarget(atlasW * ss, atlasH * ss, {
-        samples: 4,
+    const target = new THREE.WebGLRenderTarget(size * ss, size * ss, {
         colorSpace: THREE.SRGBColorSpace,
     });
+    const normalTarget = new THREE.WebGLRenderTarget(size * ss, size * ss);
+    const uniforms = {
+        viewDir: { value: new THREE.Vector3() },
+        center: { value: center },
+        radius: { value: radius },
+    };
+    const made = new Map<THREE.Material, [THREE.Material, THREE.Material]>();
+    const pair = (source: THREE.Material): [THREE.Material, THREE.Material] => {
+        let materials = made.get(source);
+
+        if (!materials) {
+            const m = source as THREE.MeshStandardMaterial;
+            const make = (normals: boolean) => {
+                const material = new THREE.ShaderMaterial({
+                    vertexShader: OCTA_VERTEX,
+                    fragmentShader: OCTA_FRAGMENT,
+                    side: THREE.DoubleSide,
+                    vertexColors: !!m.vertexColors,
+                    uniforms: {
+                        ...uniforms,
+                        map: { value: m.map ?? null },
+                        hasMap: { value: m.map ? 1 : 0 },
+                        diffuse: {
+                            value: (
+                                m.color ?? new THREE.Color(1, 1, 1)
+                            ).clone(),
+                        },
+                        alphaTest: { value: m.alphaTest || 0.5 },
+                        normals: { value: normals ? 1 : 0 },
+                    },
+                });
+                ctx.materials.add(material);
+
+                return material;
+            };
+            materials = [make(false), make(true)];
+            made.set(source, materials);
+        }
+
+        return materials;
+    };
     const scene = new THREE.Scene();
-    // Soft, near-albedo lighting: the game lights the impostor cards again.
-    const ambient = new THREE.AmbientLight(0xffffff, Math.PI * 0.35);
-    const key = new THREE.DirectionalLight(0xffffff, Math.PI * 0.35);
-    scene.add(ambient, key, key.target);
+    const albedoMeshes: THREE.Mesh[] = [];
+    const normalMeshes: THREE.Mesh[] = [];
+    model.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+
+        if (!mesh.isMesh) {
+            return;
+        }
+
+        const sources = Array.isArray(mesh.material)
+            ? mesh.material
+            : [mesh.material];
+
+        for (const [k, list] of [albedoMeshes, normalMeshes].entries()) {
+            const clone = mesh.clone();
+            const materials = sources.map((s) => pair(s)[k]);
+            clone.material = Array.isArray(mesh.material)
+                ? materials
+                : materials[0];
+            clone.matrixAutoUpdate = false;
+            clone.matrix.copy(mesh.matrixWorld);
+            list.push(clone);
+        }
+    });
     const holder = new THREE.Group();
-    holder.add(...gameShadedClones(model, ctx));
     scene.add(holder);
     const camera = new THREE.OrthographicCamera(
         -radius,
         radius,
-        height,
-        0,
+        radius,
+        -radius,
         0.01,
         radius * 4 + 2,
     );
     const previousAutoClear = renderer.autoClear;
     renderer.autoClear = false;
     renderer.setClearColor(0x000000, 0);
-    target.scissorTest = true;
-    target.viewport.set(0, 0, atlasW * ss, atlasH * ss);
-    target.scissor.set(0, 0, atlasW * ss, atlasH * ss);
-    renderer.setRenderTarget(target);
-    renderer.clear(true, true, true);
+    const read = (t: THREE.WebGLRenderTarget, meshes: THREE.Mesh[]) => {
+        holder.clear();
+        holder.add(...meshes);
+        t.scissorTest = true;
+        t.viewport.set(0, 0, size * ss, size * ss);
+        t.scissor.set(0, 0, size * ss, size * ss);
+        renderer.setRenderTarget(t);
+        renderer.clear(true, true, true);
 
-    IMPOSTOR_ANGLES.forEach((deg, i) => {
-        const a = THREE.MathUtils.degToRad(deg);
-        const dir = new THREE.Vector3(Math.sin(a), 0, Math.cos(a));
-        camera.position.copy(dir).multiplyScalar(radius * 2 + 1);
-        camera.up.set(0, 1, 0);
-        camera.lookAt(0, 0, 0);
-        camera.updateMatrixWorld();
-        key.position
-            .copy(dir)
-            .multiplyScalar(10)
-            .add(new THREE.Vector3(0, 7, 0));
-        // Cells are stored top-down in the image; GL render targets are bottom-up.
-        const x = horizontal ? i * cw : 0;
-        const yTop = horizontal ? 0 : i * ch;
-        const glY = atlasH - yTop - ch;
-        target.viewport.set(x * ss, glY * ss, cw * ss, ch * ss);
-        target.scissor.set(x * ss, glY * ss, cw * ss, ch * ss);
-        renderer.setRenderTarget(target);
-        renderer.render(scene, camera);
-    });
+        for (let j = 0; j < n; j++) {
+            for (let i = 0; i < n; i++) {
+                const ex = (i / (n - 1)) * 2 - 1;
+                const ey = (j / (n - 1)) * 2 - 1;
+                const x = (ex + ey) / 2;
+                const z = (ex - ey) / 2;
+                const dir = new THREE.Vector3(
+                    x,
+                    1 - Math.abs(x) - Math.abs(z),
+                    z,
+                ).normalize();
+                uniforms.viewDir.value.copy(dir);
+                camera.position
+                    .copy(dir)
+                    .multiplyScalar(radius * 2 + 1)
+                    .add(center);
+                camera.up.set(0, 1, 0);
+                camera.lookAt(center);
+                camera.updateMatrixWorld();
+                // View (i, j) sits in column i, row j (top first); GL targets are bottom-up.
+                const glY = (n - 1 - j) * cell;
+                t.viewport.set(i * cell * ss, glY * ss, cell * ss, cell * ss);
+                t.scissor.set(i * cell * ss, glY * ss, cell * ss, cell * ss);
+                renderer.setRenderTarget(t);
+                renderer.render(scene, camera);
+            }
+        }
 
-    const pixels = new Uint8Array(atlasW * ss * atlasH * ss * 4);
-    renderer.readRenderTargetPixels(
-        target,
-        0,
-        0,
-        atlasW * ss,
-        atlasH * ss,
-        pixels,
-    );
+        const pixels = new Uint8Array(size * ss * size * ss * 4);
+        renderer.readRenderTargetPixels(t, 0, 0, size * ss, size * ss, pixels);
+
+        return pixels;
+    };
+    const albedoPixels = read(target, albedoMeshes);
+    const normalPixels = read(normalTarget, normalMeshes);
     renderer.setRenderTarget(null);
     renderer.autoClear = previousAutoClear;
     target.dispose();
+    normalTarget.dispose();
 
-    // Downsample (alpha-weighted box filter) and flip to top-down rows.
-    const out = new Uint8ClampedArray(atlasW * atlasH * 4);
-    const srcW = atlasW * ss;
+    // Downsample (coverage-weighted box filter) and flip to top-down rows.
+    const albedo = new Uint8ClampedArray(size * size * 4);
+    const normal = new Uint8ClampedArray(size * size * 4);
+    const depth = new Uint8ClampedArray(size * size);
+    const srcW = size * ss;
 
-    for (let y = 0; y < atlasH; y++) {
-        for (let x = 0; x < atlasW; x++) {
-            let r = 0;
-            let g = 0;
-            let b = 0;
-            let al = 0;
+    for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+            const sum = [0, 0, 0, 0, 0, 0, 0];
+            let covered = 0;
 
             for (let sy = 0; sy < ss; sy++) {
                 for (let sx = 0; sx < ss; sx++) {
-                    const glRow = (atlasH - 1 - y) * ss + (ss - 1 - sy);
+                    const glRow = (size - 1 - y) * ss + (ss - 1 - sy);
                     const o = (glRow * srcW + x * ss + sx) * 4;
-                    const w = pixels[o + 3];
-                    r += pixels[o] * w;
-                    g += pixels[o + 1] * w;
-                    b += pixels[o + 2] * w;
-                    al += w;
+                    const w = albedoPixels[o + 3];
+
+                    if (w === 0) {
+                        continue;
+                    }
+
+                    covered += w;
+                    sum[0] += albedoPixels[o] * w;
+                    sum[1] += albedoPixels[o + 1] * w;
+                    sum[2] += albedoPixels[o + 2] * w;
+                    sum[3] += normalPixels[o] * w;
+                    sum[4] += normalPixels[o + 1] * w;
+                    sum[5] += normalPixels[o + 2] * w;
+                    sum[6] += normalPixels[o + 3] * w;
                 }
             }
 
-            const o = (y * atlasW + x) * 4;
+            const o = (y * size + x) * 4;
+            const alpha = covered / (ss * ss);
 
-            if (al > 0) {
-                out[o] = r / al;
-                out[o + 1] = g / al;
-                out[o + 2] = b / al;
+            if (covered > 0) {
+                albedo[o] = sum[0] / covered;
+                albedo[o + 1] = sum[1] / covered;
+                albedo[o + 2] = sum[2] / covered;
+                normal[o] = sum[3] / covered;
+                normal[o + 1] = sum[4] / covered;
+                normal[o + 2] = sum[5] / covered;
+                depth[y * size + x] = sum[6] / covered;
+            } else {
+                depth[y * size + x] = 128;
             }
 
-            out[o + 3] = al / (ss * ss);
+            albedo[o + 3] = alpha;
+            normal[o + 3] = alpha;
         }
     }
 
-    const raw: RawImage = { data: out, width: atlasW, height: atlasH };
-    dilateColor(raw);
-    const texture = ctx.rawTexture(raw, 'impostor');
+    const albedoRaw: RawImage = { data: albedo, width: size, height: size };
+    const normalRaw: RawImage = { data: normal, width: size, height: size };
+    dilateColor(albedoRaw);
+    dilateColor(normalRaw);
+
+    // Normal atlas alpha: depth along the view (0.5 = the sphere's centre plane).
+    for (let i = 0; i < size * size; i++) {
+        normal[i * 4 + 3] = depth[i];
+    }
+
+    const map = ctx.rawTexture(albedoRaw, 'impostor-albedo');
+    const normalMap = ctx.rawTexture(normalRaw, 'impostor-normal');
+    normalMap.colorSpace = THREE.NoColorSpace;
     const material = new THREE.MeshStandardMaterial({
-        name: 'impostor',
-        map: texture,
+        name: 'impostor_octahedral',
+        map,
+        normalMap,
         alphaTest: 0.5,
-        side: THREE.DoubleSide,
+        side: THREE.FrontSide,
         roughness: 0.9,
         metalness: 0,
     });
+    material.userData = {
+        impostor: 'octahedral',
+        frames: n,
+        radius: round3(radius),
+        center: [round3(center.x), round3(center.y), round3(center.z)],
+    };
     ctx.materials.add(material);
 
-    const quads: Quad[] = IMPOSTOR_ANGLES.map((deg, i) => {
-        const u0 = horizontal ? (i * cw) / atlasW : 0;
-        const u1 = horizontal ? ((i + 1) * cw) / atlasW : 1;
-        const v0 = horizontal ? 0 : (i * ch) / atlasH;
-        const v1 = horizontal ? 1 : ((i + 1) * ch) / atlasH;
-
-        return {
-            angle: deg,
-            left: -radius,
-            right: radius,
-            height,
-            lean: 0,
-            uv: [u0, v0, u1, v1],
-        };
-    });
-    const geometry = buildQuads(quads);
+    // One quad covering the sphere (the game faces it to the camera; uv = corner).
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+        'position',
+        new THREE.Float32BufferAttribute(
+            [
+                center.x - radius,
+                center.y - radius,
+                center.z,
+                center.x + radius,
+                center.y - radius,
+                center.z,
+                center.x + radius,
+                center.y + radius,
+                center.z,
+                center.x - radius,
+                center.y + radius,
+                center.z,
+            ],
+            3,
+        ),
+    );
+    geometry.setAttribute(
+        'normal',
+        new THREE.Float32BufferAttribute(
+            [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1],
+            3,
+        ),
+    );
+    geometry.setAttribute(
+        'uv',
+        new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2),
+    );
+    geometry.setIndex([0, 1, 2, 0, 2, 3]);
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
     ctx.geometries.add(geometry);
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = `${name}_impostor`;

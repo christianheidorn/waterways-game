@@ -63,6 +63,12 @@ export class GpuCullFrame {
     readonly occlusion = uniform(0);
     /** Extra sphere radius for the occlusion test (camera movement since the depth was rendered). */
     readonly occlusionMargin = uniform(0);
+    /**
+     * 1 while two-phase occlusion runs this frame: instances the first pass rejects against last
+     * frame's pyramid are kept as candidates and tested again, after the scene pass, against a pyramid
+     * of this frame's depth (see GpuFoliageType.lateComputeNodes).
+     */
+    readonly late = uniform(0);
     readonly lodBias = uniform(1);
     readonly shadowDistance = uniform(120);
     /** 1 while the water reflection renders this frame (its visibility lists are filled). */
@@ -246,7 +252,10 @@ export type GpuTypeStats = {
     shadowInstances: number;
     /** Instances drawn in the water reflection (all LODs). */
     reflectionInstances: number;
+    /** Rejected by the first occlusion test (last frame's depth). */
     occluded: number;
+    /** Of those, drawn after all by the second test (this frame's depth, two-phase occlusion). */
+    lateVisible: number;
 };
 
 /**
@@ -279,6 +288,11 @@ export class GpuFoliageType {
     private draws: Draw[] = [];
     /** Draws of the water reflection pass (hidden otherwise). */
     private reflectionDraws: THREE.Mesh[] = [];
+    /** Draws of the second occlusion phase (only visible while it renders, see setLatePass). */
+    private lateDraws: THREE.Mesh[] = [];
+    /** First late visibility region (one per LOD), then the region of the occlusion candidates. */
+    private lateRegion = 0;
+    private lateComputes: THREE.ComputeNode[] = [];
     /** Visibility lists: one per LOD, the shadow casters (far, near), then one per reflection LOD. */
     private regions = 0;
     private materials: THREE.Material[] = [];
@@ -392,6 +406,34 @@ export class GpuFoliageType {
         this.rebuild();
     }
 
+    /**
+     * Second occlusion phase (after the scene pass): re-tests the instances the first pass rejected
+     * against the Hi-Z pyramid of this frame's depth and writes the draw arguments of the late draws.
+     */
+    lateComputeNodes(): THREE.ComputeNode[] {
+        if (!this.config || !this.instances) {
+            return [];
+        }
+
+        if (this.frame.hiz.version !== this.hizVersion) {
+            this.buildComputes();
+        }
+
+        return this.lateComputes;
+    }
+
+    /** Shows only the late draws (the instances the second occlusion phase found visible). */
+    setLatePass(late: boolean): void {
+        for (const mesh of this.lateDraws) {
+            mesh.visible = late;
+        }
+    }
+
+    /** Late draws of this type (the render filter of the second phase draws only these). */
+    get lateMeshes(): readonly THREE.Mesh[] {
+        return this.lateDraws;
+    }
+
     /** Swaps the main draws for the reflection draws while the water reflection renders. */
     setReflectionPass(reflection: boolean): void {
         for (const draw of this.draws) {
@@ -503,7 +545,11 @@ export class GpuFoliageType {
         }
 
         // Slots past the allocated ranges are never live.
-        this.computes[0].count = Math.max(1, this.top);
+        this.computes[1].count = Math.max(1, this.top);
+
+        if (this.lateComputes.length) {
+            this.lateComputes[0].count = Math.max(1, this.top);
+        }
 
         return [...this.fillPasses(), ...this.computes];
     }
@@ -552,6 +598,7 @@ export class GpuFoliageType {
         this.reading = true;
         const lods = this.config?.lods.length ?? 0;
         const regions = this.regions;
+        const late = this.lateRegion;
         const attribute = this.stats.value as THREE.StorageBufferAttribute;
         renderer
             .getArrayBufferAsync(attribute)
@@ -561,9 +608,12 @@ export class GpuFoliageType {
                     lodInstances: Array.from(counts.slice(0, lods)),
                     shadowInstances: counts[lods] ?? 0,
                     reflectionInstances: counts
-                        .slice(lods + 2, regions)
+                        .slice(lods + 2, late)
                         .reduce((sum, n) => sum + n, 0),
                     occluded: counts[regions] ?? 0,
+                    lateVisible: counts
+                        .slice(late, late + lods)
+                        .reduce((sum, n) => sum + n, 0),
                 };
             })
             .catch(() => {
@@ -577,11 +627,12 @@ export class GpuFoliageType {
     dispose(): void {
         this.disposeDraws();
 
-        for (const node of this.computes) {
+        for (const node of [...this.computes, ...this.lateComputes]) {
             node.dispose();
         }
 
         this.computes = [];
+        this.lateComputes = [];
         this.instances = null;
         this.visible = null;
         this.counters = null;
@@ -771,11 +822,14 @@ export class GpuFoliageType {
         this.disposeDraws();
         const lodCount = config.lods.length;
         // Regions of the visibility list: one per LOD, the shadow casters of the far and the near
-        // cascade, one per reflection LOD.
+        // cascade, one per reflection LOD, one per late LOD (second occlusion phase), and the
+        // candidates of the second phase (instances the first occlusion test rejected).
         const shadowRegion = lodCount;
         const nearShadowRegion = lodCount + 1;
-        const regions = lodCount + 2 + (config.reflect ? lodCount : 0);
+        const lateRegion = lodCount + 2 + (config.reflect ? lodCount : 0);
+        const regions = lateRegion + lodCount + 1;
         this.regions = regions;
+        this.lateRegion = lateRegion;
         this.visible = instancedArray(this.capacity * regions, 'uint');
         // Counters: one per region, then the occlusion-culled instances.
         this.counters = instancedArray(regions + 1, 'uint').toAtomic();
@@ -838,6 +892,12 @@ export class GpuFoliageType {
 
         config.lods.forEach(({ geometry, material }, lod) => {
             const base = indexed(geometry);
+            // Main and late draws share their materials (one pipeline): the late draws read the late
+            // list of their LOD through an object-scope uniform.
+            const mainRegion = uniform(lod, 'uint').onObjectUpdate(
+                ({ object }) =>
+                    object?.userData.lateFoliage ? lateRegion + lod : lod,
+            );
             const multi = Array.isArray(material) && base.groups.length > 0;
             const groups = multi
                 ? base.groups
@@ -855,6 +915,7 @@ export class GpuFoliageType {
             const proxy = lod === 0 ? config.shadowProxy : null;
             const offsets: DrawOffsets[] = [];
             const reflectionOffsets: DrawOffsets[] = [];
+            const lateOffsets: DrawOffsets[] = [];
             const reflectionRegion = lodCount + 2 + lod;
             let triangles = 0;
 
@@ -891,6 +952,16 @@ export class GpuFoliageType {
                     });
                 }
 
+                entries.push({
+                    region: lateRegion + lod,
+                    count,
+                    first: group.start,
+                });
+                lateOffsets.push({
+                    main: argOffset(entries.length - 1),
+                    shadow: null,
+                    nearShadow: null,
+                });
                 offsets.push({ main, shadow, nearShadow });
                 triangles += Math.floor(count / 3);
             }
@@ -926,17 +997,28 @@ export class GpuFoliageType {
                     ? sources.map(nodeMaterial)
                     : nodeMaterial(sources[0]);
             };
+            const mainMaterials = nodeMaterials(
+                source(mainRegion),
+                lod === 0 ? source(shadowSourceRegion) : undefined,
+            );
             const mesh = addMesh(
                 `Foliage_${config.name}_gpu${lod}`,
                 base,
-                nodeMaterials(
-                    source(lod),
-                    lod === 0 ? source(shadowSourceRegion) : undefined,
-                ),
+                mainMaterials,
             );
             mesh.castShadow = lod === 0 && this.castShadows.value > 0;
             meshes.push({ mesh, offsets });
             this.draws.push({ mesh, lod, triangles, calls: groups.length });
+
+            const late = addMesh(
+                `Foliage_${config.name}_late${lod}`,
+                base,
+                mainMaterials,
+            );
+            late.userData.lateFoliage = true;
+            late.visible = false;
+            meshes.push({ mesh: late, offsets: lateOffsets });
+            this.lateDraws.push(late);
 
             if (config.reflect) {
                 const reflection = addMesh(
@@ -981,70 +1063,63 @@ export class GpuFoliageType {
                 geometry.setIndirect(this.args, offsets[0].main);
             }
 
-            if (
-                config.reflect ||
-                offsets.length > 1 ||
-                offsets[0].shadow !== null
-            ) {
-                // Every material group has its own index range, LOD0 draws the shadow list (and the
-                // shadow proxy range) in the shadow pass, and the reflection draws share the LOD
-                // geometry: pick the arguments per draw. The offset is resolved when the draw is
-                // encoded, not stored in onBeforeRender: the main pass renders the shadow map from
-                // within the node updates of a draw (after its onBeforeRender), which would leave the
-                // shadow offset behind for that main draw: the shadow list's instance count of
-                // main-list instances, in a different order every frame (whole trees flickering in
-                // and out). Meshes sharing the geometry (main and reflection) share this state.
-                let pass = passes.get(geometry);
+            // Every material group has its own index range, LOD0 draws the shadow list (and the
+            // shadow proxy range) in the shadow pass, and the reflection draws share the LOD
+            // geometry: pick the arguments per draw. The offset is resolved when the draw is
+            // encoded, not stored in onBeforeRender: the main pass renders the shadow map from
+            // within the node updates of a draw (after its onBeforeRender), which would leave the
+            // shadow offset behind for that main draw: the shadow list's instance count of
+            // main-list instances, in a different order every frame (whole trees flickering in
+            // and out). Meshes sharing the geometry (main, late and reflection) share this state.
+            let pass = passes.get(geometry);
 
-                if (!pass) {
-                    const state = {
-                        scene: null as THREE.Scene | null,
-                        main: offsets[0].main,
-                        shadow: offsets[0].shadow ?? offsets[0].main,
-                    };
-                    const inShadowPass = () =>
-                        !!(
-                            state.scene?.overrideMaterial as {
-                                isShadowPassMaterial?: boolean;
-                            } | null
-                        )?.isShadowPassMaterial;
-                    Object.defineProperty(geometry, 'indirectOffset', {
-                        configurable: true,
-                        get: () => (inShadowPass() ? state.shadow : state.main),
-                        // setIndirect(null) on dispose: the property is replaced on the next build.
-                        set: () => undefined,
-                    });
-                    pass = { state, inShadowPass };
-                    passes.set(geometry, pass);
-                }
-
-                const { state, inShadowPass } = pass;
-                mesh.onBeforeRender = (
-                    _renderer,
-                    scene,
-                    camera,
-                    _geometry,
-                    _material,
-                    group,
-                ) => {
-                    const index = group
-                        ? geometry.groups.indexOf(
-                              group as unknown as THREE.GeometryGroup,
-                          )
-                        : 0;
-                    const entry = offsets[Math.max(0, index)];
-                    state.scene = scene;
-
-                    if (inShadowPass()) {
-                        const near = camera === this.frame.nearShadowCamera;
-                        state.shadow =
-                            (near ? entry.nearShadow : entry.shadow) ??
-                            entry.main;
-                    } else {
-                        state.main = entry.main;
-                    }
+            if (!pass) {
+                const state = {
+                    scene: null as THREE.Scene | null,
+                    main: offsets[0].main,
+                    shadow: offsets[0].shadow ?? offsets[0].main,
                 };
+                const inShadowPass = () =>
+                    !!(
+                        state.scene?.overrideMaterial as {
+                            isShadowPassMaterial?: boolean;
+                        } | null
+                    )?.isShadowPassMaterial;
+                Object.defineProperty(geometry, 'indirectOffset', {
+                    configurable: true,
+                    get: () => (inShadowPass() ? state.shadow : state.main),
+                    // setIndirect(null) on dispose: the property is replaced on the next build.
+                    set: () => undefined,
+                });
+                pass = { state, inShadowPass };
+                passes.set(geometry, pass);
             }
+
+            const { state, inShadowPass } = pass;
+            mesh.onBeforeRender = (
+                _renderer,
+                scene,
+                camera,
+                _geometry,
+                _material,
+                group,
+            ) => {
+                const index = group
+                    ? geometry.groups.indexOf(
+                          group as unknown as THREE.GeometryGroup,
+                      )
+                    : 0;
+                const entry = offsets[Math.max(0, index)];
+                state.scene = scene;
+
+                if (inShadowPass()) {
+                    const near = camera === this.frame.nearShadowCamera;
+                    state.shadow =
+                        (near ? entry.nearShadow : entry.shadow) ?? entry.main;
+                } else {
+                    state.main = entry.main;
+                }
+            };
         }
 
         this.entries = entries;
@@ -1054,7 +1129,7 @@ export class GpuFoliageType {
     private buildComputes(): void {
         const config = this.config!;
 
-        for (const node of this.computes) {
+        for (const node of [...this.computes, ...this.lateComputes]) {
             node.dispose();
         }
 
@@ -1071,12 +1146,22 @@ export class GpuFoliageType {
         const shadowRegion = lodCount;
         const nearShadowRegion = lodCount + 1;
         const reflectionRegion = lodCount + 2;
+        const lateRegion = this.lateRegion;
+        const candidateRegion = lateRegion + lodCount;
         const occludedSlot = this.regions;
         const falloff = config.falloff;
         const center = config.center.clone();
         const radius = config.radius;
         const hiz = frame.hiz.nodes;
         const castShadows = this.castShadows;
+        // Bounding sphere: model centre through the instance transform, radius × scale.
+        const c = vec3(center.x, center.y, center.z);
+        const sphereOf = (
+            pos: Node<'vec3'>,
+            r0: Node<'vec4'>,
+            r1: Node<'vec4'>,
+            r2: Node<'vec4'>,
+        ) => pos.add(vec3(dot(r0.xyz, c), dot(r1.xyz, c), dot(r2.xyz, c)));
 
         const cull = Fn(() => {
             const i = instanceIndex;
@@ -1172,11 +1257,7 @@ export class GpuFoliageType {
                     .assign(i);
             });
 
-            // Bounding sphere: model centre through the instance transform, radius × scale.
-            const c = vec3(center.x, center.y, center.z);
-            const sphere = pos
-                .add(vec3(dot(r0.xyz, c), dot(r1.xyz, c), dot(r2.xyz, c)))
-                .toVar();
+            const sphere = sphereOf(pos, r0, r1, r2).toVar();
             const r = data.y.mul(radius).add(SWAY_MARGIN).toVar();
 
             // The near sun cascade's casters: those whose sphere reaches into its square in light
@@ -1256,6 +1337,23 @@ export class GpuFoliageType {
 
                     If(occluded.greaterThan(0.5), () => {
                         atomicAdd(counters.element(occludedSlot), 1);
+
+                        // Two-phase occlusion: tested again against this frame's depth after the
+                        // scene pass (index × 8 + LOD).
+                        If(frame.late.greaterThan(0.5), () => {
+                            const slot = atomicAdd(
+                                counters.element(candidateRegion),
+                                1,
+                            );
+                            visible
+                                .element(
+                                    uint(candidateRegion)
+                                        .mul(capacity)
+                                        .add(slot),
+                                )
+                                .assign(i.mul(8).add(lod));
+                        });
+
                         Return();
                     });
                 });
@@ -1267,26 +1365,103 @@ export class GpuFoliageType {
 
         const args = storage(this.args!, 'uint', this.entries.length * 5);
         const entries = this.entries;
+        const isLate = (region: number) =>
+            region >= lateRegion && region < candidateRegion;
+        // The candidates of the second phase are collected from scratch every frame.
+        const begin = Fn(() => {
+            atomicStore(counters.element(candidateRegion), 0);
+        })().compute(1);
         const finalize = Fn(() => {
             entries.forEach((entry, i) => {
-                args.element(i * 5 + 1).assign(
-                    atomicLoad(counters.element(entry.region)),
-                );
+                if (!isLate(entry.region)) {
+                    args.element(i * 5 + 1).assign(
+                        atomicLoad(counters.element(entry.region)),
+                    );
+                }
             });
 
             for (let r = 0; r <= occludedSlot; r++) {
+                if (!isLate(r) && r !== candidateRegion) {
+                    stats.element(r).assign(atomicLoad(counters.element(r)));
+                    atomicStore(counters.element(r), 0);
+                }
+            }
+        })().compute(1);
+
+        this.computes = [begin, cull, finalize];
+        this.lateComputes = [];
+
+        if (!hiz) {
+            return;
+        }
+
+        // Second phase: every candidate against the pyramid of this frame's depth (built from the
+        // scene pass, which drew the first phase's survivors). The previous-frame matrices are this
+        // frame's camera by now (GpuCullFrame.setPrevious), so no extra margin.
+        const lateCull = Fn(() => {
+            const t = instanceIndex;
+
+            If(
+                t.greaterThanEqual(
+                    atomicLoad(counters.element(candidateRegion)),
+                ),
+                () => {
+                    Return();
+                },
+            );
+
+            const packed = visible.element(
+                uint(candidateRegion).mul(capacity).add(t),
+            );
+            const i = packed.shiftRight(3).toVar();
+            const lod = packed.bitAnd(7).toVar();
+            const base = i.mul(4);
+            const data = instances.element(base.add(3)).toVar();
+            const r0 = instances.element(base).toVar();
+            const r1 = instances.element(base.add(1)).toVar();
+            const r2 = instances.element(base.add(2)).toVar();
+            const pos = vec3(r0.w, r1.w, r2.w);
+            const sphere = sphereOf(pos, r0, r1, r2).toVar();
+            const r = data.y.mul(radius).add(SWAY_MARGIN);
+            const occluded = occludedNode(
+                frame.hiz,
+                hiz,
+                sphere,
+                r,
+                frame.prevView,
+                frame.prevProj,
+                frame.near,
+            );
+
+            If(occluded.lessThan(0.5), () => {
+                const region = lod.add(lateRegion);
+                const slot = atomicAdd(counters.element(region), 1);
+                visible.element(region.mul(capacity).add(slot)).assign(i);
+            });
+        })().compute(this.capacity);
+        const lateFinalize = Fn(() => {
+            entries.forEach((entry, i) => {
+                if (isLate(entry.region)) {
+                    args.element(i * 5 + 1).assign(
+                        atomicLoad(counters.element(entry.region)),
+                    );
+                }
+            });
+
+            for (let r = lateRegion; r < candidateRegion; r++) {
                 stats.element(r).assign(atomicLoad(counters.element(r)));
                 atomicStore(counters.element(r), 0);
             }
         })().compute(1);
 
-        this.computes = [cull, finalize];
+        this.lateComputes = [lateCull, lateFinalize];
     }
 
     private disposeDraws(): void {
         for (const mesh of [
             ...this.draws.map((draw) => draw.mesh),
             ...this.reflectionDraws,
+            ...this.lateDraws,
         ]) {
             this.group.remove(mesh);
             // The geometry belongs to the type (shared LOD); only the indirect draw goes.
@@ -1300,6 +1475,7 @@ export class GpuFoliageType {
 
         this.draws = [];
         this.reflectionDraws = [];
+        this.lateDraws = [];
         this.materials = [];
     }
 }

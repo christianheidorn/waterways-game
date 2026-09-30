@@ -65,9 +65,15 @@ export class HiZ {
 
     /**
      * Rebuilds the pyramid from `depth` (call before this frame's scene render). Returns false when
-     * the pyramid can't be used this frame (no depth yet, or the depth size just changed).
+     * the pyramid can't be used this frame (no depth yet, or the depth size just changed). With `build`
+     * false the pyramid is kept as it is (already built from that depth, e.g. by the second phase of
+     * two-phase occlusion); only its validity is checked.
      */
-    update(renderer: GameRenderer, depth: THREE.Texture): boolean {
+    update(
+        renderer: GameRenderer,
+        depth: THREE.Texture,
+        build = true,
+    ): boolean {
         const image = depth.image as { width?: number; height?: number };
         const w = image?.width ?? 0;
         const h = image?.height ?? 0;
@@ -93,7 +99,9 @@ export class HiZ {
             this.configure(w, h);
         }
 
-        void renderer.compute(this.builds.slice(0, this.levelCount));
+        if (build || resized) {
+            void renderer.compute(this.builds.slice(0, this.levelCount));
+        }
 
         // The depth of a resized pass is cleared, not last frame's: skip testing for one frame.
         return !resized;

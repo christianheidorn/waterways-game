@@ -1,13 +1,18 @@
 import * as THREE from 'three/webgpu';
 import {
+    abs,
     attribute,
     cameraPosition,
+    cameraViewMatrix,
+    clamp,
+    cross,
     dFdx,
     diffuseColor,
     dFdy,
     distance,
     dot,
     float,
+    floor,
     Fn,
     hash,
     log2,
@@ -33,6 +38,7 @@ import {
     uniform,
     uv,
     varying,
+    varyingProperty,
     vec2,
     vec3,
     vec4,
@@ -377,6 +383,16 @@ export function createFoliageMaterial(
     options: FoliageMaterialOptions,
 ): THREE.MeshStandardNodeMaterial {
     const material = toNodeMaterial(source, new FoliageNodeMaterial());
+    const octahedral = octahedralImpostorInfo(source);
+
+    if (octahedral) {
+        octahedralImpostor(material, octahedral, options);
+        leafTranslucency(material, options.globals);
+        lightingOnlyAlbedo(material, options.globals);
+
+        return material;
+    }
+
     material.positionNode = foliagePosition(options, options.instance);
 
     if (options.root && options.globals.groundColor) {
@@ -485,4 +501,234 @@ export function windStiffness(kind: string): number {
         : kind === 'conifer' || kind === 'broadleaf' || kind === 'palm'
           ? 0.35
           : 1;
+}
+
+// ---------------------------------------------------------------- octahedral impostors
+
+/**
+ * Bake data of an octahedral impostor material (FoliageBaker, glTF material extras): `frames` × `frames`
+ * views over the upper hemisphere (hemi-octahedral layout, a view at every grid vertex), each an
+ * orthographic image of the model's bounding sphere (`center`, `radius`, instance space) in `map`
+ * (albedo, alpha = coverage) and `normalMap` (rgb = instance-space normal, a = depth).
+ */
+export type OctahedralImpostorInfo = {
+    frames: number;
+    radius: number;
+    center: THREE.Vector3;
+    map: THREE.Texture;
+    normalMap: THREE.Texture | null;
+};
+
+export function octahedralImpostorInfo(
+    material: THREE.Material,
+): OctahedralImpostorInfo | null {
+    const data = material.userData as {
+        impostor?: string;
+        frames?: number;
+        radius?: number;
+        center?: number[];
+    };
+    const m = material as THREE.MeshStandardMaterial;
+
+    if (
+        data?.impostor !== 'octahedral' ||
+        !m.map ||
+        !data.frames ||
+        !data.radius ||
+        data.center?.length !== 3
+    ) {
+        return null;
+    }
+
+    return {
+        frames: data.frames,
+        radius: data.radius,
+        center: new THREE.Vector3(
+            data.center[0],
+            data.center[1],
+            data.center[2],
+        ),
+        map: m.map,
+        normalMap: m.normalMap ?? null,
+    };
+}
+
+/** Upper-hemisphere octahedral encoding of a direction (y up, y ≥ 0) → [-1, 1]². */
+function hemiOctEncode(d: Node<'vec3'>): Node<'vec2'> {
+    const p = d.xz.div(abs(d.x).add(abs(d.y)).add(abs(d.z)));
+
+    return vec2(p.x.add(p.y), p.x.sub(p.y));
+}
+
+function hemiOctDecode(e: Node<'vec2'>): Node<'vec3'> {
+    const x = e.x.add(e.y).mul(0.5);
+    const z = e.x.sub(e.y).mul(0.5);
+
+    return normalize(vec3(x, float(1).sub(abs(x)).sub(abs(z)), z));
+}
+
+/** Right axis of a view looking along -dir with +y up (as the baker's cameras). */
+function viewRight(dir: Node<'vec3'>): Node<'vec3'> {
+    return normalize(cross(vec3(0, 1, 0), dir).add(vec3(1e-5, 0, 0)));
+}
+
+/**
+ * Octahedral impostor (far LOD of baked trees and bushes): a camera-facing quad per instance that
+ * shows the 4 baked views around the view direction (in instance space), blended bilinearly, with
+ * the baked normals lit like the mesh. The quad covers the bounding sphere; each view's texture
+ * coordinates come from projecting the quad onto that view's plane (exact for orthographic views, so
+ * they interpolate linearly), clamped to the view's cell in the fragment stage.
+ */
+function octahedralImpostor(
+    material: FoliageNodeMaterial,
+    info: OctahedralImpostorInfo,
+    options: FoliageMaterialOptions,
+): void {
+    const { globals: g, uniforms: u, role } = options;
+    const n = info.frames;
+    const radius = float(info.radius);
+    const center = vec3(info.center.x, info.center.y, info.center.z);
+    const cellA = varyingProperty('vec4', 'vOctCellA');
+    const cellB = varyingProperty('vec4', 'vOctCellB');
+    const weights = varyingProperty('vec4', 'vOctWeights');
+    const grid = varyingProperty('vec2', 'vOctGrid');
+    const row0 = varyingProperty('vec3', 'vOctRow0');
+    const row1 = varyingProperty('vec3', 'vOctRow1');
+    const row2 = varyingProperty('vec3', 'vOctRow2');
+
+    material.positionNode = Fn(() => {
+        const rows = options.instance();
+        const r0 = rows.row0.toVar();
+        const r1 = rows.row1.toVar();
+        const r2 = rows.row2.toVar();
+        const instPos = vec3(r0.w, r1.w, r2.w).toVar();
+        // Camera in instance space (rotation × uniform scale: inverse = transpose / scale²).
+        const d = g.camPos.sub(instPos);
+        const s2 = dot(r0.xyz, r0.xyz);
+        const camLocal = r0.xyz
+            .mul(d.x)
+            .add(r1.xyz.mul(d.y))
+            .add(r2.xyz.mul(d.z))
+            .div(s2);
+        const toCam = camLocal.sub(center).toVar();
+        // Seen from below: the horizon views.
+        const view = normalize(
+            vec3(toCam.x, max(toCam.y, 0), toCam.z).add(vec3(0, 1e-4, 0)),
+        ).toVar();
+        const right = viewRight(view).toVar();
+        const up = cross(view, right).toVar();
+        const corner = uv().mul(2).sub(1);
+        const local = center
+            .add(right.mul(corner.x).add(up.mul(corner.y)).mul(radius))
+            .toVar();
+
+        // The 4 views around the view direction and their bilinear weights.
+        const cell = hemiOctEncode(view)
+            .mul(0.5)
+            .add(0.5)
+            .mul(n - 1)
+            .toVar();
+        const g0 = clamp(floor(cell), 0, n - 2).toVar();
+        const f = cell.sub(g0).clamp(0, 1).toVar();
+        weights.assign(
+            vec4(
+                f.x.oneMinus().mul(f.y.oneMinus()),
+                f.x.mul(f.y.oneMinus()),
+                f.x.oneMinus().mul(f.y),
+                f.x.mul(f.y),
+            ),
+        );
+        grid.assign(g0);
+        const frameUv = (ox: number, oy: number) => {
+            const dir = hemiOctDecode(
+                g0
+                    .add(vec2(ox, oy))
+                    .div(n - 1)
+                    .mul(2)
+                    .sub(1),
+            ).toVar();
+            const x = viewRight(dir).toVar();
+            const y = cross(dir, x);
+            const rel = local.sub(center);
+
+            // Within the view's cell: u to the right, v down (image rows top first).
+            return vec2(
+                dot(rel, x).div(radius).mul(0.5).add(0.5),
+                float(0.5).sub(dot(rel, y).div(radius).mul(0.5)),
+            );
+        };
+        cellA.assign(vec4(frameUv(0, 0), frameUv(1, 0)));
+        cellB.assign(vec4(frameUv(0, 1), frameUv(1, 1)));
+        row0.assign(r0.xyz);
+        row1.assign(r1.xyz);
+        row2.assign(r2.xyz);
+
+        // Distance fade and the LOD split, as for mesh LODs.
+        const camDist = distance(instPos.xz, g.camPos.xz);
+        const fadeEnd = u.fadeEnd.mul(g.fadeScale);
+        const fadeK = float(1)
+            .sub(smoothstep(fadeEnd.mul(0.92), fadeEnd, camDist))
+            .toVar();
+
+        if (role !== 'none') {
+            const dd = distance(instPos, g.camPos);
+            fadeK.mulAssign(
+                role === 'near' ? step(dd, u.lodSplit) : step(u.lodSplit, dd),
+            );
+        }
+
+        const p = local.mul(fadeK);
+        normalLocal.assign(normalize(toCam));
+        const world = vec3(
+            dot(r0.xyz, p).add(r0.w),
+            dot(r1.xyz, p).add(r1.w),
+            dot(r2.xyz, p).add(r2.w),
+        );
+        positionPrevious.assign(world);
+
+        return world;
+    })();
+
+    // premultiplied: rgb weighted by coverage (colour of the covered texels only where views differ).
+    const sample = (map: THREE.Texture, premultiplied = false) => {
+        const at = (ox: number, oy: number, local: Node<'vec2'>) => {
+            const t = texture(
+                map,
+                grid.add(vec2(ox, oy)).add(local.clamp(0.002, 0.998)).div(n),
+            );
+
+            return premultiplied ? vec4(t.rgb.mul(t.a), t.a) : t;
+        };
+
+        return at(0, 0, cellA.xy)
+            .mul(weights.x)
+            .add(at(1, 0, cellA.zw).mul(weights.y))
+            .add(at(0, 1, cellB.xy).mul(weights.z))
+            .add(at(1, 1, cellB.zw).mul(weights.w));
+    };
+
+    const albedo = sample(info.map, true).toVar();
+    material.colorNode = vec4(
+        albedo.rgb.div(max(albedo.a, 1e-3)).mul(uniform(material.color)),
+        1,
+    );
+    material.opacityNode = albedo.a;
+    material.map = null;
+
+    if (info.normalMap) {
+        const nm = sample(info.normalMap).rgb.mul(2).sub(1);
+        const nWorld = normalize(
+            vec3(dot(row0, nm), dot(row1, nm), dot(row2, nm)),
+        );
+        material.normalNode = normalize(
+            cameraViewMatrix.mul(vec4(nWorld, 0)).xyz,
+        );
+    }
+
+    material.normalMap = null;
+    material.side = THREE.FrontSide;
+
+    if (material.alphaTest <= 0) {
+        material.alphaTest = 0.5;
+    }
 }

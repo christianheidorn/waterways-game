@@ -8,7 +8,7 @@ import type {
     FoliageType,
     TerrainLayer,
 } from '../shared/types';
-import type { Foliage } from '../world/Foliage';
+import type { Foliage, FoliagePlacementContext } from '../world/Foliage';
 import { Props } from '../world/Props';
 import type { GridRect, Heightfield } from '../world/Heightfield';
 import type { SplatMap } from '../world/SplatMap';
@@ -29,7 +29,13 @@ import {
     terrace,
     thermalErosion,
 } from './tools/terrainOps';
-import type { FlattenMode } from './tools/terrainOps';
+import type {
+    FlattenMode,
+    HydraulicOptions,
+    ThermalOptions,
+} from './tools/terrainOps';
+import type { EditorWorkerClient } from './workers/EditorWorkerClient';
+import { writeRect } from './workers/gridRect';
 
 export type SculptTool =
     | 'sculpt'
@@ -141,6 +147,13 @@ export class Editor {
     readonly cursor = new THREE.Vector3();
     cursorValid = false;
     private stroking = false;
+    /** Editor worker (WebGL 2 fallback): erosion brush steps and scatter candidates off the main thread. */
+    worker: EditorWorkerClient | null = null;
+    /** Bumped when a stroke ends: worker results of an earlier stroke are dropped. */
+    private strokeId = 0;
+    private erosionBusy = false;
+    /** Brush time not yet handed to the worker (frames while a step was in flight). */
+    private erosionDt = 0;
     private strokeInvert = false;
     private rampStart: THREE.Vector3 | null = null;
     private rampMarker: THREE.Mesh;
@@ -459,13 +472,25 @@ export class Editor {
         this.callbacks.markDirty('splatmap');
     }
 
-    /** Procedurally scatters the given foliage types over the whole map (undoable). */
-    populateFoliage(typeIds: number[]): number {
+    /**
+     * Procedurally scatters the given foliage types over the whole map (undoable). With the editor
+     * worker (WebGL 2 fallback) the noise candidates are computed off the main thread first.
+     */
+    async populateFoliage(typeIds: number[]): Promise<number> {
+        const seed = Math.floor(Math.random() * 1e6);
+        const candidates = await scatterInWorker(
+            this.worker,
+            this.world.foliage,
+            this.ctx(),
+            typeIds,
+            seed,
+        );
         this.history.beginStroke('Scatter foliage');
         const count = this.world.foliage.populate(
             this.ctx(),
             typeIds,
-            Math.floor(Math.random() * 1e6),
+            seed,
+            candidates ?? undefined,
         );
         this.history.endStroke();
         this.callbacks.markDirty('foliage');
@@ -978,11 +1003,62 @@ export class Editor {
         this.history.beginStroke(`${s.group}`);
     }
 
+    /**
+     * Erosion brush step in the editor worker (WebGL 2 fallback): one step in flight at a time; the
+     * frames in between add up their time, so the brush erodes as fast as inline. A step that answers
+     * after the stroke ended is dropped (it would miss the stroke's undo step).
+     */
+    private erodeInWorker(
+        kind: 'hydraulic' | 'thermal',
+        x: number,
+        z: number,
+        dt: number,
+        options: HydraulicOptions | ThermalOptions,
+    ): void {
+        this.erosionDt += dt;
+
+        if (this.erosionBusy || !this.worker) {
+            return;
+        }
+
+        const hf = this.world.heights;
+        const stroke = this.strokeId;
+        const step = Math.min(this.erosionDt, 0.1);
+        this.erosionDt = 0;
+        this.erosionBusy = true;
+        this.worker
+            .erode(hf, kind, x, z, {
+                brush: { ...this.state.brush },
+                dt: step,
+                options,
+            })
+            .then((result) => {
+                if (!result || stroke !== this.strokeId || !this.stroking) {
+                    return;
+                }
+
+                writeRect(
+                    hf.data,
+                    hf.resolution,
+                    result.rect,
+                    1,
+                    result.heights,
+                );
+                this.onHeightsChanged(result.rect);
+            })
+            .catch(() => undefined)
+            .finally(() => {
+                this.erosionBusy = false;
+            });
+    }
+
     private endStroke(): void {
         if (!this.stroking) {
             return;
         }
 
+        this.strokeId++;
+        this.erosionDt = 0;
         this.stroking = false;
         this.history.endStroke();
         this.flushRebuilds();
@@ -1038,16 +1114,33 @@ export class Editor {
                         });
                         break;
                     case 'erosion':
-                        rect = thermalErosion(hf, x, z, b, dt, {
-                            talusAngle: s.talusAngle,
-                            iterations: 4,
-                        });
+                    case 'hydro': {
+                        const thermal = s.sculptTool === 'erosion';
+                        const options = thermal
+                            ? { talusAngle: s.talusAngle, iterations: 4 }
+                            : { droplets: s.hydroDroplets };
+
+                        if (this.worker?.available) {
+                            this.erodeInWorker(
+                                thermal ? 'thermal' : 'hydraulic',
+                                x,
+                                z,
+                                dt,
+                                options,
+                            );
+                            break;
+                        }
+
+                        rect = thermal
+                            ? thermalErosion(hf, x, z, b, dt, {
+                                  talusAngle: s.talusAngle,
+                                  iterations: 4,
+                              })
+                            : hydraulicErosion(hf, x, z, b, dt, {
+                                  droplets: s.hydroDroplets,
+                              });
                         break;
-                    case 'hydro':
-                        rect = hydraulicErosion(hf, x, z, b, dt, {
-                            droplets: s.hydroDroplets,
-                        });
-                        break;
+                    }
                     case 'noise':
                         rect = noise(
                             hf,
@@ -1699,4 +1792,36 @@ function normalizeAngle(rad: number): number {
     const full = Math.PI * 2;
 
     return ((rad % full) + full) % full;
+}
+
+/**
+ * Scatter candidates computed in the editor worker (null without a worker, or when it fails: the
+ * scatter then computes them inline).
+ */
+async function scatterInWorker(
+    worker: EditorWorkerClient | null,
+    foliage: Foliage,
+    ctx: FoliagePlacementContext,
+    typeIds: number[],
+    seed: number,
+): Promise<Map<number, Float32Array> | null> {
+    if (!worker?.available) {
+        return null;
+    }
+
+    const types = foliage.scatterTypes(typeIds);
+
+    try {
+        const response = (await worker.request({
+            op: 'scatter',
+            size: ctx.heights.size,
+            seed,
+            types,
+            landCover: !!ctx.landCoverAt,
+        })) as { candidates: [number, Float32Array][] };
+
+        return new Map(response.candidates);
+    } catch {
+        return null;
+    }
 }

@@ -229,6 +229,14 @@ export class PostFx {
         return this.scenePass.getTexture('depth');
     }
 
+    /**
+     * The scene pass renders multisampled: its colour is resolved and not kept, so nothing can be drawn
+     * on top of it afterwards (two-phase occlusion culling skips its second phase).
+     */
+    get multisampled(): boolean {
+        return this.structure?.aa === 'msaa';
+    }
+
     /** Human readable list of the active passes (F10 menu / stats). */
     get passNames(): string[] {
         return this.names;

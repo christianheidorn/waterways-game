@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createGltfLoader, loadGltfFirst } from '../util/gltf';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type {
     PropCollision,
@@ -85,7 +85,7 @@ export class Props implements CollisionProvider {
     private instances = new Map<string, PropInstance>();
     /** World matrix per instance (null until its model is loaded). */
     private matrices = new Map<string, THREE.Matrix4>();
-    private readonly loader = new GLTFLoader();
+    private readonly loader = createGltfLoader();
     private dirty = true;
     private readonly lastView = new THREE.Vector3(Infinity, 0, 0);
     private visible = new Map<number, number[]>();
@@ -104,6 +104,7 @@ export class Props implements CollisionProvider {
             return (
                 !old ||
                 old.model_url !== m.model_url ||
+                (old.optimized_url ?? null) !== (m.optimized_url ?? null) ||
                 old.target_height !== m.target_height
             );
         });
@@ -816,7 +817,10 @@ export class Props implements CollisionProvider {
         }
 
         try {
-            const gltf = await this.loader.loadAsync(ref.model_url);
+            const gltf = await loadGltfFirst(this.loader, [
+                ref.optimized_url,
+                ref.model_url,
+            ]);
 
             return await buildTemplate(gltf.scene, ref);
         } catch (error) {

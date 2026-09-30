@@ -298,6 +298,11 @@ function describeSystems(host: PerformanceHost): Record<string, unknown> {
             draw_calls: sum(placed, (t) => t.drawCalls),
             triangles: sum(placed, (t) => t.triangles),
             types: placed.map(foliageType),
+            // GPU path: hidden by Hi-Z occlusion, and drawn by the second phase of two-phase occlusion
+            // (hidden in last frame's depth, visible in this frame's).
+            occluded: foliage.occludedInstances,
+            drawn_late: foliage.lateInstances,
+            two_phase_occlusion: host.foliage.twoPhaseOcclusion,
         },
         ground_cover: {
             instances: sum(cover, (t) => t.instances),

@@ -141,6 +141,7 @@ const SECTIONS: Section[] = [
             'max_pixel_ratio',
             'sharpen',
             'dynamic_resolution',
+            'frame_rate_target',
             'target_fps',
             'max_fps',
             'renderer_backend',

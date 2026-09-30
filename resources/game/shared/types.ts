@@ -190,6 +190,11 @@ export type GraphicsSettings = {
     contrast: number;
     /** Lower render scale automatically to hold `target_fps`. */
     dynamic_resolution: boolean;
+    /**
+     * Frame rate dynamic resolution holds: the measured display refresh (`auto`, halved when even the
+     * lowest scale can't reach it), 60 or 120, or `off` for the manual `target_fps`.
+     */
+    frame_rate_target: 'auto' | '60' | '120' | 'off';
     target_fps: number;
     /** Frame rate cap, 0 = unlimited (vsync). */
     max_fps: number;
@@ -350,6 +355,8 @@ export type FoliageAssetRef = {
     name: string;
     style: FoliageAssetStyle;
     model_url: string | null;
+    /** Compressed copy (meshopt meshes, KTX2 textures) made by `assets:optimize`; model_url is the fallback. */
+    optimized_url?: string | null;
     thumbnail_url: string | null;
     /** Real-world height of the baked model in metres (before per-instance scale). */
     height: number | null;
@@ -436,6 +443,8 @@ export type PropModelRef = {
     name: string;
     category: string;
     model_url: string | null;
+    /** Compressed copy (meshopt meshes, KTX2 textures) made by `assets:optimize`; model_url is the fallback. */
+    optimized_url?: string | null;
     thumbnail_url: string | null;
     /** Real-world height the model is scaled to (m); null = its own size. */
     target_height: number | null;

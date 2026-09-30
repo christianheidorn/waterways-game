@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\FoliageKind;
+use App\Mcp\Assets\AssetOptimizer;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -109,6 +110,8 @@ class FoliageAsset extends Model
             'name' => $this->name,
             'style' => $this->style,
             'model_url' => $this->isReady() ? $this->url($this->model_path) : null,
+            // Compressed copy (meshopt + KTX2, `assets:optimize` / optimize_assets); the game falls back to model_url.
+            'optimized_url' => $this->isReady() ? AssetOptimizer::optimizedUrl($this->model_path, (string) ($this->updated_at?->timestamp ?? 0)) : null,
             'thumbnail_url' => $this->url($this->thumbnail_path),
             'height' => isset($meta['height']) ? (float) $meta['height'] : null,
             'triangles' => array_values(array_map('intval', $meta['triangles'] ?? [])),

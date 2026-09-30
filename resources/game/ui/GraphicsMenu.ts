@@ -107,6 +107,7 @@ export class GraphicsMenu {
     private renderScale: SliderHandle;
     private pixelRatioCap: SliderHandle;
     private targetFps: SliderHandle;
+    private frameTarget: SegmentHandle<GraphicsSettings['frame_rate_target']>;
     private maxFps: SliderHandle;
     private dynRes: { el: HTMLElement; set: (v: boolean) => void };
     private backendSelect: SegmentHandle<GraphicsSettings['renderer_backend']>;
@@ -209,6 +210,25 @@ export class GraphicsMenu {
         this.dynRes = toggle('Dynamic resolution', false, (v) =>
             patch({ dynamic_resolution: v }),
         );
+        this.frameTarget = segmented<GraphicsSettings['frame_rate_target']>(
+            [
+                {
+                    value: 'auto',
+                    label: 'Refresh',
+                    title: 'Hold the measured display refresh rate (e.g. 120 Hz), or half of it when even the lowest scale cannot',
+                },
+                { value: '60', label: '60', title: 'Hold 60 fps' },
+                { value: '120', label: '120', title: 'Hold 120 fps' },
+                {
+                    value: 'off',
+                    label: 'Manual',
+                    title: 'Hold the target frame rate below',
+                },
+            ],
+            'auto',
+            (v) => patch({ frame_rate_target: v }),
+            'ww-compact',
+        );
         this.targetFps = slider({
             label: 'Target frame rate',
             min: 30,
@@ -301,6 +321,15 @@ export class GraphicsMenu {
                     this.renderScale.el,
                     this.pixelRatioCap.el,
                     this.dynRes.el,
+                    h(
+                        'div',
+                        {
+                            class: 'ww-gfx-row',
+                            title: 'Frame rate dynamic resolution holds',
+                        },
+                        h('span', { class: 'ww-gfx-row-label' }, 'Target'),
+                        this.frameTarget.el,
+                    ),
                     this.targetFps.el,
                     this.maxFps.el,
                 ),
@@ -392,6 +421,7 @@ export class GraphicsMenu {
         this.pixelRatioCap.set(g.max_pixel_ratio);
         this.dynRes.set(g.dynamic_resolution);
         this.targetFps.set(g.target_fps);
+        this.frameTarget.set(g.frame_rate_target ?? 'auto');
         this.maxFps.set(g.max_fps);
         this.backendSelect.set(g.renderer_backend ?? 'auto');
         this.syncBackendNote();
@@ -455,6 +485,8 @@ export class GraphicsMenu {
                 ? ` · ${stats.gpuMs.toFixed(1)} ms GPU`
                 : '') +
             (extra.backend ? ` · ${BACKEND_LABELS[extra.backend]}` : '') +
+            (stats.refreshHz ? ` · ${stats.refreshHz} Hz display` : '') +
+            (stats.targetFps ? ` · holding ${stats.targetFps} fps` : '') +
             '\n' +
             `${stats.drawCalls.toLocaleString()} draw calls · ${(stats.triangles / 1e6).toFixed(2)}M triangles\n` +
             `Render ${resolution} · ${extra.passes.join(' → ')}`;

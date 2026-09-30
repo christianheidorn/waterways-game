@@ -1,4 +1,6 @@
 import * as THREE from 'three/webgpu';
+import { EditorWorkerClient } from '../editor/workers/EditorWorkerClient';
+import { configureCompressedTextures } from '../util/gltf';
 import { Editor } from '../editor/Editor';
 import type { DirtyChannel } from '../editor/Editor';
 import { EditorPanel } from '../editor/ui/EditorPanel';
@@ -68,7 +70,12 @@ import { Wetness } from '../world/Wetness';
 import { Api } from './Api';
 import { Bridge } from './Bridge';
 import type { BootConfig } from './config';
-import { DynamicResolution } from './DynamicResolution';
+import {
+    DynamicResolution,
+    RefreshFallback,
+    RefreshRate,
+    resolveTargetFps,
+} from './DynamicResolution';
 import { GpuProfiler } from './GpuProfiler';
 import { Input } from './Input';
 import { PostFx } from './PostFx';
@@ -101,6 +108,15 @@ export class Game {
     private postFx!: PostFx;
     private profiler: GpuProfiler | null = null;
     private dynamicResolution = new DynamicResolution();
+    /** Editor worker (WebGL 2 fallback): erosion, scatter and ground cover off the main thread. */
+    private editorWorker: EditorWorkerClient | null = null;
+    /** Display refresh rate, measured from animation frame intervals. */
+    readonly refreshRate = new RefreshRate();
+    private readonly refreshFallback = new RefreshFallback();
+    /** Smoothed frame interval (ms) for the refresh fallback. */
+    private intervalEma = 0;
+    /** Frame rate dynamic resolution holds right now (0 while it is off). */
+    dynamicTargetFps = 0;
     /** Project graphics settings from the studio (before per-device overrides). */
     private graphicsDefaults!: GraphicsSettings;
     private graphicsMenu: GraphicsMenu | null = null;
@@ -369,6 +385,13 @@ export class Game {
                     render_scale: round2(this.effectiveRenderScale()),
                     configured_render_scale: g.render_scale,
                     dynamic_resolution: g.dynamic_resolution,
+                    frame_rate_target: g.frame_rate_target ?? 'auto',
+                    refresh_hz: this.refreshRate.measured
+                        ? this.refreshRate.hz
+                        : null,
+                    target_fps: this.dynamicTargetFps || null,
+                    // Erosion, scatter and ground cover run in a web worker (WebGL 2 fallback).
+                    editor_worker: !!this.editorWorker?.available,
                     device_pixel_ratio: round2(window.devicePixelRatio),
                     quality_preset: g.quality_preset,
                 };
@@ -662,6 +685,8 @@ export class Game {
             trackTimestamp: true,
         });
         await renderer.init();
+        // KTX2 textures of compressed library models transcode to what this GPU supports.
+        configureCompressedTextures(renderer);
         renderer.outputColorSpace = THREE.SRGBColorSpace;
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
         renderer.shadowMap.enabled = true;
@@ -683,6 +708,13 @@ export class Game {
         this.scene.matrixAutoUpdate = false;
         this.atmosphere = new Atmosphere(renderer, this.scene);
         this.postFx = new PostFx(renderer, this.scene, this.camera);
+        // three's WebGPU renderer calls it with (renderer, scene, camera, renderTarget).
+        this.scene.onAfterRender = (_renderer, _scene, camera, target) =>
+            this.afterSceneRender(
+                renderer,
+                camera,
+                target as unknown as THREE.RenderTarget | null,
+            );
         this.postFx.setLightSource(this.atmosphere);
         this.profiler = new GpuProfiler(renderer);
 
@@ -807,9 +839,34 @@ export class Game {
         const wetness = new Wetness(heights, waterGrid);
         wetness.compute();
         material.setWetness(wetness.texture);
+        // Editor work off the main thread on the WebGL 2 fallback (no GPU compute there): erosion
+        // brushes, the foliage scatter and ground cover tiles (editor/workers). `?workers=1` / `0`
+        // forces it on / off.
+        const workersParam = new URLSearchParams(window.location.search).get(
+            'workers',
+        );
+
+        if (
+            workersParam === '1' ||
+            (workersParam !== '0' && this.backend === 'webgl')
+        ) {
+            this.editorWorker?.dispose();
+            this.editorWorker = new EditorWorkerClient();
+        }
+
+        const worker = this.editorWorker?.available ? this.editorWorker : null;
+        foliage.coverWorker = worker;
         // Ground cover: grass etc. grown by the terrain layers wherever they are painted.
-        const coverAt = (rect?: GridRect) =>
-            rect
+        const coverAt = (rect?: GridRect) => {
+            if (worker) {
+                if (rect) {
+                    worker.patchWorld(heights, waterGrid, splat, rect);
+                } else {
+                    worker.setWorld(heights, waterGrid, splat);
+                }
+            }
+
+            return rect
                 ? foliage.invalidateGroundCover(
                       heights.colToX(rect.x0 - 1),
                       heights.rowToZ(rect.z0 - 1),
@@ -822,6 +879,8 @@ export class Game {
                       Infinity,
                       Infinity,
                   );
+        };
+        worker?.setWorld(heights, waterGrid, splat);
         const waterLevelAt = (x: number, z: number) => water.levelAt(x, z);
         foliage.setGroundCover(m.layers, {
             heights,
@@ -935,6 +994,9 @@ export class Game {
             },
             settings.editor,
         );
+        this.editor.worker = this.editorWorker?.available
+            ? this.editorWorker
+            : null;
         this.worldSettings = new WorldSettings({
             api: this.api,
             manifest: () => this.manifest,
@@ -965,8 +1027,13 @@ export class Game {
                     return;
                 }
 
-                const count = this.editor.populateFoliage(ids);
-                this.hud.flash(`Scattered ${count.toLocaleString()} instances`);
+                void this.editor
+                    .populateFoliage(ids)
+                    .then((count) =>
+                        this.hud.flash(
+                            `Scattered ${count.toLocaleString()} instances`,
+                        ),
+                    );
             },
             clearFoliage: (ids) => this.editor.clearFoliage(ids),
             updateFoliageType: (id, patch) => this.updateFoliageType(id, patch),
@@ -1267,6 +1334,7 @@ export class Game {
         // Frame limiter (max_fps): skip animation frames until the interval is reached. The timer is not
         // updated on skipped frames, so the simulation delta still covers the whole interval.
         const now = performance.now();
+        this.refreshRate.tick(now);
         const maxFps = this.manifest.settings.graphics.max_fps ?? 0;
         const elapsed = now - this.lastFrameAt;
 
@@ -1424,6 +1492,10 @@ export class Game {
             renderScale: this.manifest.settings.graphics.dynamic_resolution
                 ? this.effectiveRenderScale()
                 : undefined,
+            refreshHz: this.refreshRate.measured
+                ? this.refreshRate.hz
+                : undefined,
+            targetFps: this.dynamicTargetFps || undefined,
             gpuMs: this.profiler?.lastMs ?? undefined,
         };
         this.lastStats = {
@@ -1479,7 +1551,9 @@ export class Game {
         const withWater = water.hasWater() && !this.profileHidden.has('water');
         const reflection = withWater ? this.prepareReflection(dt) : null;
         // GPU foliage culling reads last frame's scene depth (Hi-Z), before any pass draws foliage;
-        // it culls for the reflection camera too when the reflection renders this frame.
+        // it culls for the reflection camera too when the reflection renders this frame. The
+        // instances it rejects are tested again after the scene pass (afterSceneRender).
+        this.world.foliage.lateBlocked = this.postFx.multisampled;
         this.world.foliage.cull(
             this.renderer,
             this.camera,
@@ -1495,6 +1569,40 @@ export class Game {
 
         this.postFx.render(dt, profiler);
         profiler?.end();
+    }
+
+    private inLatePass = false;
+
+    /**
+     * After the scene pass of the main view (its target and MRT still bound): the second phase of
+     * two-phase foliage occlusion draws what this frame's depth shows was wrongly culled, on top.
+     */
+    private afterSceneRender(
+        renderer: GameRenderer,
+        camera: THREE.Camera,
+        target: THREE.RenderTarget | null,
+    ): void {
+        const depth = this.postFx.depthTexture;
+
+        if (
+            this.inLatePass ||
+            camera !== this.camera ||
+            !target ||
+            target.depthTexture !== depth
+        ) {
+            return;
+        }
+
+        const autoClear = renderer.autoClear;
+        this.inLatePass = true;
+        renderer.autoClear = false;
+
+        try {
+            this.world.foliage.renderLate(renderer, this.scene, camera, depth);
+        } finally {
+            renderer.autoClear = autoClear;
+            this.inLatePass = false;
+        }
     }
 
     /**
@@ -1711,13 +1819,40 @@ export class Game {
 
         // Held while the performance profile measures (a changing resolution would hide costs).
         if (!g.dynamic_resolution || this.holdResolution) {
+            this.dynamicTargetFps = g.dynamic_resolution
+                ? this.dynamicTargetFps
+                : 0;
+
             return;
         }
 
-        const target = Math.min(
-            g.target_fps || 60,
-            g.max_fps > 0 ? g.max_fps : Infinity,
+        const mode = g.frame_rate_target ?? 'auto';
+        let target = resolveTargetFps(
+            mode,
+            g.target_fps,
+            g.max_fps,
+            this.refreshRate.hz,
         );
+        const interval = this.frameIntervalMs;
+
+        if (interval < 250) {
+            this.intervalEma = this.intervalEma
+                ? this.intervalEma + (interval - this.intervalEma) * 0.05
+                : interval;
+        }
+
+        if (mode === 'auto') {
+            // Headroom: can't hold the refresh even at the lowest scale → half of it.
+            target = this.refreshFallback.update(
+                dt,
+                this.dynamicResolution.scale <=
+                    this.dynamicResolution.min + 1e-3,
+                this.intervalEma > (1000 / target) * 1.12,
+                target,
+            );
+        }
+
+        this.dynamicTargetFps = target;
 
         if (
             this.dynamicResolution.update(

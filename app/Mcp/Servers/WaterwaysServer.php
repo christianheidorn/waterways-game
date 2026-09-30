@@ -36,6 +36,7 @@ use App\Mcp\Tools\ListRequests;
 use App\Mcp\Tools\ManageCharacter;
 use App\Mcp\Tools\ManageSnapshots;
 use App\Mcp\Tools\OpenEditor;
+use App\Mcp\Tools\OptimizeAssets;
 use App\Mcp\Tools\PaintTerrain;
 use App\Mcp\Tools\PlaceProps;
 use App\Mcp\Tools\ProfilePerformance;
@@ -164,6 +165,7 @@ class WaterwaysServer extends Server
         ImportModel::class,
         UpdatePropModel::class,
         BakeFoliageAsset::class,
+        OptimizeAssets::class,
         GenerateImage::class,
         GenerateMaterial::class,
         GenerateModel::class,

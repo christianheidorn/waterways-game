@@ -98,7 +98,10 @@ final class GameSettingsSchema
                 SettingField::number('max_pixel_ratio', 'Resolution cap', 1.5, 1, 3, 0.25, '×', 'Highest pixel density rendered on Retina / HiDPI screens (2–3× pixel ratio). Render scale applies on top of the capped ratio; 1.5 on a 2× display renders 56 % of the pixels.'),
                 SettingField::number('sharpen', 'Sharpen', 0, 0, 1, 0.01, null, 'Contrast-adaptive sharpening (FSR 1 RCAS when upscaling without TAA); useful with a render scale below 1.'),
                 SettingField::boolean('dynamic_resolution', 'Dynamic resolution', false, 'Lowers the render scale (down to 0.5×) automatically to hold the target frame rate.'),
-                SettingField::number('target_fps', 'Target frame rate', 60, 30, 144, 1, 'fps', 'Frame rate dynamic resolution tries to hold.'),
+                SettingField::select('frame_rate_target', 'Frame rate target', 'auto', [
+                    'auto' => 'Display refresh (measured)', '60' => '60 fps', '120' => '120 fps', 'off' => 'Manual (target frame rate)',
+                ], 'Frame rate dynamic resolution holds. Automatic measures the display refresh rate (e.g. 120 Hz) and holds it with headroom, or half of it when even the lowest scale can\'t; Manual uses the target frame rate below.'),
+                SettingField::number('target_fps', 'Target frame rate', 60, 30, 144, 1, 'fps', 'Frame rate dynamic resolution holds with the frame rate target set to Manual.'),
                 SettingField::select('renderer_backend', 'Graphics API', 'auto', [
                     'auto' => 'Automatic (WebGPU when available)', 'webgpu' => 'WebGPU', 'webgl' => 'WebGL 2 (compatibility)',
                 ], 'WebGPU uses the GPU directly (Metal / D3D12 / Vulkan) with GPU-driven foliage culling. Applies after a reload.'),

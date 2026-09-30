@@ -1,6 +1,6 @@
 import * as THREE from 'three/webgpu';
+import { createGltfLoader, loadGltfFirst } from '../util/gltf';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { GpuProfiler } from '../core/GpuProfiler';
 import { isWebGpu } from '../core/renderer';
 import type { GameRenderer } from '../core/renderer';
@@ -11,7 +11,7 @@ import type {
     FoliageType,
     TerrainLayer,
 } from '../shared/types';
-import { mulberry32, SimplexNoise } from '../util/noise';
+import { mulberry32 } from '../util/noise';
 import type { FoliageTypeStat } from '../shared/protocol';
 import { uniform } from 'three/tsl';
 import { createFoliageGeometry } from './FoliageGeometry';
@@ -47,6 +47,14 @@ import type {
     GroundCoverContext,
     GroundCoverSource,
 } from './foliage/groundCover';
+import type { EditorWorkerClient } from '../editor/workers/EditorWorkerClient';
+import { placementAllowed } from './foliage/placement';
+import {
+    CANDIDATE_STRIDE,
+    SCATTER_CAP,
+    scatterCandidates,
+} from './foliage/scatter';
+import type { ScatterType } from './foliage/scatter';
 import { HiZ } from './foliage/HiZ';
 import { renderImpostor } from './foliage/Impostor';
 import { InstanceBatch } from './foliage/InstanceBatch';
@@ -127,6 +135,8 @@ const NO_SPLIT = 1e9;
  * frame's depth says nothing about the new view, so occlusion culling pauses for that frame.
  */
 const CAMERA_CUT = 25;
+/** Ground cover tiles the editor worker grows at a time (WebGL 2 fallback). */
+const MAX_COVER_JOBS = 24;
 /** Frame budget (ms) for growing ground cover tiles (at least one tile per frame while any is due). */
 const COVER_BUDGET_MS = 3;
 /** Camera movement (m) before the ground cover tiles around it are re-checked. */
@@ -273,6 +283,11 @@ export type FoliageStats = {
     shadowCasters: number;
     /** Instances rejected by Hi-Z occlusion culling (GPU path). */
     occludedInstances: number;
+    /**
+     * Instances the first occlusion test rejected (last frame's depth) that the second one found
+     * visible and drew in the same frame (two-phase occlusion, GPU path).
+     */
+    lateInstances: number;
     /** Cells with a mesh / cells shown / cells total. */
     meshes: number;
     shownCells: number;
@@ -297,6 +312,8 @@ export type FoliageCollisionCell = {
     /** Changes whenever `data` changes. */
     version: number;
 };
+
+export { placementAllowed };
 
 export type FoliagePlacementContext = {
     heights: Heightfield;
@@ -410,7 +427,7 @@ export class Foliage {
     /** Instances of types that are currently not in the type list (kept for saving / re-adding). */
     private orphaned = new Map<number, number[]>();
     private readonly globals: FoliageGlobals;
-    private gltf = new GLTFLoader();
+    private gltf = createGltfLoader();
     private random = mulberry32(Date.now() & 0xffff);
     private density = 1;
     private shadowDistance = DEFAULT_SHADOW_DISTANCE;
@@ -452,6 +469,14 @@ export class Foliage {
     >();
     /** Bumped when ground cover must regrow (paint, sculpt, water, layer changes). */
     private coverEpoch = 0;
+    /**
+     * Editor worker growing ground cover tiles off the main thread (WebGL 2 fallback; null: grown
+     * inline, or on the GPU on WebGPU).
+     */
+    coverWorker: EditorWorkerClient | null = null;
+    /** Tiles waiting for the worker, with the token of their latest request. */
+    private readonly coverWaiting = new Map<object, number>();
+    private coverToken = 0;
 
     /** `groundColor`: terrain colour the roots of grass etc. blend into (none: they keep their own). */
     constructor(groundColor: GroundColorSource | null = null) {
@@ -506,6 +531,17 @@ export class Foliage {
 
     /** Hi-Z occlusion culling on the GPU path (on by default). */
     occlusionCulling = true;
+
+    /**
+     * Two-phase occlusion (GPU path, with occlusion culling): instances hidden in last frame's depth
+     * are tested again against this frame's depth after the scene pass and drawn in the same frame,
+     * so nothing pops in a frame late when turning (see renderLate()).
+     */
+    twoPhaseOcclusion = true;
+    /** The second phase runs this frame (set by cull(), consumed by renderLate()). */
+    private lateArmed = false;
+    /** The pyramid was built from the depth of the frame that just ended (by renderLate()). */
+    private pyramidFresh = false;
 
     /** Fraction of instances drawn (GraphicsSettings.foliage_density). */
     get densityScale(): number {
@@ -652,7 +688,11 @@ export class Foliage {
 
     /** Tiles or cells are still being grown / built around the camera (screenshots wait for it). */
     get settling(): boolean {
-        return this.coverScan || this.queue.length > 0;
+        return (
+            this.coverScan ||
+            this.queue.length > 0 ||
+            this.coverWaiting.size > 0
+        );
     }
 
     /**
@@ -1068,6 +1108,54 @@ export class Foliage {
                 continue;
             }
 
+            const worker = this.coverWorker;
+
+            if (worker?.available) {
+                // WebGL 2 fallback: grown in the editor worker, applied when it answers. The tile
+                // keeps its old instances until then; a newer request for it supersedes this one.
+                if (worker.busy >= MAX_COVER_JOBS) {
+                    cover.stale.add(key);
+                    break;
+                }
+
+                const token = ++this.coverToken;
+                this.coverWaiting.set(cell, token);
+                worker
+                    .request({
+                        op: 'cover',
+                        type: renderer.type,
+                        size,
+                        cx,
+                        cz,
+                        sources: cover.sources,
+                    })
+                    .then((response) => {
+                        if (this.coverWaiting.get(cell) !== token) {
+                            return;
+                        }
+
+                        this.coverWaiting.delete(cell);
+                        const data = (response as { data: Float64Array | null })
+                            .data;
+
+                        if (
+                            data &&
+                            this.renderers.get(renderer.type.id) === renderer &&
+                            renderer.cells.get(key) === cell
+                        ) {
+                            cell.data = Array.from(data);
+                            this.markDirty(renderer, cell);
+                        }
+                    })
+                    .catch(() => {
+                        // The worker stopped: grow it here next frame.
+                        this.coverWaiting.delete(cell);
+                        cover.stale.add(key);
+                        this.coverScan = true;
+                    });
+                continue;
+            }
+
             cell.data = generateGroundCoverTile(
                 renderer.type,
                 size,
@@ -1329,26 +1417,30 @@ export class Foliage {
         }
     }
 
+    /** Scatter inputs of the given types (for the editor worker's candidates, see populate()). */
+    scatterTypes(typeIds: number[]): ScatterType[] {
+        return typeIds.flatMap((id) => {
+            const type = this.renderers.get(id)?.type;
+
+            return type ? [{ id, kind: type.kind, density: type.density }] : [];
+        });
+    }
+
     /**
-     * Procedurally scatter foliage over the whole map using each type's rules plus natural masks:
-     * trees cluster into forests, bushes favour forest edges, reeds hug shorelines, rocks prefer slopes.
-     * Existing instances of the given types are replaced.
+     * Procedurally scatters the given types over the whole map (replacing their instances): jittered
+     * grid candidates weighted by forest / meadow noise (world/foliage/scatter.ts), water for reeds,
+     * slope for rocks and mapped land cover, then each type's rules and spacing. `candidates` are the
+     * precomputed candidates per type (e.g. from the editor worker); missing ones are computed here.
+     * Deterministic for a given seed. Returns the number of instances placed.
      */
     populate(
         ctx: FoliagePlacementContext,
         typeIds: number[],
         seed = 1,
+        candidates?: Map<number, Float32Array>,
     ): number {
         const hf = ctx.heights;
-        const noise = new SimplexNoise(seed * 31 + 7);
-        const rand = mulberry32(seed * 977 + 13);
-        const size = hf.size;
-        const half = hf.half;
-        const forest = (x: number, z: number) =>
-            noise.fbm(x / 420, z / 420, 4) * 0.8 +
-            noise.noise2D(x / 90 + 50, z / 90) * 0.2;
-        const meadow = (x: number, z: number) =>
-            noise.fbm(x / 160 + 100, z / 160 - 40, 3);
+        const shuffle = mulberry32(seed * 131 + 71);
         const nearWater = (x: number, z: number) => {
             for (const [dx, dz] of [
                 [0, 0],
@@ -1374,34 +1466,15 @@ export class Foliage {
             }
 
             const type = renderer.type;
-            const kindFactor: Record<string, number> = {
-                conifer: 1,
-                broadleaf: 1,
-                palm: 0.6,
-                bush: 0.35,
-                grass: 0.12,
-                flower: 0.12,
-                reed: 0.5,
-                rock: 0.6,
-            };
-            const cap: Record<string, number> = {
-                conifer: 30000,
-                broadleaf: 25000,
-                palm: 8000,
-                bush: 25000,
-                grass: 140000,
-                flower: 25000,
-                reed: 20000,
-                rock: 8000,
-            };
-            const density = Math.max(
-                0.001,
-                type.density * (kindFactor[type.kind] ?? 0.5),
-            );
-            const spacing = Math.max(0.6, Math.sqrt(100 / density));
-            const steps = Math.floor(size / spacing);
-            const maxCount = cap[type.kind] ?? 20000;
-            const typeSeed = id * 0.37;
+            const maxCount = SCATTER_CAP[type.kind] ?? 20000;
+            const list =
+                candidates?.get(id) ??
+                scatterCandidates(
+                    hf.size,
+                    seed,
+                    { id, kind: type.kind, density: type.density },
+                    !!ctx.landCoverAt,
+                );
 
             for (const cell of renderer.cells.values()) {
                 this.onBeforeModify?.(id, cell.key);
@@ -1411,80 +1484,48 @@ export class Foliage {
 
             let count = 0;
 
-            for (let j = 0; j < steps && count < maxCount; j++) {
-                for (let i = 0; i < steps && count < maxCount; i++) {
-                    const x = -half + (i + rand()) * spacing;
-                    const z = -half + (j + rand()) * spacing;
-                    const f = forest(x + typeSeed * 1000, z);
-                    let p = 1;
+            for (
+                let c = 0;
+                c < list.length && count < maxCount;
+                c += CANDIDATE_STRIDE
+            ) {
+                const x = list[c];
+                const z = list[c + 1];
+                const r = list[c + 3];
+                let p = list[c + 2];
 
-                    switch (type.kind) {
-                        case 'conifer':
-                        case 'broadleaf':
-                        case 'palm':
-                            p = smooth01(
-                                0.05,
-                                0.35,
-                                f +
-                                    (type.kind === 'broadleaf'
-                                        ? noise.noise2D(x / 300, z / 300 + 9) *
-                                          0.25
-                                        : 0),
-                            );
-                            break;
-                        case 'bush':
-                            p =
-                                0.15 +
-                                smooth01(-0.1, 0.15, f) *
-                                    (1 - smooth01(0.3, 0.5, f)) *
-                                    0.85;
-                            break;
-                        case 'grass':
-                            p =
-                                smooth01(-0.45, 0.1, meadow(x, z)) *
-                                (1 - smooth01(0.25, 0.5, f) * 0.7);
-                            break;
-                        case 'flower':
-                            p =
-                                smooth01(0.2, 0.55, meadow(x + 300, z)) *
-                                (1 - smooth01(0.1, 0.3, f));
-                            break;
-                        case 'reed':
-                            p = nearWater(x, z) ? 0.9 : 0;
-                            break;
-                        case 'rock':
-                            p = 0.25 + smooth01(15, 40, hf.slope(x, z)) * 0.75;
-                            break;
+                if (type.kind === 'reed') {
+                    p = nearWater(x, z) ? 0.9 : 0;
+                } else if (type.kind === 'rock') {
+                    p = 0.25 + smooth01(15, 40, hf.slope(x, z)) * 0.75;
+                }
+
+                // Real-world maps: follow the actual land cover (forests, meadows, wetlands…).
+                const lc = ctx.landCoverAt?.(x, z) ?? 0;
+
+                if (lc !== 0) {
+                    const group = affinityGroup(type.kind);
+                    const affinity = LAND_COVER_AFFINITY[group]?.[lc] ?? 0.5;
+
+                    if (group === 'tree' && lc === 10) {
+                        // Inside mapped forest: dense, with small natural clearings.
+                        p = 0.55 + p * 0.45;
                     }
 
-                    // Real-world maps: follow the actual land cover (forests, meadows, wetlands…).
-                    const lc = ctx.landCoverAt?.(x, z) ?? 0;
+                    p *= affinity;
+                }
 
-                    if (lc !== 0) {
-                        const group = affinityGroup(type.kind);
-                        const affinity =
-                            LAND_COVER_AFFINITY[group]?.[lc] ?? 0.5;
+                if (r > p) {
+                    continue;
+                }
 
-                        if (group === 'tree' && lc === 10) {
-                            // Inside mapped forest: dense, with small natural clearings.
-                            p = 0.55 + p * 0.45;
-                        }
-
-                        p *= affinity;
-                    }
-
-                    if (rand() > p) {
-                        continue;
-                    }
-
-                    if (this.tryPlace(ctx, renderer, x, z, 0, false, true)) {
-                        count++;
-                    }
+                if (this.tryPlace(ctx, renderer, x, z, 0, false, true)) {
+                    count++;
                 }
             }
 
             for (const cell of renderer.cells.values()) {
-                shuffleInstances(cell.data, rand);
+                shuffleInstances(cell.data, shuffle);
             }
 
             total += count;
@@ -1923,6 +1964,7 @@ export class Foliage {
             triangles: 0,
             shadowCasters: 0,
             occludedInstances: 0,
+            lateInstances: 0,
             meshes: 0,
             shownCells: 0,
             cells: 0,
@@ -1987,6 +2029,7 @@ export class Foliage {
                 this.gpuStats(renderer.gpu, detail);
                 stats.shadowCasters += detail.shadowCasters;
                 stats.occludedInstances += detail.occluded ?? 0;
+                stats.lateInstances += gpuLate(renderer.gpu);
                 stats.drawnInstances += detail.drawn;
                 stats.drawCalls += detail.drawCalls;
                 stats.triangles += detail.triangles;
@@ -2056,7 +2099,7 @@ export class Foliage {
         const counters = gpu.lastStats;
         const tris = gpu.lodTriangles();
         detail.drawCalls = gpu.drawCalls;
-        detail.occluded = counters?.occluded ?? 0;
+        detail.occluded = Math.max(0, (counters?.occluded ?? 0) - gpuLate(gpu));
         detail.shadowCasters = counters?.shadowInstances ?? 0;
 
         if (!counters) {
@@ -2234,10 +2277,16 @@ export class Foliage {
         let occlusion = false;
 
         if (this.occlusionCulling && depth && sameLens && moved < CAMERA_CUT) {
-            occlusion = frame.hiz.update(renderer, depth);
+            // The second phase of the last frame already built it from that frame's depth.
+            occlusion = frame.hiz.update(renderer, depth, !this.pyramidFresh);
         }
 
+        this.pyramidFresh = false;
         frame.occlusion.value = occlusion ? 1 : 0;
+        // Only with a valid first-phase pyramid: otherwise nothing is rejected in the first place.
+        this.lateArmed =
+            occlusion && this.twoPhaseOcclusion && !!depth && !this.lateBlocked;
+        frame.late.value = this.lateArmed ? 1 : 0;
         // Parallax since the depth was rendered: widen the tested spheres by the camera movement.
         frame.occlusionMargin.value = moved * 1.5;
         const nodes: THREE.ComputeNode[] = [];
@@ -2265,6 +2314,76 @@ export class Foliage {
         frame.setPrevious(camera);
         this.previousCamera.copy(camera.position);
         this.hasPrevious = true;
+    }
+
+    /** The scene pass can't take a second phase this frame (e.g. MSAA: its colour isn't kept). */
+    lateBlocked = false;
+
+    /**
+     * Second phase of two-phase occlusion culling (GPU path), right after the scene pass rendered the
+     * first phase's survivors into `depth`: builds the Hi-Z pyramid from that depth, re-tests the
+     * instances the first phase rejected against it, and draws the ones that turned out visible into
+     * the same target (the caller keeps the pass's target and MRT bound, and turns auto-clear off).
+     * Only the late draws render (a render-object filter), so lights, fog and shadow maps are the
+     * scene's own. Returns true when it drew.
+     */
+    renderLate(
+        renderer: GameRenderer,
+        scene: THREE.Scene,
+        camera: THREE.Camera,
+        depth: THREE.Texture,
+    ): boolean {
+        const frame = this.gpuFrame;
+
+        if (!this.lateArmed || !frame || !isWebGpu(renderer)) {
+            return false;
+        }
+
+        this.lateArmed = false;
+
+        if (!frame.hiz.update(renderer, depth)) {
+            return false;
+        }
+
+        this.pyramidFresh = true;
+        const nodes: THREE.ComputeNode[] = [];
+        const meshes = new Set<THREE.Object3D>();
+
+        for (const type of this.renderers.values()) {
+            if (type.gpu && !this.isHidden(type)) {
+                nodes.push(...type.gpu.lateComputeNodes());
+                type.gpu.lateMeshes.forEach((mesh) => meshes.add(mesh));
+            }
+        }
+
+        if (!nodes.length) {
+            return false;
+        }
+
+        void renderer.compute(nodes);
+        const previous = renderer.getRenderObjectFunction();
+        const draw = previous ?? renderer.renderObject.bind(renderer);
+        renderer.setRenderObjectFunction((object, ...rest) => {
+            if (meshes.has(object)) {
+                draw(object, ...rest);
+            }
+        });
+        this.setLatePass(true);
+
+        try {
+            renderer.render(scene, camera);
+        } finally {
+            this.setLatePass(false);
+            renderer.setRenderObjectFunction(previous);
+        }
+
+        return true;
+    }
+
+    private setLatePass(late: boolean): void {
+        for (const renderer of this.renderers.values()) {
+            renderer.gpu?.setLatePass(late);
+        }
     }
 
     /**
@@ -3847,7 +3966,11 @@ export class Foliage {
         this.attachGpu(renderer);
 
         if (type.model_url) {
-            void this.loadModel(renderer, type.model_url);
+            void this.loadModel(
+                renderer,
+                type.model_url,
+                type.asset?.optimized_url,
+            );
         }
 
         return renderer;
@@ -3882,9 +4005,11 @@ export class Foliage {
     private async loadModel(
         renderer: TypeRenderer,
         url: string,
+        optimized?: string | null,
     ): Promise<void> {
         try {
-            const gltf = await this.gltf.loadAsync(url);
+            // The compressed copy (meshopt + KTX2) when there is one, else / on failure the original.
+            const gltf = await loadGltfFirst(this.gltf, [optimized, url]);
 
             if (renderer.disposed) {
                 disposeObject(gltf.scene);
@@ -4119,38 +4244,6 @@ export class Foliage {
             m.dispose();
         }
     }
-}
-
-/** Whether a type's slope / height / underwater rules allow an instance at world X/Z. */
-export function placementAllowed(
-    ctx: FoliagePlacementContext,
-    type: FoliageType,
-    x: number,
-    z: number,
-): boolean {
-    const hf = ctx.heights;
-
-    if (!hf.contains(x, z)) {
-        return false;
-    }
-
-    const y = hf.sample(x, z);
-    const slope = hf.slope(x, z);
-
-    if (slope < type.min_slope || slope > type.max_slope) {
-        return false;
-    }
-
-    if (
-        (type.min_height !== null && y < type.min_height) ||
-        (type.max_height !== null && y > type.max_height)
-    ) {
-        return false;
-    }
-
-    const water = ctx.waterLevelAt(x, z);
-
-    return type.allow_underwater || water === null || water <= y - 0.05;
 }
 
 function smooth01(a: number, b: number, v: number): number {
@@ -4402,6 +4495,7 @@ function sameVisuals(a: FoliageType, b: FoliageType): boolean {
         a.color === b.color &&
         a.color_secondary === b.color_secondary &&
         a.model_url === b.model_url &&
+        (a.asset?.optimized_url ?? null) === (b.asset?.optimized_url ?? null) &&
         (a.tint || '#ffffff').toLowerCase() ===
             (b.tint || '#ffffff').toLowerCase() &&
         (a.asset?.id ?? null) === (b.asset?.id ?? null) &&
@@ -4884,3 +4978,8 @@ const _v = new THREE.Vector3();
 const _box = new THREE.Box3();
 const _frustum = new THREE.Frustum();
 const _projScreen = new THREE.Matrix4();
+
+/** Instances the second occlusion phase drew (0 until read back). */
+function gpuLate(gpu: GpuFoliageType): number {
+    return gpu.lastStats?.lateVisible ?? 0;
+}

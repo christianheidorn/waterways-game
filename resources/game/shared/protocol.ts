@@ -68,6 +68,10 @@ export type GameStats = {
     foliageTypes?: FoliageTypeStat[];
     /** Effective render scale (× device pixel ratio) while dynamic resolution is active. */
     renderScale?: number;
+    /** Measured display refresh rate (Hz). */
+    refreshHz?: number;
+    /** Frame rate dynamic resolution holds (refresh, fixed or manual; halved when out of reach). */
+    targetFps?: number;
     /** GPU time of the last measured frame (ms), when EXT_disjoint_timer_query is available. */
     gpuMs?: number;
 };

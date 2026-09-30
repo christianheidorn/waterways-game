@@ -24,6 +24,7 @@ export type PresetKey = Exclude<
     | 'contrast'
     | 'vignette'
     | 'dynamic_resolution'
+    | 'frame_rate_target'
     | 'target_fps'
     | 'max_fps'
     | 'renderer_backend'
@@ -451,6 +452,7 @@ export function normalizeGraphics(
         contrast: 1,
         vignette: 0,
         dynamic_resolution: false,
+        frame_rate_target: 'auto',
         target_fps: 60,
         max_fps: 0,
         renderer_backend: 'auto',

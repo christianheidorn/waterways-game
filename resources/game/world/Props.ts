@@ -95,8 +95,9 @@ export class Props {
         this.instances.clear();
 
         for (const p of file?.props ?? []) {
-            this.instances.set(p.id, { ...p });
-            this.spawn(p);
+            const instance = { ...p };
+            this.instances.set(p.id, instance);
+            this.spawn(instance);
         }
     }
 

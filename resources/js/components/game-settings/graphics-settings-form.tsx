@@ -97,10 +97,16 @@ const SECTIONS: Section[] = [
     },
     {
         title: 'Shadows',
-        description: 'Sun shadow map resolution and how far shadows reach.',
+        description:
+            'Sun shadow map resolution, how far shadows reach, and the shadows of drifting clouds.',
         icon: SunDim,
         groups: ['shadows'],
-        fields: ['shadow_quality', 'shadow_distance', 'contact_shadows'],
+        fields: [
+            'shadow_quality',
+            'shadow_distance',
+            'contact_shadows',
+            'cloud_shadows',
+        ],
     },
     {
         title: 'Textures',
@@ -120,7 +126,7 @@ const SECTIONS: Section[] = [
     {
         title: 'Foliage',
         description:
-            'Density, draw distance, shadows and level of detail of vegetation.',
+            'Density, draw distance, shadows and level of detail of vegetation, dithered LOD cross-fades and grass that bends around the character.',
         icon: Leaf,
         groups: ['foliage'],
         fields: [
@@ -128,6 +134,8 @@ const SECTIONS: Section[] = [
             'foliage_distance',
             'foliage_shadow_distance',
             'foliage_lod_bias',
+            'lod_crossfade',
+            'grass_interaction',
         ],
     },
     {

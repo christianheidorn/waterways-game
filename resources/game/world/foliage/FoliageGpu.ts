@@ -4,18 +4,22 @@ import {
     atomicAdd,
     atomicLoad,
     atomicStore,
+    distance,
     dot,
+    float,
     Fn,
     If,
     instancedArray,
     instanceIndex,
     length,
+    min,
     Return,
     smoothstep,
     storage,
     uint,
     uniform,
     uniformArray,
+    vec2,
     vec3,
     vec4,
 } from 'three/tsl';
@@ -29,7 +33,11 @@ import type {
     InstanceSource,
     RootTint,
 } from './FoliageMaterial';
-import { createFoliageMaterial, RANK_FADE } from './FoliageMaterial';
+import {
+    createFoliageMaterial,
+    lodBandT,
+    RANK_FADE,
+} from './FoliageMaterial';
 import type { HiZ } from './HiZ';
 import { occludedNode } from './HiZ';
 import { INSTANCE_FLOATS, writeInstance } from './instances';
@@ -191,6 +199,8 @@ export type GpuTypeConfig = {
     radius: number;
     /** Drawn in the water reflection (small foliage is not). */
     reflect: boolean;
+    /** How far the plant bends away from the character (0 = not at all). */
+    interact: number;
 };
 
 type Draw = {
@@ -970,6 +980,7 @@ export class GpuFoliageType {
             const nodeMaterials = (
                 instance: InstanceSource,
                 shadowInstance?: InstanceSource,
+                crossfade = false,
             ): THREE.Material | THREE.Material[] => {
                 const built = new Map<THREE.Material, THREE.Material>();
                 const nodeMaterial = (src: THREE.Material) => {
@@ -985,6 +996,8 @@ export class GpuFoliageType {
                             role: 'none',
                             instance,
                             shadowInstance,
+                            interact: config.interact,
+                            lodRange: crossfade ? this.lodRange(lod) : null,
                         });
                         built.set(src, m);
                         this.materials.push(m);
@@ -1000,6 +1013,7 @@ export class GpuFoliageType {
             const mainMaterials = nodeMaterials(
                 source(mainRegion),
                 lod === 0 ? source(shadowSourceRegion) : undefined,
+                true,
             );
             const mesh = addMesh(
                 `Foliage_${config.name}_gpu${lod}`,
@@ -1126,6 +1140,56 @@ export class GpuFoliageType {
         this.buildComputes();
     }
 
+    /** LOD switch distance (m, 3D) of `lod` (1..): as the culling pass computes it. */
+    private switchAt(lod: number): Node<'float'> {
+        const config = this.config!;
+        const g = this.frame.globals;
+
+        return config.uniforms.fadeEnd
+            .mul(g.fadeScale)
+            .mul(this.frame.lodBias)
+            .mul(config.lodDistances[lod])
+            .add(config.lodSlack);
+    }
+
+    /**
+     * Dither range [lo, hi) a draw of `lod` keeps (see FoliageMaterialOptions.lodRange): the band
+     * before each switch is drawn by both LODs, the outgoing one keeping the dither values above the
+     * band position and the incoming one those below. The LOD0 shadow casters fade out over the band
+     * at the end of their reach and of the shadow distance.
+     */
+    private lodRange(
+        lod: number,
+    ): (pos: Node<'vec3'>, shadow: boolean) => Node<'vec2'> {
+        const config = this.config!;
+        const frame = this.frame;
+        const g = frame.globals;
+        const last = config.lods.length - 1;
+
+        return (pos, shadow) => {
+            const d = distance(pos, g.camPos);
+
+            if (shadow) {
+                const reach =
+                    last > 0
+                        ? this.switchAt(1).add(config.shadowSlack)
+                        : config.uniforms.fadeEnd.mul(g.fadeScale);
+                const distH = distance(pos.xz, g.camPos.xz);
+                const keep = min(
+                    float(1).sub(lodBandT(g, d, reach)),
+                    float(1).sub(lodBandT(g, distH, frame.shadowDistance)),
+                );
+
+                return vec2(-1, keep);
+            }
+
+            const lo = lod < last ? lodBandT(g, d, this.switchAt(lod + 1)) : 0;
+            const hi = lod > 0 ? lodBandT(g, d, this.switchAt(lod)) : 2;
+
+            return vec2(lo, hi);
+        };
+    }
+
     private buildComputes(): void {
         const config = this.config!;
 
@@ -1234,6 +1298,23 @@ export class GpuFoliageType {
                 return lod;
             };
             const lod = lodOf(dist, lodScale);
+            // Within the cross-fade band before the next switch the instance is drawn by the next LOD
+            // too (the vertex shaders split the pixels between them).
+            const fadeIn = uint(0).toVar();
+
+            for (let l = 1; l < lodCount; l++) {
+                const at = lodScale
+                    .mul(config.lodDistances[l])
+                    .add(config.lodSlack);
+                If(
+                    lod
+                        .equal(l - 1)
+                        .and(dist.greaterThan(at.mul(g.lodFade.oneMinus()))),
+                    () => {
+                        fadeIn.assign(1);
+                    },
+                );
+            }
 
             // Shadow casters: LOD0 range (+ the reach the CPU cells had: whole cells / the split
             // slack) within the shadow distance, drawn with the LOD0 shadow geometry.
@@ -1339,7 +1420,7 @@ export class GpuFoliageType {
                         atomicAdd(counters.element(occludedSlot), 1);
 
                         // Two-phase occlusion: tested again against this frame's depth after the
-                        // scene pass (index × 8 + LOD).
+                        // scene pass (index × 16 + cross-fade flag × 8 + LOD).
                         If(frame.late.greaterThan(0.5), () => {
                             const slot = atomicAdd(
                                 counters.element(candidateRegion),
@@ -1351,7 +1432,9 @@ export class GpuFoliageType {
                                         .mul(capacity)
                                         .add(slot),
                                 )
-                                .assign(i.mul(8).add(lod));
+                                .assign(
+                                    i.mul(16).add(fadeIn.mul(8)).add(lod),
+                                );
                         });
 
                         Return();
@@ -1361,6 +1444,12 @@ export class GpuFoliageType {
 
             const slot = atomicAdd(counters.element(lod), 1);
             visible.element(lod.mul(capacity).add(slot)).assign(i);
+
+            If(fadeIn.equal(1), () => {
+                const next = lod.add(1);
+                const slot = atomicAdd(counters.element(next), 1);
+                visible.element(next.mul(capacity).add(slot)).assign(i);
+            });
         })().compute(this.capacity);
 
         const args = storage(this.args!, 'uint', this.entries.length * 5);
@@ -1413,8 +1502,9 @@ export class GpuFoliageType {
             const packed = visible.element(
                 uint(candidateRegion).mul(capacity).add(t),
             );
-            const i = packed.shiftRight(3).toVar();
+            const i = packed.shiftRight(4).toVar();
             const lod = packed.bitAnd(7).toVar();
+            const fadeIn = packed.shiftRight(3).bitAnd(1).toVar();
             const base = i.mul(4);
             const data = instances.element(base.add(3)).toVar();
             const r0 = instances.element(base).toVar();
@@ -1437,6 +1527,12 @@ export class GpuFoliageType {
                 const region = lod.add(lateRegion);
                 const slot = atomicAdd(counters.element(region), 1);
                 visible.element(region.mul(capacity).add(slot)).assign(i);
+
+                If(fadeIn.equal(1), () => {
+                    const next = region.add(1);
+                    const slot = atomicAdd(counters.element(next), 1);
+                    visible.element(next.mul(capacity).add(slot)).assign(i);
+                });
             });
         })().compute(this.capacity);
         const lateFinalize = Fn(() => {

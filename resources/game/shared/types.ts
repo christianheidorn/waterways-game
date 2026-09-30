@@ -28,6 +28,14 @@ export type EnvironmentSettings = {
     turbidity: number;
     exposure: number;
     wind_strength: number;
+    /** Travelling wind gusts over vegetation: amplitude (0 = steady), patch size (m), front speed (× wind). */
+    gust_strength: number;
+    gust_scale: number;
+    gust_speed: number;
+    /** 0-1 darkness of the drifting cloud shadows (their coverage follows cloud_coverage). */
+    cloud_shadow_strength: number;
+    /** Sunbeams scattered by fog and haze (0-2), on top of the light shafts from the sky. */
+    fog_shaft_intensity: number;
     water_shallow_color: string;
     water_deep_color: string;
     /** Metres of water after which the deep colour dominates. */
@@ -202,6 +210,12 @@ export type GraphicsSettings = {
     foliage_shadow_distance: number;
     /** > 1 keeps detailed foliage LODs further away. */
     foliage_lod_bias: number;
+    /** Dithered cross-fades between foliage / prop LODs instead of hard switches. */
+    lod_crossfade: boolean;
+    /** Grass and small plants bend around the character. */
+    grass_interaction: boolean;
+    /** Drifting cloud shadows on everything the sun lights (needs sun shadows). */
+    cloud_shadows: boolean;
     /** Weather particles, lightning, splashes. */
     effects_quality: QualityLevel;
     cloud_quality: 'off' | 'low' | 'medium' | 'high';

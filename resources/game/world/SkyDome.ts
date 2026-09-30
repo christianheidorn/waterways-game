@@ -33,6 +33,15 @@ import {
 import { farDepth } from '../core/depth';
 
 type Float = THREE.Node<'float'>;
+
+/**
+ * Altitude (m above the camera) of the cumulus layer: the sky's cloud plane is anchored to the world
+ * at this height (clouds keep their place as the camera moves), and the cloud shadows are the same
+ * field projected along the light onto the ground.
+ */
+export const CLOUD_HEIGHT = 1500;
+/** Cloud-plane units per metre on that plane (the sky's uv = xz / y × 0.9). */
+const CLOUD_UV_PER_M = 0.9 / CLOUD_HEIGHT;
 type Vec2 = THREE.Node<'vec2'>;
 type Vec3 = THREE.Node<'vec3'>;
 type Vec4 = THREE.Node<'vec4'>;
@@ -304,8 +313,8 @@ const hash13 = Fn(([p]: [Vec3]) => {
     inputs: [{ name: 'p', type: 'vec3' }],
 });
 
-/** Gradient noise, roughly -1..1. */
-const gnoise = Fn(([p]: [Vec2]) => {
+/** Gradient noise, roughly -1..1 (also drives the foliage gust field and the cloud shadows). */
+export const gnoise = Fn(([p]: [Vec2]) => {
     const i = floor(p).toVar();
     const f = fract(p).toVar();
     const u = f
@@ -549,11 +558,13 @@ function skyColor(u: SkyUniforms, d: DerivedUniforms, q: CloudSettings): Vec4 {
                     .and(u.cloudCoverage.greaterThan(0.001)),
                 () => {
                     const dy = max(direction.y, 0).toVar();
-                    // Curved cloud plane: features shrink towards the horizon without exploding.
+                    // Curved cloud plane: features shrink towards the horizon without exploding. It is
+                    // anchored to the world (the camera's position shifts it), like the cloud shadows.
                     const uv = direction.xz
                         .div(dy.add(0.09))
                         .mul(0.9)
                         .add(u.cloudOffset)
+                        .add(cameraPosition.xz.mul(CLOUD_UV_PER_M))
                         .toVar();
                     const n = cloudField(q.octaves)(uv, u.time).toVar();
                     // Large scale coverage variation: clear gaps next to dense banks (less so when overcast).
@@ -735,5 +746,66 @@ function skyColor(u: SkyUniforms, d: DerivedUniforms, q: CloudSettings): Vec4 {
         );
 
         return vec4(color, 1);
+    })();
+}
+
+/** Inputs of the cloud shadows besides the sky's cloud uniforms. */
+export type CloudShadowInputs = {
+    /** Direction towards the light (sun or moon). */
+    lightDir: THREE.UniformNode<'vec3', THREE.Vector3>;
+    /** 0-1 darkness under a cloud (environment strength × graphics switch × light up); 0 skips it. */
+    strength: THREE.UniformNode<'float', number>;
+};
+
+/**
+ * Light left under the clouds at a world position (1 = clear sky, down to 1 - strength): the sky's
+ * cloud field (same plane, drift, coverage and softness; fewer octaves) where the ray from the point
+ * towards the light meets the cloud layer.
+ */
+export function cloudShadowNode(
+    sky: SkyDome,
+    inputs: CloudShadowInputs,
+    position: Vec3,
+): Float {
+    const u = sky.uniforms;
+
+    return Fn(() => {
+        const light = float(1).toVar();
+
+        If(
+            inputs.strength
+                .greaterThan(0.001)
+                .and(u.cloudCoverage.greaterThan(0.001)),
+            () => {
+                const l = inputs.lightDir;
+                const up = max(float(CLOUD_HEIGHT).sub(position.y.sub(cameraPosition.y)), 0);
+                const onPlane = position.xz.add(
+                    l.xz.div(max(l.y, 0.12)).mul(up),
+                );
+                const uv = onPlane
+                    .mul(CLOUD_UV_PER_M)
+                    .add(u.cloudOffset)
+                    .toVar();
+                const n = cloudField(3)(uv, u.time);
+                const cov = clamp(
+                    u.cloudCoverage.add(
+                        gnoise(uv.mul(0.16).add(2.3))
+                            .mul(0.22)
+                            .mul(float(1).sub(u.overcast)),
+                    ),
+                    0,
+                    1,
+                ).toVar();
+                const threshold = float(1).sub(cov);
+                const mask = smoothstep(
+                    threshold.sub(u.cloudSoftness.mul(0.2)),
+                    threshold.add(u.cloudSoftness),
+                    n,
+                );
+                light.assign(float(1).sub(mask.mul(inputs.strength)));
+            },
+        );
+
+        return light;
     })();
 }

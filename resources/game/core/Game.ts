@@ -1428,6 +1428,10 @@ export class Game {
         this.world.terrain.updateLod(this.camera);
         this.world.water.update(dt);
         this.world.wetness.update(dt);
+        // Grass bends around the character (play and the editor's walk mode).
+        this.world.foliage.setInteractor(
+            this.mode === 'play' || this.walking ? this.player.position : null,
+        );
         this.world.foliage.update(dt, this.camera);
         this.world.props.updateView(this.camera);
 
@@ -1925,6 +1929,11 @@ export class Game {
         this.postFx.setLook(env);
         this.world.water.applyEnvironment(env);
         this.world.foliage.setWind(env.wind_strength);
+        this.world.foliage.setGusts(
+            env.gust_strength ?? 0.5,
+            env.gust_scale ?? 40,
+            env.gust_speed ?? 1,
+        );
         this.weather?.apply(env);
     }
 
@@ -2129,6 +2138,11 @@ export class Game {
         this.world.foliage.distanceScale = g.foliage_distance;
         this.world.foliage.setShadowDistance(g.foliage_shadow_distance);
         this.world.foliage.setLodBias(g.foliage_lod_bias);
+        this.world.foliage.setLodCrossfade(g.lod_crossfade !== false);
+        this.world.foliage.setTemporalDither(g.anti_aliasing === 'taa');
+        this.world.foliage.setInteraction(g.grass_interaction !== false);
+        this.world.props.setLodCrossfade(g.lod_crossfade !== false);
+        this.atmosphere.setCloudShadows(g.cloud_shadows !== false);
         this.camera.far = g.draw_distance;
         this.camera.updateProjectionMatrix();
 

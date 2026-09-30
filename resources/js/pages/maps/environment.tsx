@@ -25,13 +25,15 @@ type Props = {
 const SECTIONS: SettingsSection[] = [
     {
         title: 'Sky & lighting',
-        description: 'Sun position, sky haze, clouds and overall brightness.',
+        description:
+            'Sun position, sky haze, clouds and their shadows, and overall brightness.',
         icon: SunMedium,
         fields: [
             'time_of_day',
             'sun_azimuth',
             'turbidity',
             'cloud_coverage',
+            'cloud_shadow_strength',
             'exposure',
         ],
     },
@@ -57,7 +59,7 @@ const SECTIONS: SettingsSection[] = [
     {
         title: 'Atmosphere',
         description:
-            'Distance fog, valley fog and the wind that moves clouds, rain, foliage and water.',
+            'Distance fog, valley fog and the wind that moves clouds, rain, foliage and water, with gusts that sweep across fields and canopies.',
         icon: CloudFog,
         fields: [
             'fog_density',
@@ -65,6 +67,9 @@ const SECTIONS: SettingsSection[] = [
             'height_fog_density',
             'wind_strength',
             'wind_direction',
+            'gust_strength',
+            'gust_scale',
+            'gust_speed',
         ],
     },
     {
@@ -84,6 +89,7 @@ const SECTIONS: SettingsSection[] = [
             'auto_exposure_max_ev',
             'auto_exposure_speed',
             'god_ray_intensity',
+            'fog_shaft_intensity',
             'bloom_threshold',
             'dof_focus_distance',
             'dof_aperture',
@@ -119,6 +125,8 @@ const FORMATTERS = {
     wetness: percent,
     thunder_volume: percent,
     wind_direction: formatWindDirection,
+    cloud_shadow_strength: percent,
+    gust_scale: (v: number) => `${Math.round(v)} m`,
     height_fog_height: (v: number) => (v > 0 ? `${Math.round(v)} m` : 'Off'),
 };
 

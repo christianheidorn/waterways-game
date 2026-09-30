@@ -41,6 +41,9 @@ const EDIT_INTERVAL = 0.2;
  * The near cascade as the GPU foliage culling sees it: its shadow camera (identifies its shadow pass)
  * and the world → cascade matrix whose x / y span [-1, 1] over the cascade's map.
  */
+/** Light left under the clouds at a world position (see SkyDome.cloudShadowNode). */
+export type CloudShadow = (position: THREE.Node<'vec3'>) => THREE.Node<'float'>;
+
 export type ShadowCascade = {
     readonly camera: THREE.Camera;
     readonly box: THREE.Matrix4;
@@ -115,6 +118,7 @@ class CascadeBlendNode extends THREE.ShadowBaseNode {
         private readonly near: THREE.Node<'float'>,
         private readonly far: THREE.Node<'float'>,
         private readonly nearLight: CascadeLight,
+        private readonly cloud: CloudShadow | null,
     ) {
         super(sun);
         // Both cascades are placed by SunShadows.update() before the frame renders.
@@ -142,7 +146,14 @@ class CascadeBlendNode extends THREE.ShadowBaseNode {
                 shadow.assign(mix(this.far, shadow, weight));
             });
 
-            return shadow;
+            // Drifting cloud shadows on top (everywhere, also beyond the shadow distance).
+            return this.cloud
+                ? shadow.mul(
+                      this.cloud(
+                          shadowPositionWorld as unknown as THREE.Node<'vec3'>,
+                      ),
+                  )
+                : shadow;
         })();
     }
 }
@@ -188,7 +199,11 @@ export class SunShadows {
     private readonly origin = new THREE.Vector3();
     private readonly up = new THREE.Vector3(0, 1, 0);
 
-    constructor(sun: THREE.DirectionalLight, scene: THREE.Scene) {
+    constructor(
+        sun: THREE.DirectionalLight,
+        scene: THREE.Scene,
+        cloud: CloudShadow | null = null,
+    ) {
         this.near = cascadeLight('Sun near', sun.shadow.clone());
         this.far = cascadeLight('Sun far', sun.shadow.clone());
         this.far.shadow.autoUpdate = false;
@@ -209,7 +224,13 @@ export class SunShadows {
         );
         // Read by three's light node in place of the default single-map shadow.
         Object.assign(sun.shadow, {
-            shadowNode: new CascadeBlendNode(sun, near, far, this.near),
+            shadowNode: new CascadeBlendNode(
+                sun,
+                near,
+                far,
+                this.near,
+                cloud,
+            ),
         });
     }
 

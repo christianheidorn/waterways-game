@@ -91,6 +91,7 @@ const ENV_SECTIONS: { title: string; match: (key: string) => boolean }[] = [
                 'sun_azimuth',
                 'turbidity',
                 'cloud_coverage',
+                'cloud_shadow_strength',
                 'exposure',
             ].includes(k),
     },
@@ -104,7 +105,9 @@ const ENV_SECTIONS: { title: string; match: (key: string) => boolean }[] = [
                 'lightning_frequency',
                 'thunder_volume',
                 'wetness',
-            ].includes(k) || k.startsWith('wind_'),
+            ].includes(k) ||
+            k.startsWith('wind_') ||
+            k.startsWith('gust_'),
     },
     { title: 'Fog', match: (k) => k.includes('fog') },
     {

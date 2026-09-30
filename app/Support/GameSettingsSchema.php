@@ -73,6 +73,7 @@ final class GameSettingsSchema
                     'off' => 'Off', 'low' => 'Low', 'medium' => 'Medium', 'high' => 'High', 'ultra' => 'Ultra',
                 ]),
                 SettingField::number('shadow_distance', 'Shadow distance', 220, 20, 1000, 10, 'm'),
+                SettingField::boolean('cloud_shadows', 'Cloud shadows', true, 'Shadows of the drifting clouds on the terrain, water, foliage and props (needs sun shadows).'),
                 // Textures
                 SettingField::select('terrain_texture_resolution', 'Terrain texture resolution', '1024', [
                     '512' => '512 px', '1024' => '1K', '2048' => '2K',
@@ -93,6 +94,8 @@ final class GameSettingsSchema
                 SettingField::number('foliage_distance', 'Foliage distance', 1, 0.25, 3, 0.05, '×', 'Scales every foliage type\'s cull distance.'),
                 SettingField::number('foliage_shadow_distance', 'Foliage shadow distance', 120, 0, 1000, 10, 'm', 'Foliage beyond this distance casts no shadows. 0 disables foliage shadows.'),
                 SettingField::number('foliage_lod_bias', 'Foliage detail', 1, 0.25, 4, 0.05, '×', 'Higher values keep detailed foliage LODs further away.'),
+                SettingField::boolean('lod_crossfade', 'LOD cross-fades', true, 'Foliage and props dissolve between detail levels (dithered) instead of popping.'),
+                SettingField::boolean('grass_interaction', 'Grass interaction', true, 'Grass and small plants bend aside around the character and recover behind it.'),
                 // Resolution & frame rate
                 SettingField::number('render_scale', 'Render scale', 1, 0.5, 2, 0.05, '×', 'Screen percentage on the capped pixel ratio. Below 1 the scene renders at a lower resolution and is upscaled (TAAU with TAA, FSR 1 otherwise); above 1 it is supersampled.'),
                 SettingField::number('max_pixel_ratio', 'Resolution cap', 1.5, 1, 3, 0.25, '×', 'Highest pixel density rendered on Retina / HiDPI screens (2–3× pixel ratio). Render scale applies on top of the capped ratio; 1.5 on a 2× display renders 56 % of the pixels.'),

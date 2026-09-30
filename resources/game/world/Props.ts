@@ -1,4 +1,9 @@
 import * as THREE from 'three/webgpu';
+import {
+    attribute,
+    interleavedGradientNoise,
+    screenCoordinate,
+} from 'three/tsl';
 import { createGltfLoader, loadGltfFirst } from '../util/gltf';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type {
@@ -12,6 +17,7 @@ import { MeshShape, trianglesOf } from './collision/shapes';
 import type { Shape } from './collision/shapes';
 import { voxelBoxes } from './collision/voxelBoxes';
 import { simplifyGeometry, triangleCount } from './FoliageLod';
+import { LOD_FADE_BAND } from './foliage/FoliageMaterial';
 import type { Heightfield } from './Heightfield';
 
 /** One draw: a geometry in the model's normalised space (base centre at the origin, library size). */
@@ -35,6 +41,8 @@ type Template = {
     placeholder: boolean;
     /** Collision shapes by mode, built on first use. */
     shapes: Map<PropCollision, Shape>;
+    /** Node material copies with the dithered LOD cross-fade, per source material (built on use). */
+    fadeMaterials: Map<THREE.Material, THREE.Material>;
 };
 
 /** Instanced meshes of one model: [lod][part]. */
@@ -42,7 +50,12 @@ type Batch = {
     template: Template;
     meshes: THREE.InstancedMesh[][];
     capacity: number;
+    /** Per LOD: dither range [lo, hi) kept per instance (see CROSSFADE_ATTRIBUTE); null: no fade. */
+    fades: THREE.InstancedBufferAttribute[] | null;
 };
+
+/** Per-instance attribute of the LOD cross-fade: the dither range the draw keeps. */
+const CROSSFADE_ATTRIBUTE = 'propLodFade';
 
 export type PropStats = {
     model: number;
@@ -92,6 +105,8 @@ export class Props implements CollisionProvider {
     /** Collision grid: instance ids per cell, and the cells of each instance. */
     private readonly collisionGrid = new Map<number, Set<string>>();
     private readonly collisionCells = new Map<string, number[]>();
+    /** Dithered LOD cross-fades (graphics lod_crossfade). */
+    private crossfade = true;
 
     constructor(private readonly heights: () => Heightfield) {
         this.group.name = 'Props';
@@ -491,6 +506,18 @@ export class Props implements CollisionProvider {
     }
 
     /**
+     * Dithered LOD cross-fades: over a band before each switch distance (and before the props are
+     * hidden) an instance is drawn by both LODs, each keeping complementary pixels of a screen-space
+     * dither (shadows too). Off: LODs switch at once.
+     */
+    setLodCrossfade(enabled: boolean): void {
+        if (enabled !== this.crossfade) {
+            this.crossfade = enabled;
+            this.dirty = true;
+        }
+    }
+
+    /**
      * Per frame: assigns each instance its LOD for the camera's distance and uploads the instance
      * matrices. Cheap when nothing moved: it only re-buckets after changes or a camera move of a metre.
      */
@@ -525,24 +552,47 @@ export class Props implements CollisionProvider {
             this.ensureCapacity(batch, list.length);
             const counts = batch.meshes.map(() => 0);
             const center = new THREE.Vector3();
+            const distances = batch.template.distances;
+            const fades = this.crossfade ? batch.fades : null;
+            const put = (
+                lod: number,
+                matrix: THREE.Matrix4,
+                lo: number,
+                hi: number,
+            ) => {
+                for (const mesh of batch.meshes[lod]) {
+                    mesh.setMatrixAt(counts[lod], matrix);
+                }
+
+                fades?.[lod].setXY(counts[lod], lo, hi);
+                counts[lod]++;
+            };
 
             for (const p of list) {
                 const matrix = this.matrixOf(p, batch.template)!;
                 center.setFromMatrixPosition(matrix);
                 const d = center.distanceTo(eye) / Math.max(0.05, p.scale);
-                const lod = batch.template.distances.findIndex(
-                    (max) => d <= max,
-                );
+                const lod = distances.findIndex((max) => d <= max);
 
                 if (lod < 0) {
                     continue;
                 }
 
-                for (const mesh of batch.meshes[lod]) {
-                    mesh.setMatrixAt(counts[lod], matrix);
+                if (!fades) {
+                    put(lod, matrix, -1, 2);
+                    continue;
                 }
 
-                counts[lod]++;
+                // Cross-fade band before the switch: this LOD keeps the dither values above t, the
+                // next one (if any; the props are hidden after the last) those below.
+                const at = distances[lod];
+                const band = at * LOD_FADE_BAND;
+                const t = Math.min(1, Math.max(0, (d - (at - band)) / band));
+                put(lod, matrix, t, 2);
+
+                if (t > 0 && lod + 1 < distances.length) {
+                    put(lod + 1, matrix, -1, t);
+                }
             }
 
             batch.meshes.forEach((meshes, lod) => {
@@ -550,6 +600,19 @@ export class Props implements CollisionProvider {
                     mesh.count = counts[lod];
                     mesh.visible = counts[lod] > 0;
                     mesh.instanceMatrix.needsUpdate = true;
+                }
+
+                const fade = batch.fades?.[lod];
+
+                if (fade) {
+                    if (!fades) {
+                        // Switched off: keep everything (the mask stays in the shader).
+                        for (let i = 0; i < counts[lod]; i++) {
+                            fade.setXY(i, -1, 2);
+                        }
+                    }
+
+                    fade.needsUpdate = true;
                 }
             });
             this.visible.set(model, counts);
@@ -764,6 +827,7 @@ export class Props implements CollisionProvider {
             template,
             meshes: template.lods.map(() => []),
             capacity: 0,
+            fades: null,
         });
 
         // The grid used a guess of the size until now.
@@ -792,11 +856,31 @@ export class Props implements CollisionProvider {
         }
 
         const last = batch.template.lods.length - 1;
+        // The placeholder box is shared by every missing model: no per-instance fade on it.
+        const fade = !batch.template.placeholder;
+        batch.fades = fade
+            ? batch.template.lods.map(
+                  () =>
+                      new THREE.InstancedBufferAttribute(
+                          new Float32Array(capacity * 2),
+                          2,
+                      ),
+              )
+            : null;
         batch.meshes = batch.template.lods.map((lod, index) =>
             lod.parts.map((part) => {
+                if (batch.fades) {
+                    part.geometry.setAttribute(
+                        CROSSFADE_ATTRIBUTE,
+                        batch.fades[index],
+                    );
+                }
+
                 const mesh = new THREE.InstancedMesh(
                     part.geometry,
-                    part.material,
+                    fade
+                        ? crossfadeMaterial(batch.template, part.material)
+                        : part.material,
                     capacity,
                 );
                 mesh.count = 0;
@@ -979,6 +1063,7 @@ async function buildTemplate(
 
     return {
         shapes: new Map(),
+        fadeMaterials: new Map(),
         lods,
         distances: lodDistances(
             Math.max(extent.y, radius * 2, 0.5),
@@ -1033,8 +1118,62 @@ function countTriangles(parts: Part[]): number {
     return parts.reduce((sum, p) => sum + triangleCount(p.geometry), 0);
 }
 
+/**
+ * Node material copy of a prop material that discards the pixels its LOD leaves to the neighbouring
+ * one (screen-space dither over the per-instance range; the shadow pass uses it too). Materials
+ * without a node counterpart are drawn as they are (no fade).
+ */
+function crossfadeMaterial(
+    template: Template,
+    source: THREE.Material | THREE.Material[],
+): THREE.Material | THREE.Material[] {
+    if (Array.isArray(source)) {
+        return source.map(
+            (m) => crossfadeMaterial(template, m) as THREE.Material,
+        );
+    }
+
+    let material = template.fadeMaterials.get(source);
+
+    if (!material) {
+        material = source;
+        const NodeClass = (
+            THREE as unknown as Record<
+                string,
+                (new () => THREE.NodeMaterial) | undefined
+            >
+        )[source.type.replace(/Material$/, 'NodeMaterial')];
+
+        if ((source as THREE.NodeMaterial).isNodeMaterial) {
+            material = source.clone();
+        } else if (NodeClass) {
+            material = new NodeClass();
+            material.copy(source as unknown as THREE.NodeMaterial);
+            material.name = source.name;
+        }
+
+        if ((material as THREE.NodeMaterial).isNodeMaterial) {
+            const range = attribute(CROSSFADE_ATTRIBUTE, 'vec2');
+            const n = interleavedGradientNoise(screenCoordinate.xy);
+            (material as THREE.NodeMaterial).maskNode = n
+                .greaterThanEqual(range.x)
+                .and(n.lessThan(range.y)) as unknown as THREE.Node<'bool'>;
+        }
+
+        template.fadeMaterials.set(source, material);
+    }
+
+    return material;
+}
+
 function disposeTemplate(template: Template): void {
     const geometries = new Set<THREE.BufferGeometry>();
+
+    for (const material of template.fadeMaterials.values()) {
+        material.dispose();
+    }
+
+    template.fadeMaterials.clear();
 
     for (const lod of template.lods) {
         for (const part of lod.parts) {
@@ -1056,6 +1195,7 @@ function placeholderTemplate(): Template {
             new THREE.Vector3(1, 2, 1),
         );
         placeholder = {
+            fadeMaterials: new Map(),
             lods: [
                 {
                     parts: [

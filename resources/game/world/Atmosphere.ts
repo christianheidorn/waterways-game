@@ -8,7 +8,12 @@ import {
     fogSunParams,
     heightFogParams,
 } from './HeightFog';
-import { extinction, SkyDome, skyRadiance } from './SkyDome';
+import {
+    cloudShadowNode,
+    extinction,
+    SkyDome,
+    skyRadiance,
+} from './SkyDome';
 import type { CloudQuality, SkyParams } from './SkyDome';
 import { SunShadows } from './SunShadows';
 
@@ -111,6 +116,12 @@ export class Atmosphere {
     private envDirty = true;
     private envTimer = 0;
     private underwater = false;
+    /** Cloud shadow inputs (light direction, strength) and the graphics switch. */
+    private readonly cloudShadow = {
+        lightDir: uniform(new THREE.Vector3(0, 1, 0)),
+        strength: uniform(0),
+    };
+    private cloudShadowsEnabled = true;
     private env: EnvironmentSettings | null = null;
     private current = emptyLook();
     private target = emptyLook();
@@ -154,7 +165,9 @@ export class Atmosphere {
         this.sun.castShadow = true;
         scene.add(this.sun);
         scene.add(this.sun.target);
-        this.sunShadows = new SunShadows(this.sun, scene);
+        this.sunShadows = new SunShadows(this.sun, scene, (position) =>
+            cloudShadowNode(this.sky, this.cloudShadow, position),
+        );
 
         this.flashLight = new THREE.DirectionalLight(0xc8d4ff, 0);
         this.flashLight.name = 'Lightning';
@@ -247,6 +260,12 @@ export class Atmosphere {
         this.envDirty = true;
     }
 
+    /** Drifting cloud shadows (graphics cloud_shadows); their strength is per map. */
+    setCloudShadows(enabled: boolean): void {
+        this.cloudShadowsEnabled = enabled;
+        this.lightingDirty = true;
+    }
+
     setShadowQuality(quality: ShadowQuality, distance: number): void {
         this.sunShadows.configure(quality, distance);
         const on = this.sunShadows.cascade !== null;
@@ -281,6 +300,7 @@ export class Atmosphere {
 
         // Only the direction matters for the lighting; the shadow cascades are placed separately.
         const lightDir = this.lightDirection();
+        this.cloudShadow.lightDir.value.copy(lightDir);
         this.sun.target.position.copy(focus);
         this.sun.position.copy(focus).add(lightDir);
         this.sun.target.updateMatrixWorld();
@@ -493,6 +513,13 @@ export class Atmosphere {
         fogSunParams.y = this.sunDirection.y;
         fogSunParams.z = this.sunDirection.z;
         fogSunParams.w = smooth(-4, 2, elevation) * (1 - overcast * 0.9) * 0.5;
+        // Cloud shadows: strongest with scattered clouds; a closed deck is one big shadow already
+        // (the sun is dimmed instead), so they fade out as it closes.
+        this.cloudShadow.strength.value = this.cloudShadowsEnabled
+            ? THREE.MathUtils.clamp(env.cloud_shadow_strength ?? 0.6, 0, 1) *
+              (1 - overcast * 0.7) *
+              smooth(-2, 4, elevation)
+            : 0;
         this.baseFogDensity = c.fogDensity;
 
         for (const sky of this.skies) {

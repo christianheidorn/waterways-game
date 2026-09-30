@@ -27,6 +27,9 @@ import {
     attributeInstance,
     createFoliageGlobals,
     createFoliageMaterial,
+    INTERACTORS,
+    interactionStrength,
+    LOD_FADE_BAND,
     RANK_FADE,
     rootTintFor,
     windStiffness,
@@ -137,6 +140,12 @@ const NO_SPLIT = 1e9;
 const CAMERA_CUT = 25;
 /** Ground cover tiles the editor worker grows at a time (WebGL 2 fallback). */
 const MAX_COVER_JOBS = 24;
+/** Character trail: a new point every this many metres; bent grass recovers over TRAIL_RECOVER s. */
+const TRAIL_SPACING = 0.45;
+const TRAIL_RECOVER = 2.5;
+/** Gust fronts travel downwind at (GUST_BASE + GUST_PER_WIND × wind strength) × gust speed m/s. */
+const GUST_BASE = 3;
+const GUST_PER_WIND = 9;
 /** Frame budget (ms) for growing ground cover tiles (at least one tile per frame while any is due). */
 const COVER_BUDGET_MS = 3;
 /** Camera movement (m) before the ground cover tiles around it are re-checked. */
@@ -477,6 +486,14 @@ export class Foliage {
     /** Tiles waiting for the worker, with the token of their latest request. */
     private readonly coverWaiting = new Map<object, number>();
     private coverToken = 0;
+    /** Travelling gust front speed factor (× wind-derived m/s). */
+    private gustSpeed = 1;
+    /** Character trail, newest first (x, y, z, age in s). */
+    private readonly trail: THREE.Vector4[] = [];
+    private interactor: THREE.Vector3 | null = null;
+    private interaction = true;
+    private temporalDither = false;
+    private ditherIndex = 0;
 
     /** `groundColor`: terrain colour the roots of grass etc. blend into (none: they keep their own). */
     constructor(groundColor: GroundColorSource | null = null) {
@@ -1360,6 +1377,101 @@ export class Foliage {
         }
     }
 
+    /**
+     * Travelling gusts (environment gust_strength / gust_scale / gust_speed): strength 0 is a steady
+     * wind, `scale` the size of the gust patches (m), `speed` how fast they travel downwind.
+     */
+    setGusts(strength: number, scale: number, speed: number): void {
+        this.globals.gust.value.set(
+            Math.max(0, strength),
+            1 / Math.max(1, scale),
+        );
+        this.gustSpeed = Math.max(0, speed);
+    }
+
+    /** Dithered LOD cross-fades (graphics lod_crossfade); off switches LODs at once. */
+    setLodCrossfade(enabled: boolean): void {
+        this.globals.lodFade.value = enabled ? LOD_FADE_BAND : 0;
+        this.needsEval = true;
+    }
+
+    /** The cross-fade dither changes every frame (for TAA to resolve), or stays fixed. */
+    setTemporalDither(enabled: boolean): void {
+        this.temporalDither = enabled;
+
+        if (!enabled) {
+            this.globals.ditherFrame.value = 0;
+        }
+    }
+
+    /** Grass bending around the character (graphics grass_interaction). */
+    setInteraction(enabled: boolean): void {
+        this.interaction = enabled;
+
+        if (!enabled) {
+            this.trail.length = 0;
+            this.writeTrail();
+        }
+    }
+
+    /** Where the character stands this frame (feet), or null when there is none (editor camera). */
+    setInteractor(position: THREE.Vector3 | null): void {
+        if (!position) {
+            this.interactor = null;
+
+            return;
+        }
+
+        (this.interactor ??= new THREE.Vector3()).copy(position);
+    }
+
+    /** Ages the character trail and writes it to the shader (newest point first). */
+    private updateTrail(dt: number): void {
+        const trail = this.trail;
+
+        for (const point of trail) {
+            point.w += dt;
+        }
+
+        while (trail.length && trail[trail.length - 1].w > TRAIL_RECOVER) {
+            trail.pop();
+        }
+
+        const p = this.interaction ? this.interactor : null;
+
+        if (p) {
+            const head = trail[0];
+            const moved = head
+                ? Math.hypot(head.x - p.x, head.z - p.z) > TRAIL_SPACING
+                : true;
+
+            if (moved) {
+                trail.unshift(new THREE.Vector4(p.x, p.y, p.z, 0));
+                trail.length = Math.min(trail.length, INTERACTORS);
+            } else {
+                // Standing (or still within the spacing): the newest point follows the feet.
+                head.set(p.x, p.y, p.z, 0);
+            }
+        }
+
+        this.writeTrail();
+    }
+
+    private writeTrail(): void {
+        const values = this.globals.interactors.array as THREE.Vector4[];
+
+        for (let i = 0; i < INTERACTORS; i++) {
+            const point = this.trail[i];
+
+            if (point) {
+                const k = 1 - point.w / TRAIL_RECOVER;
+                values[i].set(point.x, point.y, point.z, k * k * (3 - 2 * k));
+            } else {
+                values[i].set(0, -1e6, 0, 0);
+            }
+        }
+    }
+
     /** Paint instances of the given types into a circle, respecting each type's rules and density. */
     paint(
         ctx: FoliagePlacementContext,
@@ -2134,6 +2246,19 @@ export class Foliage {
     update(dt: number, camera: THREE.Camera): void {
         this.globals.prevTime.value = this.globals.time.value;
         this.globals.time.value += dt;
+        // Gust fronts drift downwind (accumulated: speed or direction changes never jump).
+        const g = this.globals;
+        const front =
+            (GUST_BASE + GUST_PER_WIND * g.wind.value) * this.gustSpeed * dt;
+        g.gustOffsetPrev.value.copy(g.gustOffset.value);
+        g.gustOffset.value.addScaledVector(g.windDir.value, front);
+
+        if (this.temporalDither) {
+            this.ditherIndex = (this.ditherIndex + 1) % 64;
+            g.ditherFrame.value = (this.ditherIndex * 0.618034) % 1;
+        }
+
+        this.updateTrail(dt);
         this.globals.camPos.value.copy(camera.position);
         this.lastCamera = camera;
         this.updateGroundCover(camera.position);
@@ -2579,6 +2704,7 @@ export class Foliage {
             center: sphere.center,
             radius: sphere.radius,
             reflect: !SMALL_KINDS.has(renderer.type.kind),
+            interact: interactionStrength(renderer.type.kind),
         };
     }
 
@@ -2922,7 +3048,7 @@ export class Foliage {
             if (dist < split + LOD_SPLIT_SLACK) {
                 if (
                     farthestDistance(cell.bounds, cam) + LOD_SPLIT_SLACK <
-                    split
+                    split * (1 - this.globals.lodFade.value)
                 ) {
                     lod = 0;
                 } else {
@@ -3994,6 +4120,7 @@ export class Foliage {
             role,
             instance: attributeInstance,
             root: rootTint(renderer),
+            interact: interactionStrength(renderer.type.kind),
         });
     }
 

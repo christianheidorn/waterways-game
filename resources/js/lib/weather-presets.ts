@@ -12,6 +12,7 @@ type WeatherFields = Pick<
     | 'falling_leaves'
     | 'lightning_frequency'
     | 'wind_strength'
+    | 'gust_strength'
     | 'wetness'
     | 'exposure'
 >;
@@ -42,6 +43,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.35,
+            gust_strength: 0.4,
             wetness: 0,
             exposure: 0.5,
         },
@@ -60,6 +62,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.6,
+            gust_strength: 0.5,
             wetness: 0,
             exposure: 0.5,
         },
@@ -78,6 +81,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.5,
+            gust_strength: 0.45,
             wetness: 0.1,
             exposure: 0.55,
         },
@@ -96,6 +100,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.1,
+            gust_strength: 0.15,
             wetness: 0.25,
             exposure: 0.55,
         },
@@ -114,6 +119,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.8,
+            gust_strength: 0.7,
             wetness: 0.6,
             exposure: 0.6,
         },
@@ -132,6 +138,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             falling_leaves: 0,
             lightning_frequency: 6,
             wind_strength: 1.4,
+            gust_strength: 1.2,
             wetness: 0.9,
             exposure: 0.6,
         },
@@ -150,6 +157,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             falling_leaves: 0,
             lightning_frequency: 0,
             wind_strength: 0.3,
+            gust_strength: 0.35,
             wetness: 0,
             exposure: 0.5,
         },
@@ -168,6 +176,7 @@ export const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
             falling_leaves: 0.6,
             lightning_frequency: 0,
             wind_strength: 0.9,
+            gust_strength: 0.9,
             wetness: 0.15,
             exposure: 0.52,
         },

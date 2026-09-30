@@ -15,6 +15,8 @@ import {
     floor,
     Fn,
     hash,
+    interleavedGradientNoise,
+    length,
     log2,
     materialAO,
     materialEmissive,
@@ -30,12 +32,14 @@ import {
     positionGeometry,
     positionPrevious,
     positionWorld,
+    screenCoordinate,
     sin,
     smoothstep,
     step,
     texture,
     textureSize,
     uniform,
+    uniformArray,
     uv,
     varying,
     varyingProperty,
@@ -45,6 +49,7 @@ import {
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
 import type { FoliageKind } from '../../shared/types';
+import { gnoise } from '../SkyDome';
 import { LIGHTING_ONLY_ALBEDO } from '../TerrainDebugView';
 
 /**
@@ -60,6 +65,15 @@ import { LIGHTING_ONLY_ALBEDO } from '../TerrainDebugView';
 
 /** Fraction of instances that are mid-transition in the density fade. */
 export const RANK_FADE = 0.12;
+
+/** Recent positions of the character(s) that push grass aside (see Foliage.setInteractors). */
+export const INTERACTORS = 8;
+
+/**
+ * Width of the dithered LOD cross-fade band as a fraction of each switch distance (the band ends at
+ * the switch). Also the fade band at the end of the foliage shadows.
+ */
+export const LOD_FADE_BAND = 0.12;
 
 /**
  * Which side of the per-instance LOD0 / LOD1 split a material draws: 'near' keeps instances closer
@@ -102,6 +116,19 @@ export type FoliageGlobals = {
     groundColor: GroundColorSource | null;
     /** 1 replaces the albedo with a neutral grey (the editor's lighting-only view). */
     lightingOnly: FloatUniform;
+    /** Travelling gusts: x = strength (0 = steady wind), y = 1 / patch size (1/m). */
+    gust: THREE.UniformNode<'vec2', THREE.Vector2>;
+    /** Downwind offset of the gust field (m), accumulated so speed changes never jump; and last frame's. */
+    gustOffset: THREE.UniformNode<'vec2', THREE.Vector2>;
+    gustOffsetPrev: THREE.UniformNode<'vec2', THREE.Vector2>;
+    /** Character trail: xyz = position, w = push strength (0 = unused), newest first. */
+    interactors: THREE.UniformArrayNode<'vec4'>;
+    /** Radius (m) around an interactor within which grass bends away. */
+    interactRadius: FloatUniform;
+    /** Width of the dithered LOD cross-fade band (fraction of the switch distance; 0 = hard switches). */
+    lodFade: FloatUniform;
+    /** Per-frame dither offset (0-1) so TAA resolves the cross-fade; 0 keeps a fixed pattern. */
+    ditherFrame: FloatUniform;
 };
 
 /** Per-type uniforms (updated in place, e.g. when the cull distance changes). */
@@ -129,6 +156,16 @@ export function createFoliageGlobals(
         sunDir: uniform(new THREE.Vector3(0, 1, 0)),
         groundColor,
         lightingOnly: uniform(0),
+        gust: uniform(new THREE.Vector2(0.5, 1 / 40)),
+        gustOffset: uniform(new THREE.Vector2()),
+        gustOffsetPrev: uniform(new THREE.Vector2()),
+        interactors: uniformArray<'vec4'>(
+            Array.from({ length: INTERACTORS }, () => new THREE.Vector4()),
+            'vec4',
+        ),
+        interactRadius: uniform(0.9),
+        lodFade: uniform(LOD_FADE_BAND),
+        ditherFrame: uniform(0),
     };
 }
 
@@ -166,14 +203,95 @@ export type FoliageMaterialOptions = {
     shadowInstance?: InstanceSource;
     /** Roots blend into the terrain colour (see rootTint); null for kinds that keep their own. */
     root: RootTint | null;
+    /** How far the plant bends away from the character (0 = not at all, 1 = grass). */
+    interact?: number;
+    /**
+     * Dithered LOD cross-fade of GPU-culled draws: the dither range [lo, hi) this draw keeps for an
+     * instance at `pos` (the neighbouring LOD keeps the complement), or for the LOD0 shadow casters
+     * (`shadow`) the fade at the end of the shadow reach. Null: no fade.
+     */
+    lodRange?: ((pos: Node<'vec3'>, shadow: boolean) => Node<'vec2'>) | null;
 };
 
-/** Wind sway, distance fade and density falloff for one instance source; returns the world position. */
+/**
+ * Interpolated dither range of the LOD cross-fade: x = lower, y = upper bound of the kept dither
+ * values, z = 1 when the dither may change every frame (main pass with TAA; never in shadow maps).
+ */
+const lodFadeVarying = () => varyingProperty('vec3', 'vFoliageLodFade');
+
+/** 0 → 1 across the cross-fade band that ends at `at` (m). */
+export function lodBandT(
+    g: FoliageGlobals,
+    d: Node<'float'>,
+    at: Node<'float'>,
+): Node<'float'> {
+    const band = at.mul(g.lodFade).max(1e-3);
+
+    return d.sub(at.sub(band)).div(band).clamp(0, 1);
+}
+
+/** Discards the fragments this LOD leaves to its neighbour (screen-space dither, shadow maps too). */
+function lodFadeMask(material: THREE.NodeMaterial, g: FoliageGlobals): void {
+    const range = lodFadeVarying();
+    const n = interleavedGradientNoise(screenCoordinate.xy)
+        .add(g.ditherFrame.mul(range.z))
+        .fract();
+    material.maskNode = n
+        .greaterThanEqual(range.x)
+        .and(n.lessThan(range.y)) as unknown as Node<'bool'>;
+}
+
+/**
+ * Travelling gust field (0-1) at a world position: gradient noise scrolled downwind, so gust fronts
+ * sweep across fields and canopies as visible waves.
+ */
+function gustField(
+    g: FoliageGlobals,
+    xz: Node<'vec2'>,
+    offset: Node<'vec2'>,
+    time: Node<'float'>,
+): Node<'float'> {
+    const p = xz.sub(offset).mul(g.gust.y).toVar();
+    const n = gnoise(p)
+        .mul(0.65)
+        .add(gnoise(p.mul(2.3).add(vec2(17.3, time.mul(0.05)))).mul(0.35));
+
+    return smoothstep(-0.15, 0.6, n);
+}
+
+/** Horizontal push away from the character trail (world x / z, length ≤ 1). */
+function interactionPush(
+    g: FoliageGlobals,
+    pos: Node<'vec3'>,
+): Node<'vec2'> {
+    const push = vec2(0).toVar();
+
+    for (let i = 0; i < INTERACTORS; i++) {
+        const q = g.interactors.element(i);
+        const d = pos.xz.sub(q.xz);
+        const dist = length(d);
+        const near = float(1)
+            .sub(smoothstep(g.interactRadius.mul(0.25), g.interactRadius, dist))
+            .mul(q.w)
+            .mul(step(abs(pos.y.sub(q.y)), 2.5));
+        push.addAssign(d.div(dist.max(1e-3)).mul(near));
+    }
+
+    return push.div(length(push).max(1));
+}
+
+/**
+ * Wind sway (with travelling gusts), grass bending around the character, distance fade, density
+ * falloff and the LOD cross-fade range for one instance source; returns the world position. `shadow`
+ * builds the variant of the shadow pass (its own instance list and fade).
+ */
 function foliagePosition(
     options: FoliageMaterialOptions,
     source: InstanceSource,
+    shadow = false,
 ): Node {
     const { globals: g, uniforms: u, stiffness, fade, role } = options;
+    const interact = options.interact ?? 0;
 
     return Fn(() => {
         const { row0, row1, row2, data } = source();
@@ -188,15 +306,25 @@ function foliagePosition(
         // world-space wind direction is brought into instance space first (transpose × wind).
         const windLocal = r0.xyz.mul(g.windDir.x).add(r2.xyz.mul(g.windDir.y));
         const windDir = normalize(windLocal.xz.add(vec2(1e-5))).toVar();
-        const swayed = (time: Node<'float'>) => {
+        const swayed = (time: Node<'float'>, gustOffset: Node<'vec2'>) => {
             const gust = sin(time.mul(0.7).add(instPos.x.mul(0.01)))
                 .mul(0.5)
                 .add(0.5);
+            // Travelling gusts: patches of stronger wind sweep downwind (calmer between them).
+            const field = gustField(g, instPos.xz, gustOffset, time);
+            const gusting = float(1)
+                .add(g.gust.x.mul(field.mul(1.5).sub(0.4)))
+                .max(0.1);
             const sway = sin(time.mul(1.9).add(phase))
                 .mul(0.6)
                 .add(sin(time.mul(3.7).add(phase.mul(1.7))).mul(0.25))
-                .mul(gust.mul(0.6).add(0.4));
-            const lean = bend.mul(0.22).mul(gust.mul(0.5).add(0.5));
+                .mul(gust.mul(0.6).add(0.4))
+                .mul(gusting);
+            const lean = bend
+                .mul(0.22)
+                .mul(gust.mul(0.5).add(0.5))
+                .mul(gusting)
+                .add(bend.mul(0.25).mul(g.gust.x).mul(field));
             const offset = windDir
                 .mul(sway.mul(bend).mul(0.35).add(lean))
                 .add(
@@ -208,8 +336,26 @@ function foliagePosition(
 
             return vec3(q.x.add(offset.x), q.y, q.z.add(offset.y));
         };
-        const p = swayed(g.time).toVar();
-        const pPrev = swayed(g.prevTime).toVar();
+        const p = swayed(g.time, g.gustOffset).toVar();
+        const pPrev = swayed(g.prevTime, g.gustOffsetPrev).toVar();
+
+        if (interact > 0) {
+            // Bent away from the character: tips move furthest, roots stay put (the push is
+            // brought into instance space like the wind).
+            const push = interactionPush(g, instPos).mul(interact).toVar();
+            const amount = length(push);
+            const local = r0.xyz.mul(push.x).add(r2.xyz.mul(push.y)).xz;
+            const dir = local.div(length(local).max(1e-5)).mul(amount);
+            const h = positionGeometry.y.max(0);
+            const bent = vec3(
+                dir.x.mul(h).mul(0.85),
+                h.mul(amount.mul(amount).mul(-0.45)),
+                dir.y.mul(h).mul(0.85),
+            );
+            p.addAssign(bent);
+            pPrev.addAssign(bent);
+        }
+
         const camDist = distance(instPos.xz, g.camPos.xz);
         const fadeEnd = u.fadeEnd.mul(g.fadeScale);
         const fadeK = float(1)
@@ -239,13 +385,7 @@ function foliagePosition(
             );
         }
 
-        if (role !== 'none') {
-            // Per-instance LOD0 / LOD1 split (CPU cells): each side keeps its own instances.
-            const d = distance(instPos, g.camPos);
-            fadeK.mulAssign(
-                role === 'near' ? step(d, u.lodSplit) : step(u.lodSplit, d),
-            );
-        }
+        fadeK.mulAssign(lodSplitFade(options, instPos, shadow));
 
         p.mulAssign(fadeK);
         pPrev.mulAssign(fadeK);
@@ -272,6 +412,50 @@ function foliagePosition(
 
         return toWorld(p);
     })();
+}
+
+/**
+ * The per-instance LOD split of the CPU cells and the dithered LOD cross-fade: returns 0 for
+ * instances this draw leaves out entirely, and sets the dither range of the rest (lodFadeVarying).
+ *
+ * - GPU-culled draws get their range from `options.lodRange` (the culling pass lists instances in the
+ *   band for both LODs).
+ * - CPU cells split LOD0 / LOD1 per instance: 'near' keeps instances up to the split and fades them
+ *   out over the band before it, 'far' fades in over that band. Their shadows (LOD0 only) fade out
+ *   over the same band.
+ */
+function lodSplitFade(
+    options: FoliageMaterialOptions,
+    instPos: Node<'vec3'>,
+    shadow: boolean,
+): Node<'float'> {
+    const { globals: g, uniforms: u, role } = options;
+    const range = lodFadeVarying();
+    const temporal = shadow ? 0 : 1;
+
+    if (options.lodRange) {
+        range.assign(vec3(options.lodRange(instPos, shadow), temporal));
+
+        return float(1);
+    }
+
+    if (role === 'none') {
+        return float(1);
+    }
+
+    const d = distance(instPos, g.camPos);
+    const t = lodBandT(g, d, u.lodSplit);
+
+    if (role === 'near') {
+        range.assign(vec3(t, 2, temporal));
+
+        return step(d, u.lodSplit);
+    }
+
+    range.assign(vec3(-1, t, temporal));
+    const band = u.lodSplit.mul(g.lodFade);
+
+    return step(u.lodSplit.sub(band), d);
 }
 
 /**
@@ -377,6 +561,11 @@ function mipAlphaBoost(material: THREE.MeshStandardNodeMaterial): void {
     material.opacityNode = materialOpacity.mul(mip.mul(0.25).add(1));
 }
 
+/** The material cross-fades (or splits) LODs per instance and needs the dither mask. */
+function hasLodFade(options: FoliageMaterialOptions): boolean {
+    return !!options.lodRange || options.role !== 'none';
+}
+
 /** Foliage material for one LOD (or material group) of a type. */
 export function createFoliageMaterial(
     source: THREE.Material,
@@ -395,16 +584,27 @@ export function createFoliageMaterial(
 
     material.positionNode = foliagePosition(options, options.instance);
 
+    if (hasLodFade(options)) {
+        lodFadeMask(material, options.globals);
+        // The shadow pass fades its casters with a range of its own (no temporal dither).
+        material.castShadowPositionNode = foliagePosition(
+            options,
+            options.shadowInstance ?? options.instance,
+            true,
+        );
+    }
+
     if (options.root && options.globals.groundColor) {
         material.setRootTint(
             rootTint(options, options.root, options.globals.groundColor),
         );
     }
 
-    if (options.shadowInstance) {
+    if (options.shadowInstance && !hasLodFade(options)) {
         material.castShadowPositionNode = foliagePosition(
             options,
             options.shadowInstance,
+            true,
         );
     }
 
@@ -492,6 +692,17 @@ export function rootTintFor(
     return tint && height > 0
         ? { strength: tint.strength, height: height * tint.fraction }
         : null;
+}
+
+/** How far a kind bends away from the character: grass and flowers fully, bushes a little. */
+export function interactionStrength(kind: string): number {
+    return kind === 'grass' || kind === 'flower'
+        ? 1
+        : kind === 'reed'
+          ? 0.8
+          : kind === 'bush'
+            ? 0.3
+            : 0;
 }
 
 /** Wind response per kind: rocks are rigid, trees sway less than grass and bushes. */
@@ -584,7 +795,7 @@ function octahedralImpostor(
     info: OctahedralImpostorInfo,
     options: FoliageMaterialOptions,
 ): void {
-    const { globals: g, uniforms: u, role } = options;
+    const { globals: g, uniforms: u } = options;
     const n = info.frames;
     const radius = float(info.radius);
     const center = vec3(info.center.x, info.center.y, info.center.z);
@@ -663,19 +874,13 @@ function octahedralImpostor(
         row1.assign(r1.xyz);
         row2.assign(r2.xyz);
 
-        // Distance fade and the LOD split, as for mesh LODs.
+        // Distance fade, the LOD split and cross-fade, as for mesh LODs.
         const camDist = distance(instPos.xz, g.camPos.xz);
         const fadeEnd = u.fadeEnd.mul(g.fadeScale);
         const fadeK = float(1)
             .sub(smoothstep(fadeEnd.mul(0.92), fadeEnd, camDist))
             .toVar();
-
-        if (role !== 'none') {
-            const dd = distance(instPos, g.camPos);
-            fadeK.mulAssign(
-                role === 'near' ? step(dd, u.lodSplit) : step(u.lodSplit, dd),
-            );
-        }
+        fadeK.mulAssign(lodSplitFade(options, instPos, false));
 
         const p = local.mul(fadeK);
         normalLocal.assign(normalize(toCam));
@@ -727,6 +932,10 @@ function octahedralImpostor(
 
     material.normalMap = null;
     material.side = THREE.FrontSide;
+
+    if (hasLodFade(options)) {
+        lodFadeMask(material, g);
+    }
 
     if (material.alphaTest <= 0) {
         material.alphaTest = 0.5;

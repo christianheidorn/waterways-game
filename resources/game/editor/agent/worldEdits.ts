@@ -8,6 +8,7 @@ import {
     typeSeed,
 } from '../../world/foliage/groundCover';
 import type { Heightfield } from '../../world/Heightfield';
+import type { Props } from '../../world/Props';
 import type { SplatMap } from '../../world/SplatMap';
 import { mulberry32, SimplexNoise } from '../../util/noise';
 import { hydraulicErosion, thermalErosion } from '../tools/terrainOps';
@@ -833,4 +834,167 @@ function clamp01(v: number): number {
 
 function round1(v: number): number {
     return Math.round(v * 10) / 10;
+}
+
+export type PropPlacement = {
+    model: number;
+    x: number;
+    z: number;
+    /** Degrees; random when omitted. */
+    rotation?: number;
+    scale?: number;
+    offset?: number;
+};
+
+export type PropScatterParams = {
+    models: number[];
+    count: number;
+    /** Minimum distance between prop centres (m); default from the model size. */
+    spacing?: number;
+    /** Degrees of terrain slope above which no prop is placed. */
+    max_slope?: number;
+    scale_min?: number;
+    scale_max?: number;
+    avoid_water?: boolean;
+    seed?: number;
+};
+
+/** Places props at exact positions. */
+export function placeProps(
+    props: Props,
+    hf: Heightfield,
+    items: PropPlacement[],
+): { placed: number; ids: string[] } {
+    const ids: string[] = [];
+
+    for (const it of items) {
+        if (!props.hasModel(it.model)) {
+            throw new EditError(
+                `There is no ready prop model with id ${it.model}. Use list_prop_models.`,
+            );
+        }
+
+        if (!hf.contains(it.x, it.z)) {
+            throw new EditError(`(${it.x}, ${it.z}) is outside the map.`);
+        }
+    }
+
+    for (const it of items) {
+        ids.push(
+            props.add({
+                model: it.model,
+                x: it.x,
+                z: it.z,
+                yaw:
+                    it.rotation === undefined
+                        ? Math.random() * Math.PI * 2
+                        : (it.rotation * Math.PI) / 180,
+                scale: it.scale ?? 1,
+                offset: it.offset ?? 0,
+            }).id,
+        );
+    }
+
+    return { placed: ids.length, ids };
+}
+
+/** Scatters props of the given models inside a shape, keeping them apart, off steep ground and water. */
+export function scatterProps(
+    props: Props,
+    hf: Heightfield,
+    water: Heightfield,
+    mask: ShapeMask,
+    p: PropScatterParams,
+): { placed: number; ids: string[] } {
+    for (const model of p.models) {
+        if (!props.hasModel(model)) {
+            throw new EditError(
+                `There is no ready prop model with id ${model}. Use list_prop_models.`,
+            );
+        }
+    }
+
+    const random = mulberry32(p.seed ?? Date.now() & 0x7fffffff);
+    const target = Math.max(0, Math.min(2000, Math.round(p.count)));
+    const maxSlope = p.max_slope ?? 25;
+    const scaleMin = p.scale_min ?? 1;
+    const scaleMax = Math.max(scaleMin, p.scale_max ?? scaleMin);
+    const x0 = hf.colToX(mask.rect.x0);
+    const z0 = hf.rowToZ(mask.rect.z0);
+    const x1 = hf.colToX(mask.rect.x1);
+    const z1 = hf.rowToZ(mask.rect.z1);
+    const taken = props.list().map((q) => ({
+        x: q.x,
+        z: q.z,
+        r: props.modelRadius(q.model, q.scale),
+    }));
+    const ids: string[] = [];
+
+    for (
+        let attempt = 0;
+        attempt < target * 40 && ids.length < target;
+        attempt++
+    ) {
+        const x = x0 + random() * (x1 - x0);
+        const z = z0 + random() * (z1 - z0);
+
+        if (random() >= mask.weightAt(x, z) || hf.slope(x, z) > maxSlope) {
+            continue;
+        }
+
+        if (
+            p.avoid_water !== false &&
+            water.sample(x, z) > hf.sample(x, z) - 0.2
+        ) {
+            continue;
+        }
+
+        const model = p.models[Math.floor(random() * p.models.length)];
+        const scale = scaleMin + random() * (scaleMax - scaleMin);
+        const r = props.modelRadius(model, scale);
+
+        if (
+            taken.some(
+                (q) =>
+                    Math.hypot(q.x - x, q.z - z) <
+                    (p.spacing ?? (q.r + r) * 1.1),
+            )
+        ) {
+            continue;
+        }
+
+        taken.push({ x, z, r });
+        ids.push(
+            props.add({
+                model,
+                x,
+                z,
+                yaw: random() * Math.PI * 2,
+                scale,
+                offset: 0,
+            }).id,
+        );
+    }
+
+    return { placed: ids.length, ids };
+}
+
+/** Removes props (optionally only some models) inside a shape, or by id. */
+export function removeProps(
+    props: Props,
+    mask: ShapeMask | null,
+    models: number[] | null,
+    ids: string[] | null,
+): { removed: number } {
+    const doomed = props
+        .list()
+        .filter(
+            (q) =>
+                (ids ? ids.includes(q.id) : true) &&
+                (models ? models.includes(q.model) : true) &&
+                (mask ? mask.weightAt(q.x, q.z) >= 0.5 : true),
+        )
+        .map((q) => q.id);
+
+    return { removed: props.remove(doomed) };
 }

@@ -261,6 +261,24 @@ export type TerrainLayer = {
     ground_cover?: GroundCoverEntry[];
 };
 
+/** A build request for AI agents (App\\Models\\AgentRequest::toEditorArray). */
+export type AgentRequestSummary = {
+    id: number;
+    status: 'open' | 'in_progress' | 'needs_input' | 'done' | 'dismissed';
+    note: string;
+    area: { x: number; z: number }[];
+    camera: {
+        position: { x: number; y: number; z: number };
+        direction: { x: number; y: number; z: number };
+    } | null;
+    screenshot_url: string | null;
+    reference_urls: string[];
+    result_urls: string[];
+    agent_message: string | null;
+    created_at: string | null;
+    updated_at: string | null;
+};
+
 /** A biome of the library (App\\Models\\Biome::toStudioArray). */
 export type BiomeSummary = {
     id: number;
@@ -389,13 +407,47 @@ export type MapAssets = {
     foliage: string | null;
     /** ESA WorldCover class per heightmap sample (Uint8, resolution²), real-world maps only. */
     landcover: string | null;
+    /** Placed props (PropsFile JSON). */
+    props?: string | null;
 };
+
+/** A placeable model of the prop library (App\\Models\\PropModel::toGameArray). */
+export type PropModelRef = {
+    id: number;
+    name: string;
+    category: string;
+    model_url: string | null;
+    thumbnail_url: string | null;
+    /** Real-world height the model is scaled to (m); null = its own size. */
+    target_height: number | null;
+    dimensions: { x: number; y: number; z: number } | null;
+};
+
+/** One placed prop. The height follows the terrain (plus `offset`), so sculpting keeps it grounded. */
+export type PropInstance = {
+    id: string;
+    /** PropModel id. */
+    model: number;
+    x: number;
+    z: number;
+    /** Radians, around the vertical axis. */
+    yaw: number;
+    /** Multiplier on the model's library size. */
+    scale: number;
+    /** Metres above (+) or into (−) the ground. */
+    offset: number;
+};
+
+/** Serialized props file (maps/{id}/props.json). */
+export type PropsFile = { version: 1; props: PropInstance[] };
 
 export type GameManifest = {
     map: MapInfo;
     environment: EnvironmentSettings;
     settings: GameSettings;
     layers: TerrainLayer[];
+    /** Placeable models (props) ready to use. */
+    prop_models?: PropModelRef[];
     /** The biome library (reusable layer look + ground cover). */
     biomes?: BiomeSummary[];
     foliage_types: FoliageType[];
@@ -407,6 +459,7 @@ export type GameManifest = {
         save_splatmap: string;
         save_water: string;
         save_foliage: string;
+        save_props?: string;
         save_meta: string;
         save_thumbnail: string;
         /** PATCH a foliage type's settings from the in-game editor: `${update_foliage_type}/{id}`. */
@@ -417,6 +470,8 @@ export type GameManifest = {
         biomes?: string;
         /** Agent bridge: POST `${agent}/poll`, results to `${agent}/commands/{id}`. */
         agent?: string;
+        /** Build requests for agents: GET / POST, PATCH / DELETE `${agent_requests}/{id}`. */
+        agent_requests?: string;
     };
 };
 

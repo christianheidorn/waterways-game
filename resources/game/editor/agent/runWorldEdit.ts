@@ -9,10 +9,18 @@ import {
     eraseWater,
     fillLake,
     paintLayer,
+    placeProps,
+    removeProps,
     scatterFoliage,
+    scatterProps,
     sculptTerrain,
 } from './worldEdits';
-import type { PaintParams, SculptParams } from './worldEdits';
+import type {
+    PaintParams,
+    PropPlacement,
+    PropScatterParams,
+    SculptParams,
+} from './worldEdits';
 
 /**
  * Runs one scripted world edit sent by an agent (MCP tools sculpt_terrain, paint_terrain, edit_water,
@@ -170,6 +178,60 @@ export function runWorldEdit(
                         },
                     ),
                 }),
+            );
+        }
+        case 'props': {
+            const action = payload.action;
+
+            if (action === 'place') {
+                return editor.scriptedEdit(
+                    'Agent: place props',
+                    whole,
+                    ['props'],
+                    () =>
+                        placeProps(
+                            world.props,
+                            hf,
+                            payload.placements as PropPlacement[],
+                        ),
+                );
+            }
+
+            if (action === 'scatter') {
+                const m = requireMask();
+
+                return editor.scriptedEdit(
+                    'Agent: scatter props',
+                    m.rect,
+                    ['props'],
+                    () =>
+                        scatterProps(
+                            world.props,
+                            hf,
+                            world.waterGrid,
+                            m,
+                            payload.params as PropScatterParams,
+                        ),
+                );
+            }
+
+            const ids = (payload.ids as string[] | null | undefined) ?? null;
+
+            if (!mask && !ids) {
+                throw new EditError('Give a shape or prop ids to remove.');
+            }
+
+            return editor.scriptedEdit(
+                'Agent: remove props',
+                mask?.rect ?? whole,
+                ['props'],
+                () =>
+                    removeProps(
+                        world.props,
+                        mask,
+                        (payload.models as number[] | null | undefined) ?? null,
+                        ids,
+                    ),
             );
         }
         default:

@@ -5,6 +5,7 @@ namespace App\Support;
 use App\Models\Biome;
 use App\Models\FoliageType;
 use App\Models\Map;
+use App\Models\PropModel;
 use App\Services\Terrain\TerrainStorage;
 
 /**
@@ -32,6 +33,8 @@ final class GameManifest
             'environment' => $map->resolvedEnvironment(),
             'settings' => $this->settings->all(),
             'layers' => $map->layers->map->toGameArray()->values()->all(),
+            // Placeable models (props) that are ready to use.
+            'prop_models' => PropModel::query()->where('status', 'ready')->whereNotNull('model_path')->orderBy('name')->get()->map->toGameArray()->values()->all(),
             'biomes' => Biome::query()->orderBy('name')->get()->map->toStudioArray()->values()->all(),
             'foliage_types' => FoliageType::query()->with('asset')->orderBy('name')->get()->map->toGameArray()->values()->all(),
             'character' => $this->character->get()?->toGameArray(),
@@ -40,6 +43,7 @@ final class GameManifest
                 'splatmap' => $asset('splatmap'),
                 'water' => $asset('water'),
                 'foliage' => $asset('foliage'),
+                'props' => $asset('props'),
                 // ESA WorldCover class per sample (Uint8, resolution²), real-world maps only.
                 'landcover' => $asset('landcover'),
             ],
@@ -48,6 +52,7 @@ final class GameManifest
                 'save_splatmap' => route('api.maps.assets.update', [$map, 'splatmap']),
                 'save_water' => route('api.maps.assets.update', [$map, 'water']),
                 'save_foliage' => route('api.maps.assets.update', [$map, 'foliage']),
+                'save_props' => route('api.maps.assets.update', [$map, 'props']),
                 'save_meta' => route('api.maps.meta.update', $map),
                 'save_thumbnail' => route('api.maps.thumbnail.store', $map),
                 'update_foliage_type' => url('/api/foliage-types'),
@@ -55,6 +60,8 @@ final class GameManifest
                 'biomes' => url('/api/biomes'),
                 // Live bridge for AI agents (MCP server): poll for commands, post results to `${agent}/commands/{id}`.
                 'agent' => url("/api/maps/{$map->slug}/agent"),
+                // Build requests for agents (outline + note + images), made in the editor.
+                'agent_requests' => url("/api/maps/{$map->slug}/agent-requests"),
             ],
         ];
     }

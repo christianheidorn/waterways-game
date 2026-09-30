@@ -90,6 +90,22 @@ export class Api {
         });
     }
 
+    /** Multipart POST (files); the browser sets the boundary header. */
+    async postForm<T>(url: string, form: FormData): Promise<T> {
+        return this.request(url, 'POST', form, {});
+    }
+
+    async deleteJson(url: string): Promise<void> {
+        await fetch(url, {
+            method: 'DELETE',
+            credentials: 'same-origin',
+            headers: {
+                Accept: 'application/json',
+                'X-CSRF-TOKEN': this.config.csrfToken,
+            },
+        });
+    }
+
     async postJson<T>(url: string, payload: unknown): Promise<T> {
         return this.request(url, 'POST', JSON.stringify(payload), {
             'Content-Type': 'application/json',
@@ -100,7 +116,7 @@ export class Api {
         await this.patchJson(url, { spawn });
     }
 
-    private async json<T>(url: string): Promise<T> {
+    async json<T>(url: string): Promise<T> {
         const response = await fetch(url, {
             credentials: 'same-origin',
             headers: { Accept: 'application/json' },

@@ -3,6 +3,8 @@ import { Editor } from '../editor/Editor';
 import type { DirtyChannel } from '../editor/Editor';
 import { EditorPanel } from '../editor/ui/EditorPanel';
 import { ViewModes } from '../editor/ViewModes';
+import { RequestOverlay } from '../editor/RequestOverlay';
+import { Props } from '../world/Props';
 import { AgentBridge } from './AgentBridge';
 import { createAgentHost } from './AgentCommands';
 import { runWorldEdit } from '../editor/agent/runWorldEdit';
@@ -21,6 +23,8 @@ import type {
     GameManifest,
     GameSettings,
     GraphicsSettings,
+    AgentRequestSummary,
+    PropsFile,
     BiomeSummary,
     GroundCoverEntry,
     TerrainLayer,
@@ -68,6 +72,7 @@ type World = {
     terrain: Terrain;
     water: Water;
     foliage: Foliage;
+    props: Props;
     wetness: Wetness;
     /** ESA WorldCover class lookup for real-world maps (0 = unknown). */
     landCoverAt?: (x: number, z: number) => number;
@@ -281,6 +286,137 @@ export class Game {
             this.manifest.map.spawn = m.map.spawn;
             this.editor.setSpawn(m.map.spawn);
         }
+
+        if (parts.includes('prop_models')) {
+            this.manifest.prop_models = m.prop_models;
+            this.world.props.setModels(m.prop_models ?? []);
+            this.editor.notify();
+        }
+
+        if (parts.includes('requests')) {
+            await this.loadRequests();
+        }
+    }
+
+    // ---------------------------------------------------------------- requests
+
+    /** Build requests for agents on this map (Request tool); null when the endpoint is missing. */
+    private requests: AgentRequestSummary[] | null = null;
+    private requestOverlay!: RequestOverlay;
+
+    private async loadRequests(): Promise<void> {
+        const url = this.manifest.endpoints.agent_requests;
+
+        if (!url) {
+            return;
+        }
+
+        try {
+            this.requests = await this.api.json<AgentRequestSummary[]>(url);
+        } catch {
+            this.requests ??= [];
+        }
+
+        this.requestOverlay.setRequests(this.requests);
+        this.editor.notify();
+    }
+
+    /** Outlines are shown while the Request tool is active. */
+    private updateRequestOverlay(): void {
+        this.requestOverlay?.setVisible(
+            this.mode === 'edit' && this.editor.state.group === 'request',
+        );
+    }
+
+    private async sendRequest(
+        note: string,
+        references: File[],
+    ): Promise<boolean> {
+        const url = this.manifest.endpoints.agent_requests;
+        const points = this.editor.state.requestPoints;
+
+        if (!url || points.length < 3 || !note) {
+            return false;
+        }
+
+        try {
+            // The outline is in the scene, so the screenshot shows exactly the area meant.
+            const image = this.captureImage(1280);
+            const screenshot = await (await fetch(image.dataUrl)).blob();
+            const dir = this.camera.getWorldDirection(new THREE.Vector3());
+            const p = this.camera.position;
+            const form = new FormData();
+            form.append('note', note);
+            form.append('area', JSON.stringify(points));
+            form.append(
+                'camera',
+                JSON.stringify({
+                    position: { x: p.x, y: p.y, z: p.z },
+                    direction: { x: dir.x, y: dir.y, z: dir.z },
+                }),
+            );
+            form.append('screenshot', screenshot, 'view.jpg');
+
+            for (const file of references) {
+                form.append('references[]', file, file.name);
+            }
+
+            await this.api.postForm(url, form);
+            this.editor.setRequestPoints([]);
+            this.hud.flash('Request sent: Claude sees it with list_requests');
+            await this.loadRequests();
+
+            return true;
+        } catch (error) {
+            this.hud.flash(
+                `Could not send the request: ${error instanceof Error ? error.message : String(error)}`,
+            );
+
+            return false;
+        }
+    }
+
+    private async changeRequest(
+        id: number,
+        action: 'dismiss' | 'delete',
+    ): Promise<void> {
+        const url = this.manifest.endpoints.agent_requests;
+
+        if (!url) {
+            return;
+        }
+
+        if (action === 'delete') {
+            await this.api.deleteJson(`${url}/${id}`);
+        } else {
+            await this.api.patchJson(`${url}/${id}`, { status: 'dismissed' });
+        }
+
+        await this.loadRequests();
+    }
+
+    /** Flies the editor camera back to where the request was made (or above its area). */
+    private showRequest(id: number): void {
+        const r = this.requests?.find((q) => q.id === id);
+
+        if (!r || this.mode !== 'edit') {
+            return;
+        }
+
+        if (r.camera) {
+            const { position: p, direction: d } = r.camera;
+            this.camera.position.set(p.x, p.y, p.z);
+            this.camera.lookAt(p.x + d.x, p.y + d.y, p.z + d.z);
+        } else {
+            const cx = r.area.reduce((a, q) => a + q.x, 0) / r.area.length;
+            const cz = r.area.reduce((a, q) => a + q.z, 0) / r.area.length;
+            const g = this.world.heights.sample(cx, cz);
+            this.camera.position.set(cx, g + 250, cz + 250);
+            this.camera.lookAt(cx, g, cz);
+        }
+
+        this.camera.updateMatrixWorld();
+        this.editor.fly.setFromCamera();
     }
 
     // ---------------------------------------------------------------- setup
@@ -459,6 +595,13 @@ export class Game {
         );
         this.scene.add(foliage.group);
 
+        const props = new Props(() => heights);
+        props.setModels(m.prop_models ?? []);
+        props.load(
+            assets.props ? await this.api.json<PropsFile>(assets.props) : null,
+        );
+        this.scene.add(props.group);
+
         let landCoverAt: ((x: number, z: number) => number) | undefined;
 
         if (assets.landcover) {
@@ -518,9 +661,11 @@ export class Game {
             terrain,
             water,
             foliage,
+            props,
             wetness,
             landCoverAt,
         };
+        props.onChange = () => this.atmosphere?.invalidateShadows();
         this.progress(0.97, 'Compiling shaders');
     }
 
@@ -576,8 +721,12 @@ export class Game {
                     this.hud.setHistory(canUndo, canRedo);
                     this.bridge.send({ type: 'history', canUndo, canRedo });
                 },
-                onToolGroup: (group) =>
-                    this.bridge.send({ type: 'toolGroupChanged', group }),
+                onToolGroup: (group) => {
+                    this.bridge.send({ type: 'toolGroupChanged', group });
+                    this.updateRequestOverlay();
+                },
+                onRequestOutline: (points) =>
+                    this.requestOverlay.setDraft(points),
                 onSpawnChanged: (spawn) => {
                     this.manifest.map.spawn = spawn;
                     this.hud.flash('Player start moved');
@@ -613,8 +762,19 @@ export class Game {
             biomes: () => this.manifest.biomes ?? [],
             applyBiome: (layerId, biomeId) => this.applyBiome(layerId, biomeId),
             saveBiome: (layerId, name) => this.saveBiome(layerId, name),
+            requests: () => this.requests,
+            sendRequest: (note, references) =>
+                this.sendRequest(note, references),
+            dismissRequest: (id) => void this.changeRequest(id, 'dismiss'),
+            deleteRequest: (id) => void this.changeRequest(id, 'delete'),
+            showRequest: (id) => this.showRequest(id),
+            propModels: () => this.manifest.prop_models ?? [],
         });
         this.hud.panelSlot.append(this.panel.el);
+        this.requestOverlay = new RequestOverlay(() => this.world.heights);
+        this.scene.add(this.requestOverlay.group);
+        this.updateRequestOverlay();
+        void this.loadRequests();
         this.graphicsMenu = new GraphicsMenu(
             this.hud.el,
             {
@@ -746,6 +906,7 @@ export class Game {
             this.playerCamera.reset(this.player.yaw);
             this.player.object.visible = true;
             this.editor.setActive(false);
+            this.requestOverlay?.setVisible(false);
             // The third-person camera keeps ≥ 0.4 m from the ground; 0.2 m halves the far depth
             // steps of WebGL's 24-bit buffer compared to 0.1 m.
             this.camera.near = 0.2;
@@ -769,6 +930,7 @@ export class Game {
             }
 
             this.editor.setActive(true);
+            this.updateRequestOverlay();
             this.camera.near = 0.5;
         }
 
@@ -1621,6 +1783,13 @@ export class Game {
                 await this.api.putBinary(
                     endpoints.save_foliage,
                     JSON.stringify(this.world.foliage.serialize()),
+                );
+            }
+
+            if (channels.has('props') && endpoints.save_props) {
+                await this.api.putBinary(
+                    endpoints.save_props,
+                    JSON.stringify(this.world.props.serialize()),
                 );
             }
 

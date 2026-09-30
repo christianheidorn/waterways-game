@@ -4,10 +4,12 @@ import type { EditorToolGroup } from '../shared/protocol';
 import { NO_WATER } from '../shared/types';
 import type {
     EditorSettings,
+    PropsFile,
     FoliageType,
     TerrainLayer,
 } from '../shared/types';
 import type { Foliage } from '../world/Foliage';
+import type { Props } from '../world/Props';
 import type { GridRect, Heightfield } from '../world/Heightfield';
 import type { SplatMap } from '../world/SplatMap';
 import type { Terrain } from '../world/Terrain';
@@ -45,6 +47,7 @@ export type DirtyChannel =
     | 'splatmap'
     | 'water'
     | 'foliage'
+    | 'props'
     | 'meta';
 
 export type EditorWorld = {
@@ -55,6 +58,7 @@ export type EditorWorld = {
     waterGrid: Heightfield;
     water: Water;
     foliage: Foliage;
+    props: Props;
     layers: TerrainLayer[];
     foliageTypes: FoliageType[];
     spawn: { x: number; z: number; yaw: number } | null;
@@ -68,6 +72,8 @@ export type EditorCallbacks = {
     onSpawnChanged: (spawn: { x: number; z: number; yaw: number }) => void;
     requestPlay: (fromCamera: boolean) => void;
     requestSave: () => void;
+    /** Request tool: the outline being drawn changed. */
+    onRequestOutline?: (points: { x: number; z: number }[]) => void;
     /** Next (+1) or previous (-1) view mode. */
     cycleViewMode: (step: number) => void;
     isPointerOverUi: () => boolean;
@@ -85,6 +91,7 @@ export class EditorState {
         foliage: { ...DEFAULT_BRUSH, radius: 25, strength: 0.8, falloff: 0.3 },
         water: { ...DEFAULT_BRUSH, radius: 30, strength: 1, falloff: 0.25 },
         place: { ...DEFAULT_BRUSH, radius: 2, strength: 1, falloff: 0 },
+        request: { ...DEFAULT_BRUSH, radius: 2, strength: 1, falloff: 0 },
     };
     flattenMode: FlattenMode = 'both';
     flattenTarget = 0;
@@ -102,6 +109,16 @@ export class EditorState {
     waterDepth = 3;
     waterCarve = true;
     showGrid = false;
+    /** Request tool: outline being drawn (world metres) and the draft note. */
+    requestPoints: { x: number; z: number }[] = [];
+    /** Place tool: the player start, or props from the library. */
+    placeTool: 'spawn' | 'props' = 'spawn';
+    propModel: number | null = null;
+    /** Degrees; ignored with random rotation. */
+    propYaw = 0;
+    propRandomYaw = true;
+    propScale = 1;
+    requestNote = '';
 
     get brush(): BrushSettings {
         return this.brushes[this.group];
@@ -191,6 +208,13 @@ export class Editor {
                 const [typeId, key] = splitFoliageId(id);
                 world.foliage.restoreCell(typeId, key, state as number[]);
                 callbacks.markDirty('foliage');
+            },
+        });
+        this.history.registerCustom('props', {
+            capture: () => world.props.serialize(),
+            restore: (_id, state) => {
+                world.props.load(state as PropsFile);
+                callbacks.markDirty('props');
             },
         });
         world.foliage.onBeforeModify = (typeId, key) => {
@@ -482,14 +506,16 @@ export class Editor {
     scriptedEdit<T>(
         label: string,
         rect: GridRect,
-        channels: ('height' | 'splat' | 'water' | 'foliage')[],
+        channels: ('height' | 'splat' | 'water' | 'foliage' | 'props')[],
         fn: () => T,
     ): T {
         this.endStroke();
         this.history.beginStroke(label);
 
         for (const channel of channels) {
-            if (channel !== 'foliage') {
+            if (channel === 'props') {
+                this.history.touchCustom('props', 'all');
+            } else if (channel !== 'foliage') {
                 this.history.touch(channel, rect);
             }
         }
@@ -520,9 +546,20 @@ export class Editor {
             this.callbacks.markDirty('foliage');
         }
 
+        if (channels.includes('props')) {
+            this.callbacks.markDirty('props');
+        }
+
         this.flushRebuilds();
 
         return result;
+    }
+
+    /** Request tool: replaces the outline being drawn (e.g. cleared after sending). */
+    setRequestPoints(points: { x: number; z: number }[]): void {
+        this.state.requestPoints = points;
+        this.callbacks.onRequestOutline?.(points);
+        this.notify();
     }
 
     /** Player start set from outside the editor (e.g. by an agent). */
@@ -547,6 +584,7 @@ export class Editor {
             'foliage',
             'water',
             'place',
+            'request',
         ];
 
         if (input.buttons.has(2)) {
@@ -557,6 +595,15 @@ export class Editor {
             if (input.wasPressed(`Digit${i + 1}`) && !input.ctrl) {
                 this.setGroup(groups[i]);
             }
+        }
+
+        // Request tool: Backspace removes the last outline point.
+        if (
+            this.state.group === 'request' &&
+            input.wasPressed('Backspace') &&
+            this.state.requestPoints.length
+        ) {
+            this.setRequestPoints(this.state.requestPoints.slice(0, -1));
         }
 
         const brush = this.state.brush;
@@ -647,7 +694,12 @@ export class Editor {
         const s = this.state;
         const b = s.brush;
 
-        if (hidden || !this.cursorValid || s.group === 'place') {
+        if (
+            hidden ||
+            !this.cursorValid ||
+            s.group === 'place' ||
+            s.group === 'request'
+        ) {
             this.world.material.hideBrush();
 
             return;
@@ -706,8 +758,31 @@ export class Editor {
             return;
         }
 
+        if (s.group === 'place' && s.placeTool === 'props') {
+            this.placeProp(this.input.shift);
+            // One prop per click: wait for the button to be released.
+            this.stroking = true;
+            this.history.beginStroke('noop');
+
+            return;
+        }
+
         if (s.group === 'place') {
             this.placeSpawn();
+
+            return;
+        }
+
+        if (s.group === 'request') {
+            s.requestPoints = [
+                ...s.requestPoints,
+                { x: this.cursor.x, z: this.cursor.z },
+            ];
+            this.callbacks.onRequestOutline?.(s.requestPoints);
+            this.notify();
+            // One point per click: wait for the button to be released.
+            this.stroking = true;
+            this.history.beginStroke('noop');
 
             return;
         }
@@ -1077,6 +1152,36 @@ export class Editor {
         this.rampMarker.visible = false;
     }
 
+    /** Place tool (props): adds the selected model at the cursor, or (remove) deletes the nearest prop. */
+    private placeProp(remove: boolean): void {
+        const s = this.state;
+        const props = this.world.props;
+        this.history.beginStroke(remove ? 'Remove prop' : 'Place prop');
+        this.history.touchCustom('props', 'all');
+
+        if (remove) {
+            const hit = props.nearest(this.cursor.x, this.cursor.z, 8);
+
+            if (hit) {
+                props.remove([hit.id]);
+            }
+        } else if (s.propModel !== null) {
+            props.add({
+                model: s.propModel,
+                x: this.cursor.x,
+                z: this.cursor.z,
+                yaw: s.propRandomYaw
+                    ? Math.random() * Math.PI * 2
+                    : THREE.MathUtils.degToRad(s.propYaw),
+                scale: s.propScale,
+                offset: 0,
+            });
+        }
+
+        this.history.endStroke();
+        this.callbacks.markDirty('props');
+    }
+
     private placeSpawn(): void {
         const dir = new THREE.Vector3();
         this.camera.getWorldDirection(dir);
@@ -1117,6 +1222,12 @@ export class Editor {
 
     private snapFoliage(rect: GridRect): void {
         const hf = this.world.heights;
+        this.world.props.snap(
+            hf.colToX(rect.x0),
+            hf.rowToZ(rect.z0),
+            hf.colToX(rect.x1),
+            hf.rowToZ(rect.z1),
+        );
         this.world.foliage.snapToTerrain(
             hf,
             hf.colToX(rect.x0),

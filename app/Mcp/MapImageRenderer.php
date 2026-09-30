@@ -27,9 +27,10 @@ class MapImageRenderer
 
     /**
      * @param  array{min: array{x: float, z: float}, max: array{x: float, z: float}}|null  $area  crop (world metres)
+     * @param  list<array{x: float, z: float}>|null  $outline  polygon drawn on top (world metres)
      * @return array{image: string, mime: string, meta: array<string, mixed>}
      */
-    public function render(TerrainData $t, string $kind, ?array $area, int $maxSize): array
+    public function render(TerrainData $t, string $kind, ?array $area, int $maxSize, ?array $outline = null): array
     {
         $half = $t->size / 2;
         $x0 = max(-$half, (float) ($area['min']['x'] ?? -$half));
@@ -86,6 +87,10 @@ class MapImageRenderer
         $grid = $this->niceStep(max($x1 - $x0, $z1 - $z0) / 7);
         $this->grid($img, $x0, $z0, $x1, $z1, $metresPerPixel, $grid);
         $this->markSpawn($img, $t, $x0, $z0, $metresPerPixel);
+
+        if ($outline) {
+            $this->outline($img, $outline, $x0, $z0, $metresPerPixel);
+        }
         $legend = $this->legend($img, $kind, $layers, $minH, $maxH, $contour);
 
         ob_start();
@@ -212,6 +217,29 @@ class MapImageRenderer
         }
 
         $this->label($img, $w - 24, $h - 18, 'N ^', $text, $box);
+    }
+
+    /** @param list<array{x: float, z: float}> $points */
+    private function outline(GdImage $img, array $points, float $x0, float $z0, float $mpp): void
+    {
+        $color = imagecolorallocate($img, 255, 40, 200);
+        imagesetthickness($img, 3);
+        $n = count($points);
+
+        for ($i = 0; $i < $n; $i++) {
+            $a = $points[$i];
+            $b = $points[($i + 1) % $n];
+            imageline(
+                $img,
+                (int) round(($a['x'] - $x0) / $mpp),
+                (int) round(($a['z'] - $z0) / $mpp),
+                (int) round(($b['x'] - $x0) / $mpp),
+                (int) round(($b['z'] - $z0) / $mpp),
+                $color,
+            );
+        }
+
+        imagesetthickness($img, 1);
     }
 
     private function markSpawn(GdImage $img, TerrainData $t, float $x0, float $z0, float $mpp): void

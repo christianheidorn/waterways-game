@@ -1,11 +1,13 @@
 import {
     ArrowUpDown,
     Blend,
+    Box,
     Droplets,
     Eraser,
     Flag,
     Grid3x3,
     Layers,
+    MessageSquarePlus,
     Mountain,
     MousePointerClick,
     Paintbrush,
@@ -20,7 +22,9 @@ import {
 import type { IconNode } from 'lucide';
 import type { EditorToolGroup } from '../../shared/protocol';
 import type {
+    AgentRequestSummary,
     BiomeSummary,
+    PropModelRef,
     FoliageType,
     GroundCoverEntry,
 } from '../../shared/types';
@@ -56,6 +60,7 @@ const GROUPS: {
     { value: 'foliage', label: 'Foliage', icon: TreePine, key: '3' },
     { value: 'water', label: 'Water', icon: Droplets, key: '4' },
     { value: 'place', label: 'Place', icon: Flag, key: '5' },
+    { value: 'request', label: 'Request', icon: MessageSquarePlus, key: '6' },
 ];
 
 const SCULPT_TOOLS: ToolDef<SculptTool>[] = [
@@ -197,6 +202,16 @@ export class EditorPanel {
             applyBiome: (layerId: number, biomeId: number) => Promise<void>;
             /** Save a layer as a new biome; resolves to whether it was saved. */
             saveBiome: (layerId: number, name: string) => Promise<boolean>;
+            /** Build requests for agents on this map (null: not available). */
+            requests: () => AgentRequestSummary[] | null;
+            /** Send the drawn outline + note + images as a request; resolves to whether it was sent. */
+            sendRequest: (note: string, references: File[]) => Promise<boolean>;
+            dismissRequest: (id: number) => void;
+            deleteRequest: (id: number) => void;
+            /** Fly the camera to a request's view. */
+            showRequest: (id: number) => void;
+            /** Prop library (ready models). */
+            propModels: () => PropModelRef[];
         },
     ) {
         this.groupSeg = segmented(
@@ -231,7 +246,19 @@ export class EditorPanel {
     refresh(): void {
         const s = this.editor.state;
         this.groupSeg.set(s.group);
-        const key = `${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}`;
+        const list = s.group === 'request' ? this.actions.requests() : null;
+        const requests =
+            list === null
+                ? 'none'
+                : `[${list.map((r) => `${r.id}${r.status}${r.updated_at}`).join()}]`;
+        const props =
+            s.group === 'place'
+                ? `${s.placeTool}${this.actions
+                      .propModels()
+                      .map((m) => m.id)
+                      .join()}`
+                : '';
+        const key = `${props}:${requests}:${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}`;
 
         if (key !== this.renderedKey) {
             this.renderedKey = key;
@@ -346,7 +373,33 @@ export class EditorPanel {
                 this.body.append(this.brushSection(true, false));
                 this.body.append(this.waterOptions());
                 break;
+            case 'request':
+                this.body.append(this.requestTool());
+                break;
             case 'place':
+                this.body.append(
+                    segmented(
+                        [
+                            {
+                                value: 'spawn',
+                                label: 'Player start',
+                                icon: Flag,
+                            },
+                            { value: 'props', label: 'Props', icon: Box },
+                        ],
+                        s.placeTool,
+                        (v) => {
+                            s.placeTool = v;
+                            this.editor.notify();
+                        },
+                    ).el,
+                );
+
+                if (s.placeTool === 'props') {
+                    this.body.append(this.propsTool());
+                    break;
+                }
+
                 this.body.append(
                     section(
                         'Player start',
@@ -627,6 +680,283 @@ export class EditorPanel {
         }
 
         return out;
+    }
+
+    /** Place tool, props: pick a model from the library, click to place, Shift+click to remove. */
+    private propsTool(): HTMLElement {
+        const s = this.editor.state;
+        const library = this.actions.propModels();
+        const grid = h('div', { class: 'ww-material-grid' });
+
+        if (s.propModel === null && library[0]) {
+            s.propModel = library[0].id;
+        }
+
+        for (const model of library) {
+            grid.append(
+                h(
+                    'button',
+                    {
+                        type: 'button',
+                        class: `ww-material-tile ${model.id === s.propModel ? 'is-active' : ''}`,
+                        title: model.name,
+                        onClick: () => {
+                            s.propModel = model.id;
+                            this.renderedKey = '';
+                            this.editor.notify();
+                        },
+                    },
+                    h('span', {
+                        class: 'ww-material-thumb',
+                        style: model.thumbnail_url
+                            ? {
+                                  backgroundImage: `url("${model.thumbnail_url}")`,
+                              }
+                            : {
+                                  background:
+                                      'linear-gradient(135deg, #6b5b4b, #9a8f86)',
+                              },
+                    }),
+                    h(
+                        'span',
+                        { class: 'ww-material-text' },
+                        h('span', { class: 'ww-material-name' }, model.name),
+                        h(
+                            'span',
+                            { class: 'ww-material-sub' },
+                            model.target_height
+                                ? `${model.category} · ${model.target_height} m`
+                                : model.category,
+                        ),
+                    ),
+                ),
+            );
+        }
+
+        const random = toggle('Random rotation', s.propRandomYaw, (v) => {
+            s.propRandomYaw = v;
+            this.renderedKey = '';
+            this.editor.notify();
+        });
+        const yaw = slider({
+            label: 'Rotation',
+            min: 0,
+            max: 359,
+            step: 1,
+            unit: '°',
+            value: s.propYaw,
+            onInput: (v) => (s.propYaw = v),
+        });
+        const scale = slider({
+            label: 'Size',
+            min: 0.25,
+            max: 4,
+            step: 0.05,
+            log: true,
+            value: s.propScale,
+            format: (v) => `${v.toFixed(2)}×`,
+            onInput: (v) => (s.propScale = v),
+        });
+
+        return section(
+            'Props',
+            library.length
+                ? grid
+                : h(
+                      'p',
+                      { class: 'ww-muted' },
+                      'No props in the library yet. Claude can import models (e.g. from Blender) with import_model.',
+                  ),
+            random.el,
+            s.propRandomYaw ? null : yaw.el,
+            scale.el,
+            h(
+                'p',
+                { class: 'ww-muted' },
+                'Click to place · Shift+click removes the nearest prop · Ctrl+Z undoes',
+            ),
+        );
+    }
+
+    /** Request tool: outline an area and ask an AI agent (connected over MCP) to build something there. */
+    private requestTool(): HTMLElement {
+        const s = this.editor.state;
+        const requests = this.actions.requests();
+        const wrap = h('div', {});
+
+        if (requests === null) {
+            wrap.append(
+                section(
+                    'Request',
+                    h(
+                        'p',
+                        { class: 'ww-muted' },
+                        'Requests are not available for this map.',
+                    ),
+                ),
+            );
+
+            return wrap;
+        }
+
+        const points = h('p', { class: 'ww-muted' });
+        const note = h('textarea', {
+            class: 'ww-input ww-textarea',
+            rows: '5',
+            placeholder:
+                'What should be built here? e.g. "A small fishing village: 5 huts facing the lake, a jetty, a path to the road."',
+            'aria-label': 'Request note',
+        });
+        note.value = s.requestNote;
+        const files = h('input', {
+            type: 'file',
+            accept: 'image/*',
+            multiple: true,
+            class: 'ww-input',
+            'aria-label': 'Reference images',
+        });
+        const send = button(
+            'Send to Claude',
+            () => {
+                const refs = Array.from(files.files ?? []).slice(0, 6);
+                send.disabled = true;
+                void this.actions
+                    .sendRequest(note.value.trim(), refs)
+                    .then((ok) => {
+                        send.disabled = false;
+
+                        if (ok) {
+                            // The panel may have been rebuilt (new request in the list) with the old note.
+                            s.requestNote = '';
+                            this.renderedKey = '';
+                            this.refresh();
+
+                            return;
+                        }
+
+                        update();
+                    });
+            },
+            { icon: MessageSquarePlus },
+        );
+        const update = () => {
+            const n = s.requestPoints.length;
+            points.textContent =
+                n === 0
+                    ? 'Click on the terrain to outline the area (at least 3 points).'
+                    : `${n} point${n === 1 ? '' : 's'}${n < 3 ? ' — add at least ' + (3 - n) + ' more' : ''}.`;
+            send.disabled = n < 3 || !note.value.trim();
+        };
+        note.addEventListener('input', () => {
+            s.requestNote = note.value;
+            update();
+        });
+        this.refreshers.push(update);
+        update();
+
+        wrap.append(
+            section(
+                'New request',
+                h(
+                    'p',
+                    { class: 'ww-muted' },
+                    'Outline an area, describe what you want there and add reference images. Claude (connected through the MCP server) sees your note, the outline, the images and a screenshot of this view.',
+                ),
+                points,
+                h(
+                    'div',
+                    { class: 'ww-row' },
+                    button('Undo point', () =>
+                        this.editor.setRequestPoints(
+                            s.requestPoints.slice(0, -1),
+                        ),
+                    ),
+                    button('Clear', () => this.editor.setRequestPoints([]), {
+                        icon: Eraser,
+                    }),
+                ),
+                note,
+                h(
+                    'label',
+                    { class: 'ww-muted' },
+                    'Reference images (optional, up to 6)',
+                ),
+                files,
+                send,
+            ),
+        );
+
+        const list = h('div', { class: 'ww-request-list' });
+
+        for (const r of requests) {
+            const status = h(
+                'span',
+                { class: `ww-request-status is-${r.status}` },
+                r.status.replace('_', ' '),
+            );
+            const images = [...r.result_urls].map((url) =>
+                h(
+                    'a',
+                    { href: url, target: '_blank', rel: 'noreferrer' },
+                    h('img', {
+                        src: url,
+                        alt: 'Result',
+                        class: 'ww-request-thumb',
+                    }),
+                ),
+            );
+            list.append(
+                h(
+                    'div',
+                    { class: 'ww-request' },
+                    h(
+                        'div',
+                        { class: 'ww-request-head' },
+                        status,
+                        h(
+                            'span',
+                            { class: 'ww-request-title' },
+                            r.note.split('\n')[0],
+                        ),
+                    ),
+                    r.agent_message
+                        ? h(
+                              'p',
+                              { class: 'ww-request-message' },
+                              r.agent_message,
+                          )
+                        : null,
+                    images.length
+                        ? h('div', { class: 'ww-request-images' }, ...images)
+                        : null,
+                    h(
+                        'div',
+                        { class: 'ww-row' },
+                        button('Show', () => this.actions.showRequest(r.id)),
+                        r.status === 'done' || r.status === 'dismissed'
+                            ? button(
+                                  'Delete',
+                                  () => this.actions.deleteRequest(r.id),
+                                  { icon: Eraser },
+                              )
+                            : button('Dismiss', () =>
+                                  this.actions.dismissRequest(r.id),
+                              ),
+                    ),
+                ),
+            );
+        }
+
+        wrap.append(
+            section(
+                `Requests on this map (${requests.length})`,
+                requests.length
+                    ? list
+                    : h('p', { class: 'ww-muted' }, 'None yet.'),
+            ),
+        );
+
+        return wrap;
     }
 
     private layerList(): HTMLElement {
@@ -1400,7 +1730,14 @@ export class EditorPanel {
                     '';
                 break;
             case 'place':
-                tool = 'Click to set the player start';
+                tool =
+                    s.placeTool === 'props'
+                        ? 'Click to place the prop · Shift+click removes the nearest'
+                        : 'Click to set the player start';
+                break;
+            case 'request':
+                tool =
+                    'Click to outline the area · Backspace removes the last point';
                 break;
         }
 

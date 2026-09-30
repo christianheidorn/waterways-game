@@ -27,6 +27,8 @@ class TerrainStorage
         'water' => 'water.f32',
         'splatmap' => 'splat.u8',
         'foliage' => 'foliage.json',
+        // Placed props: {version, props: [{id, model, x, z, yaw, scale, offset}]}.
+        'props' => 'props.json',
         'landcover' => 'landcover.u8',
     ];
 

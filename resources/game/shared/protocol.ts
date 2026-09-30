@@ -16,7 +16,8 @@ export type EditorToolGroup =
     | 'paint'
     | 'foliage'
     | 'water'
-    | 'place';
+    | 'place'
+    | 'request';
 
 export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 

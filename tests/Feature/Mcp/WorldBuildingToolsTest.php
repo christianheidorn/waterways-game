@@ -7,11 +7,15 @@ use App\Mcp\Servers\WaterwaysServer;
 use App\Mcp\Tools\EditFoliage;
 use App\Mcp\Tools\EditWater;
 use App\Mcp\Tools\GetMapImage;
+use App\Mcp\Tools\ListProps;
 use App\Mcp\Tools\PaintTerrain;
+use App\Mcp\Tools\PlaceProps;
+use App\Mcp\Tools\RemoveProps;
 use App\Mcp\Tools\SampleTerrain;
 use App\Mcp\Tools\SculptTerrain;
 use App\Models\FoliageType;
 use App\Models\Map;
+use App\Models\PropModel;
 use App\Services\Terrain\TerrainStorage;
 use App\Support\DefaultTerrainLayers;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -190,5 +194,51 @@ class WorldBuildingToolsTest extends TestCase
 
         WaterwaysServer::tool(SculptTerrain::class, ['map' => $other->slug, 'shape' => ['type' => 'map'], 'operation' => 'smooth'])
             ->assertHasErrors(['is not open in an editor']);
+    }
+
+    public function test_props_are_placed_scattered_removed_and_listed(): void
+    {
+        $hut = PropModel::factory()->create(['name' => 'Hut']);
+        $rock = PropModel::factory()->create(['name' => 'Rock']);
+        $pending = PropModel::factory()->create(['name' => 'Tower', 'status' => 'processing']);
+
+        WaterwaysServer::tool(PlaceProps::class, [
+            'placements' => [['model' => 'hut', 'x' => 5, 'z' => 6, 'rotation' => 90], ['model' => (string) $rock->id, 'x' => 0, 'z' => 0, 'scale' => 2]],
+        ])->assertOk();
+        $this->assertEquals([
+            'kind' => 'props',
+            'action' => 'place',
+            'placements' => [
+                ['model' => $hut->id, 'x' => 5.0, 'z' => 6.0, 'rotation' => 90.0],
+                ['model' => $rock->id, 'x' => 0.0, 'z' => 0.0, 'scale' => 2.0],
+            ],
+            'save' => true,
+        ], $this->lastEdit());
+
+        WaterwaysServer::tool(PlaceProps::class, [
+            'shape' => ['type' => 'circle', 'center' => ['x' => 0, 'z' => 0], 'radius' => 50],
+            'models' => ['Hut', 'Rock'], 'count' => 12, 'max_slope' => 20,
+        ])->assertOk();
+        $this->assertSame('scatter', $this->lastEdit()['action']);
+        $this->assertEquals(['models' => [$hut->id, $rock->id], 'count' => 12, 'max_slope' => 20.0], $this->lastEdit()['params']);
+
+        WaterwaysServer::tool(PlaceProps::class, ['placements' => [['model' => 'Tower', 'x' => 0, 'z' => 0]]])->assertHasErrors(['not ready']);
+        WaterwaysServer::tool(PlaceProps::class, ['placements' => [['model' => 'Castle', 'x' => 0, 'z' => 0]]])->assertHasErrors(['No prop model']);
+        WaterwaysServer::tool(PlaceProps::class, ['models' => ['Hut'], 'count' => 3])->assertHasErrors();
+        $this->assertNotNull($pending);
+
+        WaterwaysServer::tool(RemoveProps::class, [])->assertHasErrors(['prop ids or a shape']);
+        WaterwaysServer::tool(RemoveProps::class, [
+            'shape' => ['type' => 'rect', 'min' => ['x' => -10, 'z' => -10], 'max' => ['x' => 10, 'z' => 10]], 'models' => ['rock'],
+        ])->assertOk();
+        $this->assertSame('remove', $this->lastEdit()['action']);
+        $this->assertSame([$rock->id], $this->lastEdit()['models']);
+
+        app(TerrainStorage::class)->write($this->map, 'props', json_encode(['version' => 1, 'props' => [
+            ['id' => 'a', 'model' => $hut->id, 'x' => 5, 'z' => 6, 'yaw' => M_PI / 2, 'scale' => 1, 'offset' => 0],
+            ['id' => 'b', 'model' => $rock->id, 'x' => 100, 'z' => 100, 'yaw' => 0, 'scale' => 2, 'offset' => 0],
+        ]]));
+        WaterwaysServer::tool(ListProps::class, [])->assertOk()->assertSee(['"count": 2', 'Hut ('.$hut->id.')', '"rotation": 90']);
+        WaterwaysServer::tool(ListProps::class, ['x' => 0, 'z' => 0, 'radius' => 20])->assertOk()->assertSee('"count": 1');
     }
 }

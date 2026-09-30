@@ -102,6 +102,12 @@ class Map extends Model
         return $this->hasMany(TerrainLayer::class)->with('material')->orderBy('slot');
     }
 
+    /** @return HasMany<AgentRequest, $this> */
+    public function agentRequests(): HasMany
+    {
+        return $this->hasMany(AgentRequest::class);
+    }
+
     /** @return HasMany<MapSnapshot, $this> */
     public function snapshots(): HasMany
     {

@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\AgentBridgeController;
+use App\Http\Controllers\Api\AgentRequestController;
 use App\Http\Controllers\Api\AiController;
 use App\Http\Controllers\Api\BiomeApiController;
 use App\Http\Controllers\Api\FoliageAiController;
@@ -20,6 +21,10 @@ Route::prefix('maps/{map}')->name('api.maps.')->group(function () {
     Route::patch('meta', [MapDataController::class, 'updateMeta'])->name('meta.update');
     Route::post('layers/{layer}/biome', [BiomeApiController::class, 'apply'])->name('layers.biome');
     Route::patch('layers/{layer}/ground-cover', [TerrainLayerApiController::class, 'groundCover'])->name('layers.ground-cover');
+    Route::get('agent-requests', [AgentRequestController::class, 'index'])->name('agent-requests.index');
+    Route::post('agent-requests', [AgentRequestController::class, 'store'])->name('agent-requests.store');
+    Route::patch('agent-requests/{agentRequest}', [AgentRequestController::class, 'update'])->name('agent-requests.update');
+    Route::delete('agent-requests/{agentRequest}', [AgentRequestController::class, 'destroy'])->name('agent-requests.destroy');
     Route::post('agent/poll', [AgentBridgeController::class, 'poll'])->name('agent.poll');
     Route::post('agent/commands/{command}', [AgentBridgeController::class, 'complete'])->name('agent.complete');
     Route::post('thumbnail', [MapDataController::class, 'storeThumbnail'])->name('thumbnail.store');

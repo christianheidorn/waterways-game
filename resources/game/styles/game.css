@@ -1247,3 +1247,90 @@ body.ww-body {
 .ww-hud.is-photo > *:not(.ww-photo) {
     visibility: hidden !important;
 }
+
+/* ---------------------------------------------------------------- request tool (agents) */
+
+.ww-textarea {
+    width: 100%;
+    resize: vertical;
+    min-height: 88px;
+    font: inherit;
+    line-height: 1.4;
+}
+
+.ww-request-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ww-request {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border-radius: 8px;
+    background: rgb(255 255 255 / 0.05);
+}
+
+.ww-request-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.ww-request-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ww-request-status {
+    flex: none;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 11px;
+    text-transform: capitalize;
+    background: rgb(255 255 255 / 0.12);
+}
+
+.ww-request-status.is-open {
+    background: #ff9f1c33;
+    color: #ffb54d;
+}
+
+.ww-request-status.is-in_progress {
+    background: #ffd23f33;
+    color: #ffd23f;
+}
+
+.ww-request-status.is-needs_input {
+    background: #ff4fd833;
+    color: #ff7de2;
+}
+
+.ww-request-status.is-done {
+    background: #5ee07a33;
+    color: #7ee898;
+}
+
+.ww-request-message {
+    margin: 0;
+    font-size: 12px;
+    white-space: pre-wrap;
+    opacity: 0.9;
+}
+
+.ww-request-images {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.ww-request-thumb {
+    width: 72px;
+    height: 44px;
+    object-fit: cover;
+    border-radius: 4px;
+}

@@ -382,7 +382,23 @@ export type FoliageType = {
     cull_distance: number;
     /** Whether instances may be placed under water (e.g. reeds, rocks). */
     allow_underwater: boolean;
+    /** How instances block the player and camera (default auto: trunk for trees, footprint for rocks). */
+    collision?: FoliageCollision;
+    /** Collider radius at scale 1 (m), overriding the one measured from the model; null = measured. */
+    collision_radius?: number | null;
 };
+
+/**
+ * Foliage collision: `auto` (trees: trunk, rocks: bounds, everything else: none), `none`, `trunk` (a
+ * cylinder around the trunk, radius measured from the model) or `bounds` (the model's footprint box).
+ */
+export type FoliageCollision = 'auto' | 'none' | 'trunk' | 'bounds';
+
+/**
+ * Prop collision: `auto` (a few boxes fitted to the model's surface, so doorways and arches stay open),
+ * `box` (one box around it), `mesh` (its exact triangles, for walk-in buildings) or `none`.
+ */
+export type PropCollision = 'auto' | 'box' | 'mesh' | 'none';
 
 export type MapInfo = {
     id: number;
@@ -425,6 +441,8 @@ export type PropModelRef = {
     triangles?: number | null;
     meshes?: number | null;
     materials?: number | null;
+    /** How placed copies block the player and camera (default auto). */
+    collision?: PropCollision;
 };
 
 /** One placed prop. The height follows the terrain (plus `offset`), so sculpting keeps it grounded. */

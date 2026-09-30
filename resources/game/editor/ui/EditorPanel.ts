@@ -29,6 +29,7 @@ import type {
     AgentRequestSummary,
     BiomeSummary,
     PropModelRef,
+    FoliageCollision,
     FoliageType,
     GroundCoverEntry,
 } from '../../shared/types';
@@ -1747,6 +1748,36 @@ export class EditorPanel {
                 type.allow_underwater,
                 (v) => update({ allow_underwater: v }),
             );
+            const collisionPick = h('select', {
+                class: 'ww-input ww-select',
+                'aria-label': 'Collision',
+            });
+
+            for (const [value, label] of [
+                ['auto', 'Automatic (by kind)'],
+                ['trunk', 'Trunk'],
+                ['bounds', 'Footprint'],
+                ['none', 'None'],
+            ] as const) {
+                const option = h('option', { value }, label);
+                option.selected = (type.collision ?? 'auto') === value;
+                collisionPick.append(option);
+            }
+
+            collisionPick.addEventListener('change', () =>
+                update({
+                    collision: collisionPick.value as FoliageCollision,
+                }),
+            );
+            const collision = h(
+                'label',
+                {
+                    class: 'ww-field',
+                    title: 'How instances block the player and camera. Automatic: trees their trunk, rocks their footprint, other kinds nothing.',
+                },
+                h('span', {}, 'Collision'),
+                collisionPick,
+            );
 
             wrap.replaceChildren(
                 section(
@@ -1764,6 +1795,7 @@ export class EditorPanel {
                     align.el,
                     yaw.el,
                     underwater.el,
+                    collision,
                     h(
                         'p',
                         { class: 'ww-muted' },

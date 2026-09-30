@@ -18,7 +18,7 @@ class ControlEditor extends WaterwaysTool
             'map' => $this->mapArgument($schema),
             'action' => $schema->string()->enum(['save', 'undo', 'redo', 'set_view_mode', 'set_mode', 'auto_paint'])->required(),
             'steps' => $schema->integer()->min(1)->max(100),
-            'view_mode' => $schema->string()->enum(['lit', 'lighting', 'layers', 'slope', 'height', 'density', 'wireframe']),
+            'view_mode' => $schema->string()->enum(['lit', 'lighting', 'layers', 'slope', 'height', 'density', 'wireframe', 'collision']),
             'mode' => $schema->string()->enum(['edit', 'play']),
         ];
     }
@@ -28,7 +28,7 @@ class ControlEditor extends WaterwaysTool
         $data = $request->validate([
             'action' => ['required', 'in:save,undo,redo,set_view_mode,set_mode,auto_paint'],
             'steps' => ['sometimes', 'integer', 'between:1,100'],
-            'view_mode' => ['required_if:action,set_view_mode', 'in:lit,lighting,layers,slope,height,density,wireframe'],
+            'view_mode' => ['required_if:action,set_view_mode', 'in:lit,lighting,layers,slope,height,density,wireframe,collision'],
             'mode' => ['required_if:action,set_mode', 'in:edit,play'],
         ]);
         $map = $this->map($request);

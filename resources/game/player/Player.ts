@@ -2,12 +2,16 @@ import * as THREE from 'three/webgpu';
 import type { CharacterRef, PlayerSettings } from '../shared/types';
 import type { Input } from '../core/Input';
 import type { Heightfield } from '../world/Heightfield';
+import { STEP_HEIGHT } from '../world/collision/Collision';
+import type { Capsule, CollisionWorld } from '../world/collision/Collision';
 import { CharacterModel } from './CharacterModel';
 import { GltfCharacter } from './GltfCharacter';
 
 export type PlayerEnvironment = {
     heights: Heightfield;
     waterLevelAt: (x: number, z: number) => number | null;
+    /** Foliage and prop colliders (none: only the terrain collides). */
+    collision?: CollisionWorld | null;
 };
 
 type Avatar = {
@@ -19,7 +23,10 @@ type Avatar = {
 
 /**
  * Third-person character controller: walking/running on the heightfield with a slope limit,
- * jumping, and swimming wherever the water is deep enough.
+ * jumping, and swimming wherever the water is deep enough. With a CollisionWorld the character is a
+ * capsule: it slides along trunks, rocks and walls, steps up ledges up to STEP_HEIGHT and stands on
+ * props and rocks. Movement is split into substeps of half the capsule radius, so sprinting never
+ * tunnels through a thin trunk.
  */
 export class Player {
     readonly object = new THREE.Group();
@@ -36,6 +43,7 @@ export class Player {
     private character: CharacterRef | null = null;
     private jumpBuffered = 0;
     private coyote = 0;
+    private readonly normals: number[] = [];
 
     constructor(
         settings: PlayerSettings,
@@ -191,17 +199,110 @@ export class Player {
                     this.velocity.x -= push.x * into;
                     this.velocity.z -= push.z * into;
                 }
-
-                next.copy(this.position).addScaledVector(this.velocity, dt);
             }
         }
+
+        const collision = env.collision?.enabled ? env.collision : null;
+        const capsule = this.capsule();
+        const travel = Math.hypot(this.velocity.x, this.velocity.z) * dt;
+        const steps = collision
+            ? Math.min(
+                  16,
+                  Math.max(1, Math.ceil(travel / (capsule.radius * 0.5))),
+              )
+            : 1;
+
+        for (let i = 0; i < steps; i++) {
+            this.integrate(dt / steps, hf, collision, capsule);
+        }
+
+        const hs = Math.hypot(this.velocity.x, this.velocity.z);
+
+        if (hs > 0.2) {
+            const targetYaw = Math.atan2(-this.velocity.x, -this.velocity.z);
+            this.yaw = dampAngle(this.yaw, targetYaw, 12, dt);
+        }
+
+        this.syncObject();
+        this.avatar.update(dt, {
+            speed: hs,
+            runSpeed: s.run_speed,
+            grounded: this.grounded,
+            swimming: this.swimming,
+            verticalVelocity: this.velocity.y,
+        });
+    }
+
+    /** The collision capsule (radius from the character height). */
+    capsule(): Capsule {
+        const h = this.settings.character_height;
+
+        return {
+            radius: THREE.MathUtils.clamp(h * 0.17, 0.15, 0.6),
+            height: h,
+            step: STEP_HEIGHT,
+        };
+    }
+
+    /** Moves by the velocity for `dt`: colliders, map bounds, ground (terrain or what it stands on). */
+    private integrate(
+        dt: number,
+        hf: Heightfield,
+        collision: CollisionWorld | null,
+        capsule: Capsule,
+    ): void {
+        const s = this.settings;
+        const next = _next
+            .copy(this.position)
+            .addScaledVector(this.velocity, dt);
 
         // Keep inside the map.
         const limit = hf.half - 1;
         next.x = THREE.MathUtils.clamp(next.x, -limit, limit);
         next.z = THREE.MathUtils.clamp(next.z, -limit, limit);
 
-        const groundAtNext = hf.sample(next.x, next.z);
+        let groundAtNext = hf.sample(next.x, next.z);
+        let onCollider = false;
+
+        if (collision) {
+            const { normals, ceiling } = collision.resolveCapsule(
+                next,
+                capsule,
+                this.normals,
+            );
+
+            // Slide: drop the part of the velocity going into what was hit.
+            for (let k = 0; k < normals.length; k += 2) {
+                const into =
+                    this.velocity.x * normals[k] +
+                    this.velocity.z * normals[k + 1];
+
+                if (into < 0) {
+                    this.velocity.x -= normals[k] * into;
+                    this.velocity.z -= normals[k + 1] * into;
+                }
+            }
+
+            if (ceiling && this.velocity.y > 0) {
+                this.velocity.y = 0;
+            }
+
+            next.x = THREE.MathUtils.clamp(next.x, -limit, limit);
+            next.z = THREE.MathUtils.clamp(next.z, -limit, limit);
+            groundAtNext = hf.sample(next.x, next.z);
+            // Step up onto (or land on) rocks, props and floors no higher than a step.
+            const top = collision.supportHeight(
+                next.x,
+                next.z,
+                capsule.radius,
+                Math.max(this.position.y, next.y) + capsule.step,
+            );
+
+            if (top > groundAtNext) {
+                groundAtNext = top;
+                onCollider = true;
+            }
+        }
 
         if (next.y <= groundAtNext) {
             next.y = groundAtNext;
@@ -225,29 +326,17 @@ export class Player {
         }
 
         // Steep ground slides the player down.
-        if (this.grounded && hf.slope(next.x, next.z) > s.max_slope + 5) {
+        if (
+            this.grounded &&
+            !onCollider &&
+            hf.slope(next.x, next.z) > s.max_slope + 5
+        ) {
             const n = hf.normal(next.x, next.z, _n);
             this.velocity.x += n.x * s.gravity * dt;
             this.velocity.z += n.z * s.gravity * dt;
         }
 
         this.position.copy(next);
-
-        const hs = Math.hypot(this.velocity.x, this.velocity.z);
-
-        if (hs > 0.2) {
-            const targetYaw = Math.atan2(-this.velocity.x, -this.velocity.z);
-            this.yaw = dampAngle(this.yaw, targetYaw, 12, dt);
-        }
-
-        this.syncObject();
-        this.avatar.update(dt, {
-            speed: hs,
-            runSpeed: s.run_speed,
-            grounded: this.grounded,
-            swimming: this.swimming,
-            verticalVelocity: this.velocity.y,
-        });
     }
 
     /** Eye/camera pivot point. */
@@ -327,3 +416,4 @@ function dampAngle(
 
 const _up = new THREE.Vector3(0, 1, 0);
 const _n = new THREE.Vector3();
+const _next = new THREE.Vector3();

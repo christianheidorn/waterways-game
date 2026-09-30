@@ -29,14 +29,19 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property bool $cast_shadows
  * @property float $cull_distance
  * @property bool $allow_underwater
+ * @property string $collision auto, none, trunk or bounds
+ * @property float|null $collision_radius
  */
 #[Fillable([
     'name', 'kind', 'color', 'color_secondary', 'model_path', 'foliage_asset_id', 'tint', 'min_scale', 'max_scale', 'density',
     'min_slope', 'max_slope', 'min_height', 'max_height', 'align_to_normal', 'random_yaw',
-    'cast_shadows', 'cull_distance', 'allow_underwater',
+    'cast_shadows', 'cull_distance', 'allow_underwater', 'collision', 'collision_radius',
 ])]
 class FoliageType extends Model
 {
+    /** auto: trees get a trunk, rocks their bounds, bushes and small plants none. */
+    public const COLLISIONS = ['auto', 'none', 'trunk', 'bounds'];
+
     protected function casts(): array
     {
         return [
@@ -53,6 +58,7 @@ class FoliageType extends Model
             'cast_shadows' => 'boolean',
             'cull_distance' => 'float',
             'allow_underwater' => 'boolean',
+            'collision_radius' => 'float',
         ];
     }
 
@@ -101,6 +107,8 @@ class FoliageType extends Model
             'cast_shadows' => $this->cast_shadows,
             'cull_distance' => $this->cull_distance,
             'allow_underwater' => $this->allow_underwater,
+            'collision' => $this->collision ?? 'auto',
+            'collision_radius' => $this->collision_radius,
         ];
     }
 }

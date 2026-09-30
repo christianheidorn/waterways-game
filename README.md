@@ -540,10 +540,17 @@ Open <http://localhost:8000>. The dashboard shows the seeded **Waterways Valley*
 | G                              | Toggle grid                                                 |
 | V / Shift+V                    | Next / previous view mode (Lit, Lighting only, Layers, …)   |
 | P / Alt+P                      | Play from the camera / from the player start                |
+| J (or the Walk button)         | Walk at the cursor with collision; Esc flies again          |
 | F10                            | Graphics menu (presets, scalability, frame rate)            |
 
 **Play mode:** click to capture the mouse. WASD to move, Shift to run, Space to jump or surface, C to dive,
 wheel to zoom. Esc releases the mouse; press Esc again to return to building.
+
+**Collision:** the character is a capsule that slides along tree trunks, rocks and props, steps up ledges up
+to 0.4 m and stands on rocks and props; the camera pulls in in front of them. Foliage types choose `auto`
+(trees: trunk, rocks: footprint, smaller plants: none), `trunk`, `bounds` or `none`, with an optional radius;
+prop models `auto` (boxes fitted to the model, doorways stay open), `box`, `mesh` (exact triangles, for walk-in
+buildings) or `none`. The **Collision** view mode outlines the colliders near the camera.
 
 ## Architecture
 
@@ -563,7 +570,8 @@ resources/game/            The game (TypeScript + Three.js WebGPURenderer with T
   world/                   Heightfield, Terrain (LOD chunks), TerrainMaterial, SplatMap, Water,
                            Atmosphere, SkyDome, HeightFog (scene fog node), Weather,
                            Foliage (+ procedural FoliageGeometry, baked GLB LODs, foliage/: TSL material,
-                           GPU culling, Hi-Z, impostors)
+                           GPU culling, Hi-Z, impostors), collision/ (CollisionWorld, shapes, foliage and prop
+                           colliders, voxel box fitting, the Collision view)
   tools/FoliageBaker.ts    In-browser foliage asset optimiser (LODs, impostor, cards, thumbnail)
   player/                  Character controller, third-person camera, procedural / glTF character
   editor/                  Editor (tools, strokes), Brush, History (undo), FlyCamera, terrainOps, UI panel,

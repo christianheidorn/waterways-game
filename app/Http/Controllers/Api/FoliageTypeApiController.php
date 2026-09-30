@@ -19,6 +19,7 @@ class FoliageTypeApiController extends Controller
     public const EDITABLE = [
         'name', 'min_scale', 'max_scale', 'density', 'min_slope', 'max_slope', 'min_height', 'max_height',
         'align_to_normal', 'random_yaw', 'cast_shadows', 'cull_distance', 'allow_underwater', 'color', 'color_secondary', 'tint',
+        'collision', 'collision_radius',
     ];
 
     public function update(Request $request, FoliageType $foliageType): JsonResponse

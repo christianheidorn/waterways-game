@@ -139,6 +139,8 @@ class FoliageTypeController extends Controller
             'allow_underwater' => ['required', 'boolean'],
             'foliage_asset_id' => ['nullable', 'integer', 'exists:foliage_assets,id'],
             'tint' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
+            'collision' => ['sometimes', 'string', Rule::in(FoliageType::COLLISIONS)],
+            'collision_radius' => ['nullable', 'numeric', 'between:0.02,20'],
         ];
     }
 }

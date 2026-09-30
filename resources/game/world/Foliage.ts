@@ -165,6 +165,8 @@ type Cell = {
     nearBatch: InstanceBatch | null;
     /** Drawn through a merged batch since the last evaluation (the cell mesh is hidden). */
     merged: boolean;
+    /** Bumped whenever `data` changes (collision indexes rebuild from it). */
+    version: number;
 };
 
 /** A far-LOD batch over CHUNK_CELLS² cells; `data` is only filled while building. */
@@ -284,6 +286,16 @@ export type FoliageStats = {
     >;
     /** Per-type detail: LOD chain, triangles per LOD, drawn instances per LOD, missing-LOD warnings. */
     types: FoliageTypeStat[];
+};
+
+/** Instances of one cell as collision sees them (see Foliage.collisionCells). */
+export type FoliageCollisionCell = {
+    /** `${size}:${cx},${cz}` */
+    key: string;
+    /** FOLIAGE_STRIDE floats per instance: x, y, z, yaw, scale, tiltX, tiltZ. */
+    data: number[];
+    /** Changes whenever `data` changes. */
+    version: number;
 };
 
 export type FoliagePlacementContext = {
@@ -433,6 +445,13 @@ export class Foliage {
     private dataRevision = 0;
     /** Hidden for a performance measurement (see setHidden): placed foliage / ground cover. */
     private readonly hidden = { placed: false, cover: false };
+    /** Ground cover tiles generated on the CPU for collision (the GPU grows the drawn ones). */
+    private readonly coverCollision = new Map<
+        string,
+        { epoch: number; signature: string; tile: FoliageCollisionCell }
+    >();
+    /** Bumped when ground cover must regrow (paint, sculpt, water, layer changes). */
+    private coverEpoch = 0;
 
     /** `groundColor`: terrain colour the roots of grass etc. blend into (none: they keep their own). */
     constructor(groundColor: GroundColorSource | null = null) {
@@ -628,6 +647,7 @@ export class Foliage {
 
         this.coverField?.invalidate(minX, minZ, maxX, maxZ);
         this.coverScan = true;
+        this.coverEpoch++;
     }
 
     /** Tiles or cells are still being grown / built around the camera (screenshots wait for it). */
@@ -653,8 +673,133 @@ export class Foliage {
         return count;
     }
 
+    /**
+     * Collision: calls `visit` for every foliage type that collides (its resolved mode is not "none")
+     * with each of its cells touching a world rect, placed foliage and ground cover alike. Ground cover
+     * grown on the GPU has no instance data on the CPU: those tiles are generated on the CPU here (the
+     * same plants, bit for bit) and cached until the cover regrows.
+     */
+    collisionCells(
+        minX: number,
+        minZ: number,
+        maxX: number,
+        maxZ: number,
+        collides: (type: FoliageType) => boolean,
+        visit: (
+            type: FoliageType,
+            geometry: THREE.BufferGeometry,
+            cover: boolean,
+            cell: FoliageCollisionCell,
+        ) => void,
+    ): void {
+        for (const renderer of this.renderers.values()) {
+            const type = renderer.type;
+
+            if (renderer.disposed || !collides(type)) {
+                continue;
+            }
+
+            const size = renderer.cellSize;
+            // Instances reach past their cell by their own footprint.
+            const pad = Math.min(size, renderer.radius * type.max_scale);
+            const c0 = Math.floor((minX - pad) / size);
+            const c1 = Math.floor((maxX + pad) / size);
+            const r0 = Math.floor((minZ - pad) / size);
+            const r1 = Math.floor((maxZ + pad) / size);
+            const cover = renderer.cover;
+
+            for (let cz = r0; cz <= r1; cz++) {
+                for (let cx = c0; cx <= c1; cx++) {
+                    const cell = renderer.grid.get(gridIndex(cx, cz));
+
+                    if (!cover) {
+                        if (cell?.data.length) {
+                            visit(type, renderer.lods[0], false, cell);
+                        }
+
+                        continue;
+                    }
+
+                    if (
+                        cell &&
+                        !cover.generator &&
+                        !cover.stale.has(cell.key)
+                    ) {
+                        visit(type, renderer.lods[0], true, cell);
+                        continue;
+                    }
+
+                    const tile = this.coverCollisionTile(renderer, cx, cz);
+
+                    if (tile?.data.length) {
+                        visit(type, renderer.lods[0], true, tile);
+                    }
+                }
+            }
+        }
+    }
+
+    private coverCollisionTile(
+        renderer: TypeRenderer,
+        cx: number,
+        cz: number,
+    ): FoliageCollisionCell | null {
+        const cover = renderer.cover;
+        const ctx = this.coverCtx;
+        const hf = ctx?.heights;
+        const size = renderer.cellSize;
+
+        if (
+            !cover ||
+            !ctx ||
+            !hf ||
+            (cx + 1) * size < -hf.half ||
+            cx * size > hf.half ||
+            (cz + 1) * size < -hf.half ||
+            cz * size > hf.half
+        ) {
+            return null;
+        }
+
+        const key = `${renderer.type.id}:${size}:${cx},${cz}`;
+        const cached = this.coverCollision.get(key);
+
+        if (
+            cached &&
+            cached.epoch === this.coverEpoch &&
+            cached.signature === cover.signature
+        ) {
+            return cached.tile;
+        }
+
+        if (this.coverCollision.size > 256) {
+            this.coverCollision.clear();
+        }
+
+        const tile: FoliageCollisionCell = {
+            key: `${size}:${cx},${cz}`,
+            data: generateGroundCoverTile(
+                renderer.type,
+                size,
+                cx,
+                cz,
+                cover.sources,
+                ctx,
+            ),
+            version: 0,
+        };
+        this.coverCollision.set(key, {
+            epoch: this.coverEpoch,
+            signature: cover.signature,
+            tile,
+        });
+
+        return tile;
+    }
+
     /** Creates / updates / removes the ground cover renderers to match the layers and types. */
     private syncCover(): void {
+        this.coverEpoch++;
         const sources = new Map<number, GroundCoverSource[]>();
 
         for (const layer of this.coverLayers) {
@@ -944,6 +1089,7 @@ export class Foliage {
     private dropCell(renderer: TypeRenderer, cell: Cell): void {
         this.removeCellMesh(cell);
         cell.data = [];
+        cell.version++;
         renderer.cells.delete(cell.key);
         renderer.grid.delete(gridIndex(cell.cx, cell.cz));
         const chunk = cell.chunk;
@@ -3298,6 +3444,7 @@ export class Foliage {
             near: null,
             nearBatch: null,
             merged: false,
+            version: 0,
         };
         this.resetBounds(renderer, cell);
 
@@ -3345,6 +3492,7 @@ export class Foliage {
 
     private markDirty(renderer: TypeRenderer, cell: Cell): void {
         cell.dirty = true;
+        cell.version++;
         this.needsEval = true;
         this.dataRevision++;
         this.castersChanged(renderer, cell);

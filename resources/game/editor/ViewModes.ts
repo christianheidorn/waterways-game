@@ -1,4 +1,7 @@
+import type * as THREE from 'three/webgpu';
 import type { PostFx } from '../core/PostFx';
+import { COLLISION_COLORS } from '../world/collision/CollisionDebug';
+import type { CollisionDebug } from '../world/collision/CollisionDebug';
 import type { TerrainLayer } from '../shared/types';
 import type { Foliage } from '../world/Foliage';
 import type { Heightfield } from '../world/Heightfield';
@@ -44,6 +47,11 @@ export const VIEW_MODES: ViewModeInfo[] = [
         label: 'Wireframe',
         description: 'Terrain triangles at their current LOD',
     },
+    {
+        id: 'collision',
+        label: 'Collision',
+        description: 'Colliders of foliage and props near the camera',
+    },
 ];
 
 export type LegendEntry = { color: string; label: string };
@@ -63,6 +71,9 @@ export type ViewModeTargets = {
     heights: Heightfield;
     /** Current terrain layers (names for the layers legend). */
     layers: () => TerrainLayer[];
+    /** Collider outlines (collision view) and the camera they are gathered around. */
+    collision: CollisionDebug;
+    camera: THREE.Camera;
 };
 
 /** Minimum time between two recomputations of the density grid or height range (s). */
@@ -125,6 +136,10 @@ export class ViewModes {
     /** Refreshes the current mode's data when it changed (throttled). */
     update(dt: number): void {
         this.cooldown -= dt;
+
+        if (!this.suspended) {
+            this.targets.collision.update(dt, this.targets.camera);
+        }
 
         if (this.suspended || this.cooldown > 0) {
             return;
@@ -193,6 +208,23 @@ export class ViewModes {
                     entries: [],
                     note: 'Terrain triangles at their current LOD',
                 };
+            case 'collision':
+                return {
+                    kind: 'swatches',
+                    entries: [
+                        { color: COLLISION_COLORS.foliage, label: 'Foliage' },
+                        {
+                            color: COLLISION_COLORS.ground_cover,
+                            label: 'Ground cover',
+                        },
+                        {
+                            color: COLLISION_COLORS.prop,
+                            label: 'Props (boxes)',
+                        },
+                        { color: COLLISION_COLORS.mesh, label: 'Props (mesh)' },
+                    ],
+                    note: `Within 40 m of the camera. Steps up to 0.4 m are climbed.`,
+                };
             default:
                 return null;
         }
@@ -203,6 +235,7 @@ export class ViewModes {
         const { material, foliage, postFx } = this.targets;
         material.debug.setMode(mode);
         foliage.setLightingOnly(mode === 'lighting');
+        this.targets.collision.setVisible(mode === 'collision');
         postFx.setUnlitView(mode !== 'lit' && mode !== 'lighting');
     }
 

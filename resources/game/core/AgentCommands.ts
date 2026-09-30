@@ -41,6 +41,10 @@ export type AgentContext = {
     reload: () => void;
     editorState: () => Record<string, unknown>;
     stats: () => Record<string, unknown>;
+    /** What blocks a capsule at points or along a path (editor/agent/sampleCollision). */
+    sampleCollision: (
+        payload: Record<string, unknown>,
+    ) => Record<string, unknown>;
     /** Measures the frame and what each system costs (editor/agent/profilePerformance). */
     profile: (options: ProfileOptions) => Promise<Record<string, unknown>>;
 };
@@ -53,6 +57,7 @@ const VIEW_MODES: readonly TerrainViewMode[] = [
     'height',
     'density',
     'wireframe',
+    'collision',
 ];
 
 type Vec = { x: number; y?: number; z: number };
@@ -300,6 +305,8 @@ export function createAgentHost(ctx: AgentContext): AgentBridgeHost {
                     place(payload);
 
                     return { camera: cameraState() };
+                case 'sample_collision':
+                    return ctx.sampleCollision(payload);
                 case 'set_view_mode':
                     setView(payload.view_mode);
 

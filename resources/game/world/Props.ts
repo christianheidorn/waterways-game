@@ -1,7 +1,16 @@
 import * as THREE from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import type { PropInstance, PropModelRef, PropsFile } from '../shared/types';
+import type {
+    PropCollision,
+    PropInstance,
+    PropModelRef,
+    PropsFile,
+} from '../shared/types';
+import type { Collider, CollisionProvider } from './collision/Collision';
+import { MeshShape, trianglesOf } from './collision/shapes';
+import type { Shape } from './collision/shapes';
+import { voxelBoxes } from './collision/voxelBoxes';
 import { simplifyGeometry, triangleCount } from './FoliageLod';
 import type { Heightfield } from './Heightfield';
 
@@ -24,6 +33,8 @@ type Template = {
     radius: number;
     /** The model could not be loaded: a grey marker box stands in. */
     placeholder: boolean;
+    /** Collision shapes by mode, built on first use. */
+    shapes: Map<PropCollision, Shape>;
 };
 
 /** Instanced meshes of one model: [lod][part]. */
@@ -52,6 +63,8 @@ const LOD0_BUDGET = 60_000;
 const LOD_MIN_TRIANGLES = 1_500;
 /** Re-bucket instances once the camera moved this far (m). */
 const VIEW_EPSILON = 1;
+/** Cell size (m) of the collision grid. */
+const COLLISION_CELL = 16;
 
 /**
  * Placed props: individual models from the prop library (huts, bridges, fences, rocks, …) standing on
@@ -62,7 +75,7 @@ const VIEW_EPSILON = 1;
  * cost a handful of draw calls; instances pick their LOD by camera distance (relative to the model's
  * size) and far ones are skipped. Missing models show a grey marker box.
  */
-export class Props {
+export class Props implements CollisionProvider {
     readonly group = new THREE.Group();
     /** Called whenever props were added, removed or moved (shadows, saving). */
     onChange: (() => void) | null = null;
@@ -76,6 +89,9 @@ export class Props {
     private dirty = true;
     private readonly lastView = new THREE.Vector3(Infinity, 0, 0);
     private visible = new Map<number, number[]>();
+    /** Collision grid: instance ids per cell, and the cells of each instance. */
+    private readonly collisionGrid = new Map<number, Set<string>>();
+    private readonly collisionCells = new Map<string, number[]>();
 
     constructor(private readonly heights: () => Heightfield) {
         this.group.name = 'Props';
@@ -140,6 +156,12 @@ export class Props {
             (file?.props ?? []).map((p) => [p.id, { ...p }]),
         );
         this.matrices.clear();
+        this.collisionGrid.clear();
+        this.collisionCells.clear();
+
+        for (const p of this.instances.values()) {
+            this.index(p);
+        }
 
         for (const model of new Set(
             [...this.instances.values()].map((p) => p.model),
@@ -177,6 +199,7 @@ export class Props {
     add(p: Omit<PropInstance, 'id'>): PropInstance {
         const instance = { ...p, id: newId() };
         this.instances.set(instance.id, instance);
+        this.index(instance);
         void this.batch(instance.model);
         this.changed();
 
@@ -198,6 +221,7 @@ export class Props {
 
         Object.assign(p, patch);
         this.matrices.delete(id);
+        this.index(p);
         this.changed();
 
         return p;
@@ -209,6 +233,7 @@ export class Props {
         for (const id of ids) {
             if (this.instances.delete(id)) {
                 this.matrices.delete(id);
+                this.unindex(id);
                 removed++;
             }
         }
@@ -500,6 +525,145 @@ export class Props {
         }
     }
 
+    /**
+     * Colliders of the props touching a world rect (CollisionProvider). Each follows its prop's
+     * position, rotation, scale and ground height; models still loading don't collide yet.
+     */
+    collidersIn(
+        minX: number,
+        minZ: number,
+        maxX: number,
+        maxZ: number,
+        out: Collider[],
+    ): void {
+        const c0 = Math.floor(minX / COLLISION_CELL);
+        const c1 = Math.floor(maxX / COLLISION_CELL);
+        const r0 = Math.floor(minZ / COLLISION_CELL);
+        const r1 = Math.floor(maxZ / COLLISION_CELL);
+        const seen = new Set<string>();
+
+        for (let r = r0; r <= r1; r++) {
+            for (let c = c0; c <= c1; c++) {
+                const ids = this.collisionGrid.get(cellKey(c, r));
+
+                if (!ids) {
+                    continue;
+                }
+
+                for (const id of ids) {
+                    if (seen.has(id)) {
+                        continue;
+                    }
+
+                    seen.add(id);
+                    const collider = this.colliderOf(id);
+
+                    if (
+                        collider &&
+                        collider.x + collider.radius >= minX &&
+                        collider.x - collider.radius <= maxX &&
+                        collider.z + collider.radius >= minZ &&
+                        collider.z - collider.radius <= maxZ
+                    ) {
+                        out.push(collider);
+                    }
+                }
+            }
+        }
+    }
+
+    /** The collider of a placed prop (null: no collision, or its model is still loading). */
+    colliderOf(id: string): Collider | null {
+        const p = this.instances.get(id);
+        const batch = p && this.batches.get(p.model);
+
+        if (!p || !batch) {
+            return null;
+        }
+
+        const ref = this.models.get(p.model);
+        const mode = ref?.collision ?? 'auto';
+
+        if (mode === 'none') {
+            return null;
+        }
+
+        const template = batch.template;
+        const shape = collisionShape(template, mode);
+        const matrix = this.matrixOf(p, template)!;
+        const y = matrix.elements[13];
+        const box = template.box;
+
+        return {
+            info: {
+                source: 'prop',
+                key: `p${p.id}`,
+                name: ref?.name ?? `#${p.model}`,
+                mode,
+                propModelId: p.model,
+                propId: p.id,
+            },
+            x: p.x,
+            y,
+            z: p.z,
+            cos: Math.cos(p.yaw),
+            sin: Math.sin(p.yaw),
+            scale: p.scale,
+            radius: templateReach(template) * p.scale,
+            bottom: y + box.min.y * p.scale,
+            top: y + box.max.y * p.scale,
+            shape,
+        };
+    }
+
+    /** (Re)files a prop in the collision grid by its footprint. */
+    private index(p: PropInstance): void {
+        this.unindex(p.id);
+        const batch = this.batches.get(p.model);
+        const r = batch
+            ? templateReach(batch.template) * p.scale
+            : this.modelRadius(p.model, p.scale) * 1.5 + 1;
+        const cells: number[] = [];
+
+        for (
+            let cz = Math.floor((p.z - r) / COLLISION_CELL);
+            cz <= Math.floor((p.z + r) / COLLISION_CELL);
+            cz++
+        ) {
+            for (
+                let cx = Math.floor((p.x - r) / COLLISION_CELL);
+                cx <= Math.floor((p.x + r) / COLLISION_CELL);
+                cx++
+            ) {
+                const key = cellKey(cx, cz);
+                let set = this.collisionGrid.get(key);
+
+                if (!set) {
+                    set = new Set();
+                    this.collisionGrid.set(key, set);
+                }
+
+                set.add(p.id);
+                cells.push(key);
+            }
+        }
+
+        this.collisionCells.set(p.id, cells);
+    }
+
+    private unindex(id: string): void {
+        for (const key of this.collisionCells.get(id) ?? []) {
+            const set = this.collisionGrid.get(key);
+            set?.delete(id);
+
+            if (set && !set.size) {
+                this.collisionGrid.delete(key);
+            }
+        }
+
+        this.collisionCells.delete(id);
+    }
+
     private changed(): void {
         this.dirty = true;
         this.onChange?.();
@@ -554,6 +718,12 @@ export class Props {
             meshes: template.lods.map(() => []),
             capacity: 0,
         });
+
+        // The grid used a guess of the size until now.
+        for (const p of this.instancesOf(model)) {
+            this.index(p);
+        }
+
         this.changed();
     }
 
@@ -758,6 +928,7 @@ async function buildTemplate(
     const radius = Math.max(extent.x, extent.z) / 2;
 
     return {
+        shapes: new Map(),
         lods,
         distances: lodDistances(
             Math.max(extent.y, radius * 2, 0.5),
@@ -854,10 +1025,67 @@ function placeholderTemplate(): Template {
             sphere: box.getBoundingSphere(new THREE.Sphere()),
             radius: 1,
             placeholder: true,
+            shapes: new Map(),
         };
     }
 
     return placeholder;
+}
+
+/** Horizontal reach of a template's bounds from its origin (scale 1). */
+function templateReach(template: Template): number {
+    const b = template.box;
+
+    return Math.hypot(
+        Math.max(Math.abs(b.min.x), Math.abs(b.max.x)),
+        Math.max(Math.abs(b.min.z), Math.abs(b.max.z)),
+    );
+}
+
+/** A template's collision shape for a mode (built once: voxel boxes or the LOD0 triangles). */
+function collisionShape(
+    template: Template,
+    mode: Exclude<PropCollision, 'none'>,
+): Shape {
+    let shape = template.shapes.get(mode);
+
+    if (!shape) {
+        const geometries = template.lods[0].parts.map((p) => p.geometry);
+        const b = template.box;
+
+        if (mode === 'mesh') {
+            shape = {
+                kind: 'mesh',
+                mesh: MeshShape.fromGeometries(geometries),
+            };
+        } else {
+            const boxes =
+                mode === 'auto' && !template.placeholder
+                    ? voxelBoxes(trianglesOf(geometries))
+                    : new Float32Array(0);
+            shape = {
+                kind: 'boxes',
+                boxes: boxes.length
+                    ? boxes
+                    : new Float32Array([
+                          b.min.x,
+                          b.min.y,
+                          b.min.z,
+                          b.max.x,
+                          b.max.y,
+                          b.max.z,
+                      ]),
+            };
+        }
+
+        template.shapes.set(mode, shape);
+    }
+
+    return shape;
+}
+
+function cellKey(cx: number, cz: number): number {
+    return (cx + 32768) * 65536 + (cz + 32768);
 }
 
 function newId(): string {

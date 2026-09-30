@@ -12,7 +12,7 @@ use Laravel\Mcp\Server\Attributes\Name;
 use Laravel\Mcp\Server\Tools\Annotations\IsReadOnly;
 
 #[Name('take_screenshot')]
-#[Description('Renders the map in the open editor and returns the image (without editor UI). Place the camera with `view` or `position` + `look_at`; the user\'s camera is put back afterwards unless keep_camera is true. `view_mode` shows an analysis view: layers (terrain layer per colour), slope, height (contours), density (foliage per 100 m²), lighting (grey albedo) or wireframe. Waits until foliage around the camera has grown. Views from very high up (a top_down of a whole large map) look hazy through the atmosphere: use a lower `height` over the area of interest, or an analysis view_mode, for detail.')]
+#[Description('Renders the map in the open editor and returns the image (without editor UI). Place the camera with `view` or `position` + `look_at`; the user\'s camera is put back afterwards unless keep_camera is true. `view_mode` shows an analysis view: layers (terrain layer per colour), slope, height (contours), density (foliage per 100 m²), lighting (grey albedo), wireframe or collision (the colliders of foliage and props within 40 m of the camera, outlined). Waits until foliage around the camera has grown. Views from very high up (a top_down of a whole large map) look hazy through the atmosphere: use a lower `height` over the area of interest, or an analysis view_mode, for detail.')]
 #[IsReadOnly]
 class TakeScreenshot extends WaterwaysTool
 {
@@ -23,7 +23,7 @@ class TakeScreenshot extends WaterwaysTool
         return [
             'map' => $this->mapArgument($schema),
             ...$this->cameraSchema($schema),
-            'view_mode' => $schema->string()->enum(['lit', 'lighting', 'layers', 'slope', 'height', 'density', 'wireframe'])
+            'view_mode' => $schema->string()->enum(['lit', 'lighting', 'layers', 'slope', 'height', 'density', 'wireframe', 'collision'])
                 ->description('Default lit (normal rendering).'),
             'keep_camera' => $schema->boolean()->description('Leave the user\'s view at the new camera (default false).'),
             'max_width' => $schema->integer()->min(256)->max(1920)->description('Downscale to this width (default 1280).'),

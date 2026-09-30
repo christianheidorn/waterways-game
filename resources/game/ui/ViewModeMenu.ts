@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Eye } from 'lucide';
+import { Check, ChevronDown, Eye, Footprints } from 'lucide';
 import { VIEW_MODES } from '../editor/ViewModes';
 import type { ViewModes } from '../editor/ViewModes';
 import { h, icon } from './dom';
@@ -14,12 +14,14 @@ export class ViewModeMenu {
     private readonly list: HTMLElement;
     private readonly legend: HTMLElement;
     private readonly items = new Map<string, HTMLButtonElement>();
+    private readonly walkButton: HTMLButtonElement | null = null;
     private open = false;
 
     constructor(
         parent: HTMLElement,
         private readonly modes: ViewModes,
         embedded: boolean,
+        actions: { walk?: () => void } = {},
     ) {
         this.label = h('span', { class: 'ww-viewmode-label' });
         this.toggleButton = h(
@@ -65,6 +67,25 @@ export class ViewModeMenu {
         }
 
         this.list.hidden = true;
+
+        if (actions.walk) {
+            const walk = actions.walk;
+            this.walkButton = h(
+                'button',
+                {
+                    type: 'button',
+                    class: 'ww-button ww-viewmode-toggle',
+                    title: 'Walk here with collision (J; Esc to fly again)',
+                    onClick: (e: MouseEvent) => {
+                        (e.currentTarget as HTMLElement).blur();
+                        walk();
+                    },
+                },
+                icon(Footprints, 15),
+                h('span', { class: 'ww-viewmode-label' }, 'Walk'),
+            );
+        }
+
         this.legend = h('div', { class: 'ww-panel ww-viewmode-legend' });
         this.el = h(
             'div',
@@ -72,7 +93,12 @@ export class ViewModeMenu {
                 class: 'ww-viewmode',
                 'data-embedded': embedded ? '1' : '0',
             },
-            h('div', { class: 'ww-panel ww-viewmode-bar' }, this.toggleButton),
+            h(
+                'div',
+                { class: 'ww-panel ww-viewmode-bar' },
+                this.toggleButton,
+                this.walkButton,
+            ),
             this.list,
             this.legend,
         );
@@ -81,6 +107,11 @@ export class ViewModeMenu {
         window.addEventListener('pointerdown', this.onPointerDown, true);
         window.addEventListener('keydown', this.onKey, true);
         this.sync();
+    }
+
+    /** Highlights the Walk button while walking. */
+    setWalking(walking: boolean): void {
+        this.walkButton?.classList.toggle('is-debug', walking);
     }
 
     /** Updates the button, the checked item and the legend from the current mode. */

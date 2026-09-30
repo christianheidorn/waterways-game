@@ -95,6 +95,13 @@ headless Chrome-family browser on this machine that shows the map's editor (the 
 | `WATERWAYS_HEADLESS_IDLE_MINUTES`  | `15`            | Idle minutes before a hidden editor closes                                              |
 | `WATERWAYS_AUTO_HEADLESS`          | `false`         | Live tools start a hidden editor by themselves when the map is not open                 |
 
+**If it does not work**, check in this order:
+
+1. `php artisan waterways:headless` — is a hidden editor listed for the map, and is its browser running?
+2. `storage/logs/headless-<map>.log` — browser errors (a page that cannot be reached, GPU problems).
+3. `APP_URL` — open that address with `/game/<map>` in your own browser: the game must load there.
+4. The game build must be current (`npm run build`, or `npm run dev` running), like for your own editor.
+
 ## Safety
 
 - **Local only.** The stdio server is a process on your machine. The HTTP endpoint needs a token.

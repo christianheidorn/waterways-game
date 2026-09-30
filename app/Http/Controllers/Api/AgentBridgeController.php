@@ -24,8 +24,16 @@ class AgentBridgeController extends Controller
             'state' => ['nullable', 'array'],
         ]);
 
+        $state = $data['state'] ?? null;
+
+        // Hidden editors (HeadlessEditor) say so in their state; the browser's user agent is the fallback
+        // for game builds older than that flag, which would otherwise pass for the user's own tab.
+        if (str_contains((string) $request->userAgent(), 'HeadlessChrome')) {
+            $state = [...($state ?? []), 'headless' => true];
+        }
+
         return response()->json([
-            'commands' => $this->bridge->poll($map, $data['session'], $data['mode'], $data['state'] ?? null),
+            'commands' => $this->bridge->poll($map, $data['session'], $data['mode'], $state),
         ]);
     }
 

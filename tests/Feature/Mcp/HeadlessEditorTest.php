@@ -363,4 +363,36 @@ class HeadlessEditorTest extends TestCase
         $launcher->stop($pid, $marker);
         $this->assertFalse($launcher->running($pid, $marker));
     }
+
+    public function test_a_hidden_editor_of_an_older_game_build_is_recognised_by_its_user_agent(): void
+    {
+        $map = Map::factory()->create();
+        $this->launcher();
+        WaterwaysServer::tool(OpenEditor::class, ['map' => $map->slug, 'wait' => false])->assertOk();
+
+        // No `headless` flag in the state (a build from before it existed), but headless Chrome's user agent.
+        $this->withHeader('User-Agent', 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 HeadlessChrome/140.0 Safari/537.36')
+            ->postJson("/api/maps/{$map->slug}/agent/poll", ['session' => 'hidden-1', 'mode' => 'edit', 'state' => ['unsaved' => []]])
+            ->assertOk();
+
+        $this->assertTrue(HeadlessEditor::isHeadless(AgentSession::query()->findOrFail('hidden-1')));
+        // Not mistaken for the user opening the map, so the next tool call keeps it.
+        WaterwaysServer::tool(OpenEditor::class, ['map' => $map->slug])->assertOk()->assertSee(['"status": "already_open"', '"headless": true']);
+        $this->assertSame(1, HeadlessBrowser::query()->count());
+
+        $this->withHeader('User-Agent', 'Mozilla/5.0 (Macintosh) Chrome/140.0 Safari/537.36')
+            ->postJson("/api/maps/{$map->slug}/agent/poll", ['session' => 'user-1', 'mode' => 'edit', 'state' => ['unsaved' => []]])
+            ->assertOk();
+        $this->assertFalse(HeadlessEditor::isHeadless(AgentSession::query()->findOrFail('user-1')));
+    }
+
+    public function test_live_tools_explain_a_hidden_editor_that_does_not_respond(): void
+    {
+        $map = Map::factory()->create();
+        $this->launcher();
+        WaterwaysServer::tool(OpenEditor::class, ['map' => $map->slug, 'wait' => false])->assertOk();
+
+        WaterwaysServer::tool(GetEditorState::class, ['map' => $map->slug])
+            ->assertHasErrors(['is not responding', 'headless-'.$map->slug.'.log']);
+    }
 }

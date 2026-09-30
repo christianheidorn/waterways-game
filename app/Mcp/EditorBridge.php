@@ -4,6 +4,7 @@ namespace App\Mcp;
 
 use App\Models\AgentCommand;
 use App\Models\AgentSession;
+use App\Models\HeadlessBrowser;
 use App\Models\Map;
 use Illuminate\Support\Carbon;
 
@@ -204,6 +205,16 @@ class EditorBridge
 
     public function notOpenMessage(Map $map): string
     {
+        $browser = HeadlessBrowser::query()->where('map_id', $map->id)->first();
+
+        if ($browser !== null) {
+            $since = (int) $browser->started_at->diffInSeconds(Carbon::now());
+
+            return "A hidden editor of \"{$map->slug}\" was started {$since} s ago but is not responding (still loading, or stuck)."
+                .' Call open_editor to wait for it; if it does not come up, close_editor and open_editor again.'
+                .' Its browser log is '.$this->headless()->logFile($map).'.';
+        }
+
         $open = $this->session();
         $hint = $open !== null
             ? " The editor currently open is map \"{$open->map?->slug}\"; ask the user to open \"{$map->slug}\" instead (Studio → Maps → {$map->name} → Open Studio)."

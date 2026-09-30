@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Compresses a GLB for the game (run by `php artisan assets:optimize`, see App\Support\AssetOptimizer):
+ * Compresses a GLB for the game (run by `php artisan waterways:optimize-assets` and the optimize_assets MCP tool, see App\Mcp\Assets\AssetOptimizer):
  *
  * - meshes: EXT_meshopt_compression (meshoptimizer), lossless: attributes stay float, only the
  *   buffers are encoded (vertex / index codecs after reordering for locality);

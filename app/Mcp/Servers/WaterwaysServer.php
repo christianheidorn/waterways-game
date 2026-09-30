@@ -128,6 +128,9 @@ class WaterwaysServer extends Server
     /** Every tool in one tools/list page (clients then see the whole tool set at once). */
     public int $defaultPaginationLength = 100;
 
+    /** The page size is capped by this (the framework's 50 would split the tool list in two pages). */
+    public int $maxPaginationLength = 100;
+
     protected array $tools = [
         GetProjectOverview::class,
         GetMap::class,

@@ -355,7 +355,7 @@ export type FoliageAssetRef = {
     name: string;
     style: FoliageAssetStyle;
     model_url: string | null;
-    /** Compressed copy (meshopt meshes, KTX2 textures) made by `assets:optimize`; model_url is the fallback. */
+    /** Compressed copy (meshopt meshes, KTX2 textures) made by `waterways:optimize-assets`; model_url is the fallback. */
     optimized_url?: string | null;
     thumbnail_url: string | null;
     /** Real-world height of the baked model in metres (before per-instance scale). */
@@ -445,7 +445,7 @@ export type PropModelRef = {
     name: string;
     category: string;
     model_url: string | null;
-    /** Compressed copy (meshopt meshes, KTX2 textures) made by `assets:optimize`; model_url is the fallback. */
+    /** Compressed copy (meshopt meshes, KTX2 textures) made by `waterways:optimize-assets`; model_url is the fallback. */
     optimized_url?: string | null;
     thumbnail_url: string | null;
     /** Real-world height the model is scaled to (m); null = its own size. */

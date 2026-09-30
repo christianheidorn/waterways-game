@@ -14,7 +14,7 @@ use Laravel\Mcp\Server\Attributes\Name;
 #[Name('optimize_assets')]
 #[Description(<<<'TXT'
 Compresses library models for the game, like `php artisan waterways:optimize-assets`: foliage assets and prop models get a copy next to the original with EXT_meshopt_compression meshes (lossless, typically 20–40 % smaller geometry) and KTX2 / Basis textures (they stay compressed on the GPU: about 4× less texture memory; the file can be larger than well-compressed PNGs). The game loads the copy and falls back to the original; a re-bake or re-import makes the copy stale until it is optimised again.
-Texture encoding takes about a minute per model, so the call handles at most `limit` models (default 3) and reports the rest as pending: call again, or pass `textures: false` for a fast meshes-only pass. `dry_run: true` only reports what is optimised, pending, and which foliage assets still have the old single-card impostor (`impostor: "billboard"`: re-bake them with bake_foliage_asset for octahedral impostors).
+Texture encoding takes about a minute per model, so the call handles at most `limit` models (default 3) and reports the rest as pending: call again, or pass `textures: false` for a fast meshes-only pass. `dry_run: true` only reports what is optimised, pending, and which foliage assets still have the old single-card impostor (`impostor: "billboard"`: re-bake them for octahedral impostors: update_library_item action "rebake", then bake_foliage_asset).
 Returns per model the status and sizes (file, textures, estimated GPU texture memory before / after) and the totals.
 TXT)]
 class OptimizeAssets extends WaterwaysTool

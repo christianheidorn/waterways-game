@@ -57,8 +57,8 @@ class OptimizeAssetsCommand extends Command
 
         $s = AssetOptimizer::summary($rows);
         $this->info(sprintf(
-            '%d optimised, %d up to date, %d failed%s. Files %s → %s (%s%% smaller); GPU texture memory %s → %s (%s%% less).',
-            $s['optimized'], $s['up_to_date'], $s['failed'], $s['pending'] ? ", {$s['pending']} pending" : '',
+            '%d optimised, %d up to date, %d failed%s%s. Files %s → %s (%s%% smaller); GPU texture memory %s → %s (%s%% less).',
+            $s['optimized'], $s['up_to_date'], $s['failed'], $s['pending'] ? ", {$s['pending']} pending" : '', $s['missing'] ? ", {$s['missing']} without a model file" : '',
             self::mb($s['bytes_before']), self::mb($s['bytes_after']), $s['file_saving_percent'],
             self::mb($s['texture_memory_before']), self::mb($s['texture_memory_after']), $s['texture_memory_saving_percent'],
         ));

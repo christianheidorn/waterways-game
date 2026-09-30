@@ -110,7 +110,7 @@ class FoliageAsset extends Model
             'name' => $this->name,
             'style' => $this->style,
             'model_url' => $this->isReady() ? $this->url($this->model_path) : null,
-            // Compressed copy (meshopt + KTX2, `assets:optimize` / optimize_assets); the game falls back to model_url.
+            // Compressed copy (meshopt + KTX2, `waterways:optimize-assets` / optimize_assets); the game falls back to model_url.
             'optimized_url' => $this->isReady() ? AssetOptimizer::optimizedUrl($this->model_path, (string) ($this->updated_at?->timestamp ?? 0)) : null,
             'thumbnail_url' => $this->url($this->thumbnail_path),
             'height' => isset($meta['height']) ? (float) $meta['height'] : null,

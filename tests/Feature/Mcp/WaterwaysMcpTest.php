@@ -60,6 +60,7 @@ class WaterwaysMcpTest extends TestCase
         $defaults = (new \ReflectionClass(WaterwaysServer::class))->getDefaultProperties();
         $this->assertCount(60, $defaults['tools']);
         $this->assertGreaterThanOrEqual(count($defaults['tools']), $defaults['defaultPaginationLength']);
+        $this->assertGreaterThanOrEqual(count($defaults['tools']), $defaults['maxPaginationLength']);
         WaterwaysServer::tool(GetProjectOverview::class)->assertOk()->assertSee(['"maps"', '"open_editors"']);
     }
 

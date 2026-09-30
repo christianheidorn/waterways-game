@@ -1219,6 +1219,8 @@ export class Editor {
                     return;
                 }
 
+                // Droplets may reach past the brush circle touched when the step started.
+                this.history.touch('height', result.rect);
                 writeRect(
                     hf.data,
                     hf.resolution,

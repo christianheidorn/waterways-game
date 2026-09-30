@@ -1969,6 +1969,10 @@ function renderOctahedralImpostor(
         roughness: 0.9,
         metalness: 0,
     });
+    // The normal atlas holds instance-space normals (not a tangent-space map): the exporter must
+    // write it as it is. Without tangents it bakes a green flip into a copy of the texture unless
+    // normalScale.y is negative, and that copy would be made from the 1×1 export placeholder.
+    material.normalScale.set(1, -1);
     material.userData = {
         impostor: 'octahedral',
         frames: n,

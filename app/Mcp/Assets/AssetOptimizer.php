@@ -129,6 +129,12 @@ class AssetOptimizer
                 $row['impostor'] = self::impostorKind($model);
             }
 
+            if ($row['bytes'] === null) {
+                $rows[] = [...$row, 'status' => 'missing'];
+
+                continue;
+            }
+
             if ($current && ! $force) {
                 $optimized = self::optimizedPath($path);
                 $rows[] = [...$row, 'status' => 'up_to_date', 'optimized_bytes' => Storage::disk('public')->size($optimized)];
@@ -169,6 +175,7 @@ class AssetOptimizer
             'up_to_date' => count(array_filter($rows, fn ($r) => $r['status'] === 'up_to_date')),
             'failed' => count(array_filter($rows, fn ($r) => $r['status'] === 'failed')),
             'pending' => count(array_filter($rows, fn ($r) => $r['status'] === 'pending')),
+            'missing' => count(array_filter($rows, fn ($r) => $r['status'] === 'missing')),
             'bytes_before' => $before,
             'bytes_after' => $after,
             'file_saving_percent' => $before > 0 ? round((1 - $after / $before) * 100, 1) : 0,
@@ -179,8 +186,8 @@ class AssetOptimizer
     }
 
     /**
-     * Impostor of a baked foliage asset: `octahedral` (current bakes), `billboard` (older bakes: one
-     * camera-facing card, re-bake with bake_foliage_asset to upgrade) or null (not baked).
+     * Impostor of a baked foliage asset: `octahedral` (current bakes), `billboard` (older bakes: crossed
+     * cards; re-bake to upgrade: update_library_item "rebake", then bake_foliage_asset) or null (not baked).
      */
     public static function impostorKind(FoliageAsset $asset): ?string
     {

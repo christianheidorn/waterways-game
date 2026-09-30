@@ -105,7 +105,7 @@ class PropModel extends Model
             'name' => $this->name,
             'category' => $this->category,
             'model_url' => $this->model_path ? '/storage/'.$this->model_path.'?v='.($this->updated_at?->timestamp ?? 0) : null,
-            // Compressed copy (meshopt + KTX2, `assets:optimize` / optimize_assets); the game falls back to model_url.
+            // Compressed copy (meshopt + KTX2, `waterways:optimize-assets` / optimize_assets); the game falls back to model_url.
             'optimized_url' => $this->isReady() ? AssetOptimizer::optimizedUrl($this->model_path, (string) ($this->updated_at?->timestamp ?? 0)) : null,
             'thumbnail_url' => $this->thumbnail_path ? '/storage/'.$this->thumbnail_path.'?v='.($this->updated_at?->timestamp ?? 0) : null,
             'target_height' => $this->target_height,

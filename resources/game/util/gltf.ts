@@ -5,7 +5,7 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import type { GameRenderer } from '../core/renderer';
 
 /**
- * glTF loading for library models (foliage, props). Compressed copies made by `assets:optimize`
+ * glTF loading for library models (foliage, props). Compressed copies made by `waterways:optimize-assets`
  * (`optimized_url`: EXT_meshopt_compression meshes, KHR_texture_basisu KTX2 textures) are decoded with
  * meshoptimizer's decoder and three's KTX2 loader (Basis transcoder in public/basis/, transcoded to
  * the GPU's BC / ETC / ASTC formats). Anything that fails to load that way falls back to the

@@ -12,7 +12,7 @@ use Laravel\Mcp\Server\Attributes\Description;
 use Laravel\Mcp\Server\Attributes\Name;
 
 #[Name('save_foliage_type')]
-#[Description('Creates a foliage type, or updates one when `id` is given (pass only what changes). Fields: name, kind (conifer, broadleaf, palm, bush, grass, flower, reed, rock), color, color_secondary, tint, min_scale, max_scale, density (instances per 100 m² at full strength), min_slope, max_slope (degrees), min_height, max_height (m, null = no limit), align_to_normal, random_yaw, cast_shadows, cull_distance (m), allow_underwater, foliage_asset_id (a baked model). Applies live in open editors; ground cover regrows.')]
+#[Description('Creates a foliage type, or updates one when `id` is given (pass only what changes). Fields: name, kind (conifer, broadleaf, palm, bush, grass, flower, reed, rock), color, color_secondary, tint, min_scale, max_scale, density (instances per 100 m² at full strength), min_slope, max_slope (degrees), min_height, max_height (m, null = no limit), align_to_normal, random_yaw, cast_shadows, cull_distance (m), allow_underwater, foliage_asset_id (a baked model), collision (how instances block the player and camera: "auto" = trunk for trees, bounds for rocks, none for bushes and small plants; "trunk" = a cylinder around the trunk measured from the model; "bounds" = the model\'s footprint box; "none"), collision_radius (m at scale 1, overrides the measured trunk / footprint radius; null = measured). Applies live in open editors; ground cover regrows.')]
 class SaveFoliageType extends WaterwaysTool
 {
     public function schema(JsonSchema $schema): array

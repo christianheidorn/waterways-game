@@ -40,6 +40,7 @@ use App\Mcp\Tools\PlaceProps;
 use App\Mcp\Tools\ProfilePerformance;
 use App\Mcp\Tools\RegenerateTerrain;
 use App\Mcp\Tools\RemoveProps;
+use App\Mcp\Tools\SampleCollision;
 use App\Mcp\Tools\SampleTerrain;
 use App\Mcp\Tools\SaveFoliageType;
 use App\Mcp\Tools\SaveLayerAsBiome;
@@ -53,6 +54,7 @@ use App\Mcp\Tools\UpdateEnvironment;
 use App\Mcp\Tools\UpdateGameSettings;
 use App\Mcp\Tools\UpdateLibraryItem;
 use App\Mcp\Tools\UpdateMap;
+use App\Mcp\Tools\UpdatePropModel;
 use App\Mcp\Tools\UpdateProps;
 use App\Mcp\Tools\UpdateRequest;
 use App\Mcp\Tools\UpdateTerrainLayer;
@@ -87,6 +89,7 @@ Building the world (live in the open editor, each call one undo step, saved by d
 - edit_foliage: scatter or clear individual plants in an area.
 - Vegetation (trees, bushes, plants, grass) is foliage: foliage types placed with edit_foliage or grown as ground cover (apply_biome / update_terrain_layer + paint_terrain). Foliage gets LODs, impostors and GPU culling, so thousands of trees stay cheap. Props (place_props) are for buildings, structures and unique objects: every copy draws its full model in every pass, so never plant forests with props.
 - A good order: landforms → water → paint layers / biomes → details; look (take_screenshot) after each step; control_editor undo reverts the last step.
+- Collision: trees block with their trunk, rocks with their footprint, props with boxes fitted to the model (collision in save_foliage_type / update_prop_model; "mesh" for walk-in buildings). sample_collision checks what blocks the player at points or along a walk; take_screenshot view_mode "collision" outlines the colliders.
 - Check performance with profile_performance after large placements (many props, dense foliage, new biomes): it measures fps, GPU time per pass and what each system (props, foliage, ground cover, water, shadows) costs in ms, and names heavy models.
 
 Requests from the user
@@ -124,6 +127,7 @@ class WaterwaysServer extends Server
         UpdateRequest::class,
         GetMapImage::class,
         SampleTerrain::class,
+        SampleCollision::class,
         TakeScreenshot::class,
         SetCamera::class,
         ControlEditor::class,
@@ -149,6 +153,7 @@ class WaterwaysServer extends Server
         ManageSnapshots::class,
         ListPropModels::class,
         ImportModel::class,
+        UpdatePropModel::class,
         BakeFoliageAsset::class,
         GenerateImage::class,
         GenerateMaterial::class,

@@ -22,6 +22,7 @@ use Illuminate\Support\Facades\Storage;
  * @property string|null $model_path
  * @property string|null $thumbnail_path
  * @property float|null $target_height
+ * @property string $collision auto, box, mesh or none
  * @property array{x: float, y: float, z: float}|null $dimensions
  * @property int|null $triangles
  * @property int|null $meshes
@@ -29,7 +30,7 @@ use Illuminate\Support\Facades\Storage;
  * @property list<string>|null $tags
  * @property string|null $prompt
  */
-#[Fillable(['name', 'category', 'source', 'status', 'status_message', 'model_path', 'thumbnail_path', 'target_height', 'dimensions', 'triangles', 'meshes', 'materials', 'tags', 'prompt'])]
+#[Fillable(['name', 'category', 'source', 'status', 'status_message', 'model_path', 'thumbnail_path', 'target_height', 'collision', 'dimensions', 'triangles', 'meshes', 'materials', 'tags', 'prompt'])]
 class PropModel extends Model
 {
     /** @use HasFactory<PropModelFactory> */
@@ -39,6 +40,9 @@ class PropModel extends Model
         'building' => 'Buildings', 'structure' => 'Structures (bridges, fences, docks)', 'nature' => 'Nature (rocks, logs)',
         'decoration' => 'Decoration', 'other' => 'Other',
     ];
+
+    /** How placed copies collide: boxes fitted to the model, one box, the exact triangles, or not at all. */
+    public const COLLISIONS = ['auto', 'box', 'mesh', 'none'];
 
     protected function casts(): array
     {
@@ -106,6 +110,7 @@ class PropModel extends Model
             'triangles' => $this->triangles,
             'meshes' => $this->meshes,
             'materials' => $this->materials,
+            'collision' => $this->collision ?? 'auto',
         ];
     }
 }

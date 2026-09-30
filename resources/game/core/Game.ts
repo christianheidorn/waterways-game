@@ -5,6 +5,10 @@ import { EditorPanel } from '../editor/ui/EditorPanel';
 import { ViewModes } from '../editor/ViewModes';
 import { RequestOverlay } from '../editor/RequestOverlay';
 import { Props } from '../world/Props';
+import { CollisionWorld } from '../world/collision/Collision';
+import { CollisionDebug } from '../world/collision/CollisionDebug';
+import { FoliageColliders } from '../world/collision/FoliageColliders';
+import { sampleCollision } from '../editor/agent/sampleCollision';
 import { AgentBridge } from './AgentBridge';
 import { createAgentHost } from './AgentCommands';
 import { runWorldEdit } from '../editor/agent/runWorldEdit';
@@ -140,6 +144,12 @@ export class Game {
     private running = false;
     private pointerLocked = false;
     private escapeArmed = false;
+    /** Foliage and prop colliders (player, camera, walk mode, sample_collision). */
+    private collision!: CollisionWorld;
+    private collisionDebug!: CollisionDebug;
+    /** Build mode, walking with the character (collision) instead of flying. */
+    private walking = false;
+    private viewModeMenu: ViewModeMenu | null = null;
     private resizeObserver: ResizeObserver | null = null;
     /** Performance profile (agents): per-frame listener, hidden systems, forced per-pass timings. */
     private frameListener: ((frame: FrameSample) => void) | null = null;
@@ -258,7 +268,15 @@ export class Game {
             editorState: () => ({
                 tool_group: this.editor.state.group,
                 paint_layer_slot: this.editor.state.paintLayer,
+                walking: this.walking,
             }),
+            sampleCollision: (payload) =>
+                sampleCollision(
+                    this.collision,
+                    this.world.heights,
+                    this.player.capsule(),
+                    payload,
+                ),
             stats: () => ({ ...this.lastStats }),
             profile: (options) =>
                 profilePerformance(this.performanceHost(), options),
@@ -846,7 +864,16 @@ export class Game {
             redo: () => this.editor.redo(),
         });
 
+        this.collision = new CollisionWorld([
+            this.world.props,
+            new FoliageColliders(this.world.foliage),
+        ]);
+        this.collisionDebug = new CollisionDebug(this.collision);
+        this.scene.add(this.collisionDebug.object);
+
         this.viewModes = new ViewModes({
+            collision: this.collisionDebug,
+            camera: this.camera,
             material: this.world.material,
             foliage: this.world.foliage,
             postFx: this.postFx,
@@ -891,6 +918,7 @@ export class Game {
                     this.setMode('play', false, fromCamera),
                 requestSave: () => void this.save(),
                 cycleViewMode: (step) => this.viewModes.cycle(step),
+                toggleWalk: () => this.setWalking(!this.walking),
                 isPointerOverUi: () => this.isPointerOverUi(),
             },
             settings.editor,
@@ -949,7 +977,9 @@ export class Game {
             this.hud.el,
             this.viewModes,
             this.config.embedded,
+            { walk: () => this.setWalking(!this.walking) },
         );
+        this.viewModeMenu = viewModeMenu;
         this.viewModes.onChange = () => viewModeMenu.sync();
         this.photoMode = new PhotoMode(this.hud.el, {
             environment: () => this.manifest.environment,
@@ -1028,6 +1058,10 @@ export class Game {
             return;
         }
 
+        if (this.walking) {
+            this.setWalking(false);
+        }
+
         const previous = this.mode;
         this.mode = mode;
 
@@ -1102,7 +1136,93 @@ export class Game {
             heights: this.world.heights,
             waterLevelAt: (x: number, z: number) =>
                 this.world.water.levelAt(x, z),
+            collision: this.collision,
         };
+    }
+
+    /**
+     * Walk mode (build mode, J or the Walk button): the character drops at the point under the cursor
+     * (or below the camera) and walks with collision, the third-person camera following; the editor
+     * stays open and Esc returns to the fly camera where it was.
+     */
+    private setWalking(walking: boolean): void {
+        if (walking === this.walking || (walking && this.mode !== 'edit')) {
+            return;
+        }
+
+        this.walking = walking;
+
+        if (walking) {
+            this.editorCameraState = {
+                position: this.camera.position.clone(),
+                quaternion: this.camera.quaternion.clone(),
+            };
+            const dir = this.camera.getWorldDirection(new THREE.Vector3());
+            const at = this.editor.cursorValid
+                ? this.editor.cursor.clone()
+                : this.cameraGroundPoint().clone();
+            const yaw = Math.atan2(-dir.x, -dir.z);
+            this.player.spawn(at.x, at.z, yaw, this.playerEnv());
+            // Dropped onto a rock or a floor rather than inside it.
+            const top = this.collision.supportHeight(
+                at.x,
+                at.z,
+                this.player.capsule().radius,
+                this.player.position.y + 50,
+            );
+
+            if (
+                top > this.player.position.y &&
+                top - this.player.position.y < 20
+            ) {
+                this.player.position.y = top;
+            }
+
+            this.playerCamera.reset(yaw);
+            this.player.object.visible = true;
+            this.editor.setActive(false);
+            this.camera.near = 0.2;
+            this.hud.flash(
+                'Walking: WASD, Shift run, Space jump, right mouse to look, Esc to fly again',
+            );
+        } else {
+            this.player.object.visible = false;
+
+            if (this.editorCameraState) {
+                this.camera.position.copy(this.editorCameraState.position);
+                this.camera.quaternion.copy(this.editorCameraState.quaternion);
+                this.editor.fly.setFromCamera();
+            }
+
+            this.camera.near = 0.5;
+
+            if (this.mode === 'edit') {
+                this.editor.setActive(true);
+            }
+        }
+
+        this.camera.updateProjectionMatrix();
+        this.viewModeMenu?.setWalking(walking);
+    }
+
+    private updateWalk(dt: number): void {
+        const input = this.input;
+
+        if (input.wasPressed('Escape') || input.wasPressed('KeyJ')) {
+            this.setWalking(false);
+
+            return;
+        }
+
+        this.player.update(dt, input, this.playerCamera.yaw, this.playerEnv());
+        this.playerCamera.update(
+            dt,
+            input,
+            this.player.headPosition(),
+            this.world.heights,
+            input.buttons.has(2) || this.pointerLocked,
+            this.collision,
+        );
     }
 
     // ---------------------------------------------------------------- loop
@@ -1144,13 +1264,16 @@ export class Game {
 
         if (this.mode === 'play') {
             this.updatePlay(dt);
+        } else if (this.walking) {
+            this.updateWalk(dt);
+            this.viewModes.update(dt);
         } else {
             this.editor.update(dt);
             this.viewModes.update(dt);
         }
 
         const focus =
-            this.mode === 'play'
+            this.mode === 'play' || this.walking
                 ? this.player.position
                 : this.editor.cursorValid
                   ? this.editor.cursor
@@ -1218,6 +1341,7 @@ export class Game {
             this.player.headPosition(),
             this.world.heights,
             this.pointerLocked,
+            this.collision,
         );
     }
 

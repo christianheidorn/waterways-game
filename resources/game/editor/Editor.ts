@@ -76,6 +76,8 @@ export type EditorCallbacks = {
     onRequestOutline?: (points: { x: number; z: number }[]) => void;
     /** Next (+1) or previous (-1) view mode. */
     cycleViewMode: (step: number) => void;
+    /** Walk mode: the character with collision instead of the fly camera (J). */
+    toggleWalk: () => void;
     isPointerOverUi: () => boolean;
 };
 
@@ -697,6 +699,12 @@ export class Editor {
 
         if (input.wasPressed('KeyV') && !input.ctrl) {
             this.callbacks.cycleViewMode(input.shift ? -1 : 1);
+        }
+
+        if (input.wasPressed('KeyJ') && !input.ctrl) {
+            this.callbacks.toggleWalk();
+
+            return;
         }
 
         if (input.wasPressed('KeyP') && !input.ctrl) {

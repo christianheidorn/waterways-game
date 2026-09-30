@@ -1,5 +1,9 @@
 import { Head, useForm } from '@inertiajs/react';
-import type { FoliageKind, FoliageType } from '@game/shared/types';
+import type {
+    FoliageCollision,
+    FoliageKind,
+    FoliageType,
+} from '@game/shared/types';
 import {
     Box,
     Leaf,
@@ -96,6 +100,8 @@ const NEW_FOLIAGE: FoliageForm = {
     cast_shadows: true,
     cull_distance: 400,
     allow_underwater: false,
+    collision: 'auto',
+    collision_radius: null,
     foliage_asset_id: null,
     tint: '#ffffff',
 };
@@ -109,6 +115,13 @@ function toForm(type: FoliageType): FoliageForm {
         tint: type.tint ?? '#ffffff',
     };
 }
+
+const COLLISION_OPTIONS: { value: FoliageCollision; label: string }[] = [
+    { value: 'auto', label: 'Automatic (by kind)' },
+    { value: 'trunk', label: 'Trunk' },
+    { value: 'bounds', label: 'Footprint (bounds)' },
+    { value: 'none', label: 'None' },
+];
 
 type Tab = 'types' | 'assets';
 
@@ -727,6 +740,46 @@ function FoliageEditor({
                     />
                 </EditorSection>
 
+                <EditorSection title="Collision">
+                    <div className="grid gap-2">
+                        <Label htmlFor={`${id}-collision`}>
+                            Blocks the player
+                        </Label>
+                        <Select
+                            value={form.data.collision ?? 'auto'}
+                            onValueChange={(v) =>
+                                set('collision', v as FoliageCollision)
+                            }
+                        >
+                            <SelectTrigger
+                                id={`${id}-collision`}
+                                className="w-full"
+                            >
+                                <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {COLLISION_OPTIONS.map((o) => (
+                                    <SelectItem key={o.value} value={o.value}>
+                                        {o.label}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                            Automatic: trees block with their trunk, rocks with
+                            their footprint; bushes, grass, flowers and reeds
+                            are walked through. Applies to ground cover too.
+                        </p>
+                    </div>
+                    <NullableNumber
+                        label="Collider radius (at scale 1)"
+                        placeholder="Measured"
+                        value={form.data.collision_radius ?? null}
+                        onChange={(v) => set('collision_radius', v)}
+                        error={errors.collision_radius}
+                    />
+                </EditorSection>
+
                 {type && !asset && <ModelUpload type={type} />}
             </div>
 
@@ -793,11 +846,13 @@ function NullableNumber({
     value,
     onChange,
     error,
+    placeholder = 'Any',
 }: {
     label: string;
     value: number | null;
     onChange: (value: number | null) => void;
     error?: string;
+    placeholder?: string;
 }) {
     const id = useId();
 
@@ -811,7 +866,7 @@ function NullableNumber({
                     step="any"
                     inputMode="decimal"
                     value={value ?? ''}
-                    placeholder="Any"
+                    placeholder={placeholder}
                     onChange={(e) =>
                         onChange(
                             e.target.value === ''

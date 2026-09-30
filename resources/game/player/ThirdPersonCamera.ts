@@ -2,9 +2,15 @@ import * as THREE from 'three/webgpu';
 import type { Input } from '../core/Input';
 import type { PlayerSettings } from '../shared/types';
 import type { Heightfield } from '../world/Heightfield';
+import type { CollisionWorld } from '../world/collision/Collision';
+
+/** Distance (m) the camera keeps in front of a trunk or wall it would otherwise clip into. */
+const WALL_MARGIN = 0.3;
 
 /**
  * Orbiting over-the-shoulder camera with mouse look (pointer lock), wheel zoom and terrain collision.
+ * With a CollisionWorld it also pulls in (at once) in front of trunks, rocks and buildings between it
+ * and the character, and eases back out once the view is clear.
  */
 export class ThirdPersonCamera {
     yaw = 0;
@@ -13,6 +19,8 @@ export class ThirdPersonCamera {
     private targetDistance: number;
     private pivot = new THREE.Vector3();
     private initialized = false;
+    /** Current share (0…1) of the desired distance the camera may use (collision pull-in). */
+    private reach = 1;
 
     constructor(
         readonly camera: THREE.PerspectiveCamera,
@@ -32,6 +40,7 @@ export class ThirdPersonCamera {
         this.yaw = yaw;
         this.pitch = -0.2;
         this.initialized = false;
+        this.reach = 1;
     }
 
     update(
@@ -40,6 +49,7 @@ export class ThirdPersonCamera {
         focus: THREE.Vector3,
         heights: Heightfield,
         locked: boolean,
+        collision: CollisionWorld | null = null,
     ): void {
         const s = this.settings;
 
@@ -95,7 +105,22 @@ export class ThirdPersonCamera {
             }
         }
 
-        const pos = this.pivot.clone().lerp(desired, t);
+        if (collision?.enabled) {
+            const hit = collision.raycast(this.pivot, desired);
+
+            if (hit) {
+                const length = Math.max(1e-3, this.pivot.distanceTo(desired));
+                t = Math.min(t, Math.max(0.02, hit.t - WALL_MARGIN / length));
+            }
+        }
+
+        // Pull in at once, ease back out.
+        this.reach =
+            t < this.reach
+                ? t
+                : this.reach + (t - this.reach) * (1 - Math.exp(-dt * 4));
+
+        const pos = this.pivot.clone().lerp(desired, this.reach);
         pos.y = Math.max(pos.y, heights.sample(pos.x, pos.z) + 0.4);
         this.camera.position.copy(pos);
         this.camera.lookAt(this.pivot);

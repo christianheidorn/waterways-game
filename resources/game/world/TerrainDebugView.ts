@@ -38,7 +38,8 @@ export type TerrainViewMode =
     | 'slope'
     | 'height'
     | 'density'
-    | 'wireframe';
+    | 'wireframe'
+    | 'collision';
 
 /** Shader value of each mode (the `uView` uniform); unlit visualisations are ≥ 2. */
 const VIEW_INDEX: Record<TerrainViewMode, number> = {
@@ -49,6 +50,8 @@ const VIEW_INDEX: Record<TerrainViewMode, number> = {
     height: 4,
     density: 5,
     wireframe: 6,
+    // Lit terrain; the colliders are drawn on top (world/collision/CollisionDebug).
+    collision: 0,
 };
 
 /** Albedo of the lighting-only view (linear; a mid grey like Unreal's). */

@@ -184,7 +184,7 @@ class AssetToolsTest extends TestCase
     {
         $path = $this->file('fishing_hut.glb', $this->glb());
 
-        WaterwaysServer::tool(ImportModel::class, ['kind' => 'prop', 'path' => $path, 'category' => 'building', 'target_height' => 4.5, 'tags' => ['wood']])
+        WaterwaysServer::tool(ImportModel::class, ['kind' => 'prop', 'path' => $path, 'category' => 'building', 'target_height' => 4.5, 'tags' => ['wood'], 'collision' => 'mesh'])
             ->assertOk()
             ->assertSee(['"status": "ready"', 'Fishing Hut', 'place_props']);
 
@@ -193,6 +193,7 @@ class AssetToolsTest extends TestCase
         $this->assertSame(['x' => 2, 'y' => 4, 'z' => 1], $prop->dimensions);
         $this->assertSame(4.5, $prop->target_height);
         $this->assertSame(['wood'], $prop->tags);
+        $this->assertSame('mesh', $prop->collision);
         $this->assertSame($this->glb(), Storage::disk('public')->get($prop->model_path));
 
         WaterwaysServer::tool(ListPropModels::class, ['search' => 'wood'])->assertOk()->assertSee('Fishing Hut');

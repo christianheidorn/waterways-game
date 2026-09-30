@@ -62,6 +62,7 @@ class GetAssetStatus extends WaterwaysTool
             'triangles' => $prop->triangles,
             'meshes' => $prop->meshes,
             'materials' => $prop->materials,
+            'collision' => $prop->collision ?? 'auto',
             ...($warnings !== [] ? ['budget_warnings' => $warnings] : []),
             'tags' => $prop->tags ?? [],
             'model_url' => $prop->toGameArray()['model_url'],

@@ -189,6 +189,8 @@ export async function takePhoto(
 
 export type PlayerHost = {
     mode: () => GameMode;
+    /** Walk mode in the editor (the character with collision, control_editor action "walk"). */
+    walking?: () => boolean;
     /** Switches to play mode at the map's player start. */
     play: () => void;
     position: () => THREE.Vector3;
@@ -227,6 +229,7 @@ function playerState(host: PlayerHost): Record<string, unknown> {
 
     return {
         mode: host.mode(),
+        walking: host.walking?.() ?? false,
         position: {
             x: Math.round(p.x * 100) / 100,
             y: Math.round(p.y * 100) / 100,
@@ -251,7 +254,8 @@ export async function controlPlayer(
     const action =
         typeof payload.action === 'string' ? payload.action : 'state';
 
-    if (action !== 'state' && host.mode() !== 'play') {
+    // Walk mode drives the same character in the editor: no switch to play mode needed.
+    if (action !== 'state' && host.mode() !== 'play' && !host.walking?.()) {
         host.play();
         await frames(2);
     }

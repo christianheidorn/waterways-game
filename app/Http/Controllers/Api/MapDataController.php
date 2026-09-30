@@ -18,7 +18,7 @@ use RuntimeException;
  */
 class MapDataController extends Controller
 {
-    private const ASSETS = ['heightmap', 'water', 'splatmap', 'foliage', 'landcover', 'props'];
+    private const ASSETS = ['heightmap', 'water', 'splatmap', 'foliage', 'landcover', 'props', 'splines'];
 
     public function __construct(private readonly TerrainStorage $storage) {}
 
@@ -47,7 +47,7 @@ class MapDataController extends Controller
         abort_if($contents === null, 404);
 
         return response($contents, 200, [
-            'Content-Type' => in_array($asset, ['foliage', 'props'], true) ? 'application/json' : 'application/octet-stream',
+            'Content-Type' => in_array($asset, ['foliage', 'props', 'splines'], true) ? 'application/json' : 'application/octet-stream',
             'Cache-Control' => 'private, max-age=31536000, immutable',
         ]);
     }
@@ -73,6 +73,11 @@ class MapDataController extends Controller
         if ($asset === 'props') {
             $json = json_decode($contents, true);
             abort_unless(is_array($json) && is_array($json['props'] ?? null), 422, 'Invalid props payload.');
+        }
+
+        if ($asset === 'splines') {
+            $json = json_decode($contents, true);
+            abort_unless(is_array($json) && is_array($json['roads'] ?? null) && is_array($json['rivers'] ?? null), 422, 'Invalid splines payload.');
         }
 
         try {

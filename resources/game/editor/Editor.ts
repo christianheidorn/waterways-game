@@ -6,6 +6,9 @@ import type {
     EditorSettings,
     PropsFile,
     FoliageType,
+    RoadProfile,
+    SplinePoint,
+    SplinesFile,
     TerrainLayer,
 } from '../shared/types';
 import type { Foliage } from '../world/Foliage';
@@ -15,6 +18,20 @@ import type { SplatMap } from '../world/SplatMap';
 import type { Terrain } from '../world/Terrain';
 import type { TerrainMaterial } from '../world/TerrainMaterial';
 import type { Water } from '../world/Water';
+import type { Splines } from '../world/Splines';
+import { placementsAlong, snapToEdges, snapToGrid } from './propSnap';
+import { SplineTool } from './splines/SplineTool';
+import type { SplineKind } from './splines/SplineTool';
+import {
+    createRiver,
+    createRoad,
+    deleteSpline,
+    moveSplinePoint,
+    SplineError,
+} from './splines/splineOps';
+import { Stamp } from './stamps';
+import type { StampBlend, StampParams, StampShape } from './stamps';
+import { StampPreview } from './StampPreview';
 import { brushWeight, DEFAULT_BRUSH } from './Brush';
 import type { BrushSettings } from './Brush';
 import { FlyCamera } from './FlyCamera';
@@ -39,7 +56,8 @@ export type SculptTool =
     | 'erosion'
     | 'hydro'
     | 'noise'
-    | 'terrace';
+    | 'terrace'
+    | 'stamp';
 export type FoliageTool = 'paint' | 'erase' | 'single';
 export type WaterTool = 'lake' | 'river' | 'erase';
 export type DirtyChannel =
@@ -48,6 +66,7 @@ export type DirtyChannel =
     | 'water'
     | 'foliage'
     | 'props'
+    | 'splines'
     | 'meta';
 
 export type EditorWorld = {
@@ -59,6 +78,8 @@ export type EditorWorld = {
     water: Water;
     foliage: Foliage;
     props: Props;
+    /** Roads and rivers as editable splines. */
+    splines: Splines;
     layers: TerrainLayer[];
     foliageTypes: FoliageType[];
     spawn: { x: number; z: number; yaw: number } | null;
@@ -78,6 +99,8 @@ export type EditorCallbacks = {
     cycleViewMode: (step: number) => void;
     /** Walk mode: the character with collision instead of the fly camera (J). */
     toggleWalk: () => void;
+    /** A message in the status bar (e.g. why a road could not be built). */
+    flash?: (message: string) => void;
     isPointerOverUi: () => boolean;
 };
 
@@ -94,6 +117,7 @@ export class EditorState {
         water: { ...DEFAULT_BRUSH, radius: 30, strength: 1, falloff: 0.25 },
         place: { ...DEFAULT_BRUSH, radius: 2, strength: 1, falloff: 0 },
         request: { ...DEFAULT_BRUSH, radius: 2, strength: 1, falloff: 0 },
+        roads: { ...DEFAULT_BRUSH, radius: 2, strength: 1, falloff: 0 },
         world: { ...DEFAULT_BRUSH, radius: 2, strength: 1, falloff: 0 },
     };
     flattenMode: FlattenMode = 'both';
@@ -121,9 +145,38 @@ export class EditorState {
     propYaw = 0;
     propRandomYaw = true;
     propScale = 1;
-    /** Props: place new ones, or select placed ones to move / turn / resize. */
-    propMode: 'place' | 'select' = 'place';
+    /** Props: place new ones, select placed ones to move / turn / resize, or place a row along a path. */
+    propMode: 'place' | 'select' | 'along' = 'place';
     selectedProp: string | null = null;
+    /** Props snapping: grid size in m (0 = off), tilt to the slope, end-to-end onto neighbours. */
+    propGrid = 0;
+    propAlign = false;
+    propEdgeSnap = false;
+    /** Props along a path: the clicked points and the spacing (null = the model's length). */
+    propPathPoints: SplinePoint[] = [];
+    propSpacing: number | null = null;
+    /** Roads tool: settings for new roads (a selected road is edited directly). */
+    roadProfile: RoadProfile = 'road';
+    roadWidth = 8;
+    roadShoulder = 6;
+    roadBank = 0.4;
+    roadSmoothing = 60;
+    /** Terrain layer painted along new roads (undefined: pick one named like a road surface). */
+    roadLayer: number | null | undefined = undefined;
+    roadClearFoliage = true;
+    /** Water tool, rivers: settings for new rivers. */
+    riverWidth = 10;
+    riverDepth = 2;
+    riverBank = 8;
+    /** Sculpt tool, stamps. */
+    stampShape: StampShape = 'mountain';
+    stampRadius = 150;
+    stampHeight = 80;
+    stampRotation = 0;
+    stampBlend: StampBlend = 'add';
+    stampStrength = 1;
+    stampFalloff = 0.3;
+    stampSeed = 1;
     requestNote = '';
 
     get brush(): BrushSettings {
@@ -165,6 +218,9 @@ export class Editor {
     private rebuildTimer = 0;
     private listeners = new Set<() => void>();
     private active = false;
+    /** Roads tool and the Water tool's rivers: drawing and editing splines. */
+    readonly splineTool: SplineTool;
+    private readonly stampPreview: StampPreview;
 
     constructor(
         private readonly world: EditorWorld,
@@ -237,6 +293,13 @@ export class Editor {
                 callbacks.markDirty('props');
             },
         });
+        this.history.registerCustom('splines', {
+            capture: () => world.splines.serialize(),
+            restore: (_id, state) => {
+                world.splines.load(state as SplinesFile);
+                callbacks.markDirty('splines');
+            },
+        });
         world.foliage.onBeforeModify = (typeId, key) => {
             if (this.history.recording) {
                 this.history.touchCustom('foliage', `${typeId}|${key}`);
@@ -273,6 +336,20 @@ export class Editor {
         this.selectionBox.visible = false;
         scene.add(this.selectionBox);
         this.updateSpawnMarker();
+        this.splineTool = new SplineTool(
+            scene,
+            () => world.heights,
+            world.splines,
+            camera,
+            {
+                create: (kind, points) => this.createSpline(kind, points),
+                setPoints: (id, points) =>
+                    this.guarded(() => moveSplinePoint(this, id, points)),
+                remove: (id) => this.guarded(() => deleteSpline(this, id)),
+                changed: () => this.notify(),
+            },
+        );
+        this.stampPreview = new StampPreview(scene);
 
         for (const type of world.foliageTypes.slice(0, 1)) {
             this.state.foliageSelection.add(type.id);
@@ -292,6 +369,7 @@ export class Editor {
 
     notify(): void {
         this.world.material.setGridVisible(this.active && this.state.showGrid);
+        this.syncSplineTool();
 
         for (const fn of this.listeners) {
             fn();
@@ -304,10 +382,13 @@ export class Editor {
         this.rampMarker.visible = active && this.rampStart !== null;
         this.world.material.setGridVisible(active && this.state.showGrid);
 
+        this.syncSplineTool();
+
         if (!active) {
             this.endStroke();
             this.world.material.hideBrush();
             this.selectionBox.visible = false;
+            this.stampPreview.show(this.world.heights, null);
 
             if (this.propGhost) {
                 this.propGhost.visible = false;
@@ -325,6 +406,7 @@ export class Editor {
         this.rampStart = null;
         this.rampMarker.visible = false;
         this.callbacks.onToolGroup(group);
+        this.syncSplineTool();
         this.notify();
     }
 
@@ -521,6 +603,17 @@ export class Editor {
 
         this.updateBrushOverlay(overUi || rmb);
         this.updatePropOverlays(overUi || rmb);
+        this.splineTool.update(this.cursorValid ? this.cursor : null);
+        this.stampPreview.show(
+            this.world.heights,
+            !overUi &&
+                !rmb &&
+                this.cursorValid &&
+                this.state.group === 'sculpt' &&
+                this.state.sculptTool === 'stamp'
+                ? this.stampAt(this.cursor.x, this.cursor.z)
+                : null,
+        );
 
         this.rebuildTimer -= dt;
 
@@ -535,6 +628,8 @@ export class Editor {
 
     dispose(): void {
         this.scene.remove(this.rampMarker, this.spawnMarker, this.selectionBox);
+        this.splineTool.dispose();
+        this.stampPreview.dispose();
         this.setPropGhost(null, null);
         this.rampMarker.geometry.dispose();
         (this.rampMarker.material as THREE.Material).dispose();
@@ -559,15 +654,22 @@ export class Editor {
     scriptedEdit<T>(
         label: string,
         rect: GridRect,
-        channels: ('height' | 'splat' | 'water' | 'foliage' | 'props')[],
+        channels: (
+            | 'height'
+            | 'splat'
+            | 'water'
+            | 'foliage'
+            | 'props'
+            | 'splines'
+        )[],
         fn: () => T,
     ): T {
         this.endStroke();
         this.history.beginStroke(label);
 
         for (const channel of channels) {
-            if (channel === 'props') {
-                this.history.touchCustom('props', 'all');
+            if (channel === 'props' || channel === 'splines') {
+                this.history.touchCustom(channel, 'all');
             } else if (channel !== 'foliage') {
                 this.history.touch(channel, rect);
             }
@@ -603,6 +705,11 @@ export class Editor {
             this.callbacks.markDirty('props');
         }
 
+        if (channels.includes('splines')) {
+            this.callbacks.markDirty('splines');
+        }
+
+        this.stampPreview.invalidate();
         this.flushRebuilds();
 
         return result;
@@ -638,6 +745,7 @@ export class Editor {
             'water',
             'place',
             'request',
+            'roads',
             'world',
         ];
 
@@ -729,6 +837,22 @@ export class Editor {
             this.propShortcuts();
         }
 
+        if (this.splineKind()) {
+            this.splineShortcuts();
+        }
+
+        if (
+            this.state.group === 'sculpt' &&
+            this.state.sculptTool === 'stamp' &&
+            input.wasPressed('KeyR') &&
+            !input.ctrl
+        ) {
+            const step = input.shift ? -15 : 15;
+            this.state.stampRotation =
+                (((this.state.stampRotation + step) % 360) + 360) % 360;
+            this.notify();
+        }
+
         if (input.wasPressed('Escape')) {
             this.rampStart = null;
             this.rampMarker.visible = false;
@@ -740,6 +864,24 @@ export class Editor {
         const input = this.input;
         const s = this.state;
         const step = input.shift ? -15 : 15;
+
+        if (s.propMode === 'along') {
+            if (input.wasPressed('Enter') || input.wasPressed('NumpadEnter')) {
+                this.placePropsAlong();
+            }
+
+            if (input.wasPressed('Backspace') && s.propPathPoints.length) {
+                s.propPathPoints = s.propPathPoints.slice(0, -1);
+                this.notify();
+            }
+
+            if (input.wasPressed('Escape')) {
+                s.propPathPoints = [];
+                this.notify();
+            }
+
+            return;
+        }
 
         if (input.wasPressed('KeyR') && !input.ctrl) {
             if (s.propMode === 'select') {
@@ -802,7 +944,10 @@ export class Editor {
             !this.cursorValid ||
             s.group === 'place' ||
             s.group === 'request' ||
-            s.group === 'world'
+            s.group === 'world' ||
+            s.group === 'roads' ||
+            (s.group === 'water' && s.waterTool === 'river') ||
+            (s.group === 'sculpt' && s.sculptTool === 'stamp')
         ) {
             this.world.material.hideBrush();
 
@@ -858,6 +1003,43 @@ export class Editor {
         // One-shot / click tools.
         if (s.group === 'sculpt' && s.sculptTool === 'ramp') {
             this.handleRampClick();
+
+            return;
+        }
+
+        if (this.splineKind()) {
+            this.splineTool.pointerDown(
+                this.cursor,
+                this.input.shift,
+                this.input.ctrl,
+            );
+            // Dragging a point (applyStroke) until the button is released.
+            this.stroking = true;
+            this.history.beginStroke('noop');
+
+            return;
+        }
+
+        if (s.group === 'sculpt' && s.sculptTool === 'stamp') {
+            this.applyStamp(this.stampAt(this.cursor.x, this.cursor.z));
+            this.stroking = true;
+            this.history.beginStroke('noop');
+
+            return;
+        }
+
+        if (
+            s.group === 'place' &&
+            s.placeTool === 'props' &&
+            s.propMode === 'along'
+        ) {
+            s.propPathPoints = [
+                ...s.propPathPoints,
+                { x: this.cursor.x, z: this.cursor.z },
+            ];
+            this.notify();
+            this.stroking = true;
+            this.history.beginStroke('noop');
 
             return;
         }
@@ -985,6 +1167,11 @@ export class Editor {
 
         this.stroking = false;
         this.history.endStroke();
+
+        if (this.splineTool.dragging) {
+            this.splineTool.pointerUp();
+        }
+
         this.flushRebuilds();
 
         if (this.propDrag?.moved) {
@@ -996,6 +1183,16 @@ export class Editor {
 
     private applyStroke(dt: number): void {
         const s = this.state;
+
+        if (this.splineKind()) {
+            this.splineTool.pointerMove(this.cursor);
+
+            return;
+        }
+
+        if (s.group === 'sculpt' && s.sculptTool === 'stamp') {
+            return;
+        }
 
         if (s.group === 'place') {
             this.dragProp();
@@ -1293,15 +1490,15 @@ export class Editor {
                 props.remove([hit.id]);
             }
         } else if (s.propModel !== null) {
+            const at = this.propPlacementAt(this.cursor.x, this.cursor.z);
             props.add({
                 model: s.propModel,
-                x: this.cursor.x,
-                z: this.cursor.z,
-                yaw: s.propRandomYaw
-                    ? this.nextPropYaw
-                    : THREE.MathUtils.degToRad(s.propYaw),
+                x: at.x,
+                z: at.z,
+                yaw: at.yaw,
                 scale: s.propScale,
                 offset: 0,
+                ...(s.propAlign ? { align: true } : {}),
             });
         }
 
@@ -1337,8 +1534,24 @@ export class Editor {
         }
 
         const p = this.world.props.get(drag.id);
-        const x = this.cursor.x + drag.dx;
-        const z = this.cursor.z + drag.dz;
+        let x = snapToGrid(this.cursor.x + drag.dx, this.state.propGrid);
+        let z = snapToGrid(this.cursor.z + drag.dz, this.state.propGrid);
+        let yaw = p?.yaw;
+
+        if (p && this.state.propEdgeSnap) {
+            const edge = snapToEdges(
+                this.world.props,
+                p.model,
+                p.scale,
+                x,
+                z,
+                p.id,
+            );
+
+            if (edge) {
+                ({ x, z, yaw } = edge);
+            }
+        }
 
         if (!p || (Math.abs(p.x - x) < 0.01 && Math.abs(p.z - z) < 0.01)) {
             return;
@@ -1350,7 +1563,7 @@ export class Editor {
             drag.moved = true;
         }
 
-        this.world.props.update(drag.id, { x, z });
+        this.world.props.update(drag.id, { x, z, yaw });
     }
 
     /** The selected placed prop, if it still exists (undo can remove it). */
@@ -1466,7 +1679,7 @@ export class Editor {
         const propsTool =
             this.active && s.group === 'place' && s.placeTool === 'props';
         const placing =
-            propsTool && s.propMode === 'place' && s.propModel !== null;
+            propsTool && s.propMode !== 'select' && s.propModel !== null;
 
         if (s.selectedProp && !this.world.props.get(s.selectedProp)) {
             this.selectProp(null);
@@ -1520,14 +1733,29 @@ export class Editor {
         if (ghost.visible) {
             const radius =
                 ((ghost.userData.radius as number) ?? 1) * s.propScale;
+            const at = this.propPlacementAt(this.cursor.x, this.cursor.z);
+            const hf = this.world.heights;
             ghost.position.set(
-                this.cursor.x,
-                this.world.props.groundAt(this.cursor.x, this.cursor.z, radius),
-                this.cursor.z,
+                at.x,
+                s.propAlign
+                    ? hf.sample(at.x, at.z)
+                    : this.world.props.groundAt(at.x, at.z, radius),
+                at.z,
             );
-            ghost.rotation.y = s.propRandomYaw
-                ? this.nextPropYaw
-                : THREE.MathUtils.degToRad(s.propYaw);
+            ghost.quaternion.setFromAxisAngle(
+                new THREE.Vector3(0, 1, 0),
+                at.yaw,
+            );
+
+            if (s.propAlign) {
+                ghost.quaternion.premultiply(
+                    new THREE.Quaternion().setFromUnitVectors(
+                        new THREE.Vector3(0, 1, 0),
+                        hf.normal(at.x, at.z),
+                    ),
+                );
+            }
+
             ghost.scale.setScalar(s.propScale);
         }
     }
@@ -1548,6 +1776,211 @@ export class Editor {
             object.visible = false;
             this.scene.add(object);
         }
+    }
+
+    // ---------------------------------------------------------------- props: snapping
+
+    /** Where a new prop goes for a cursor position: grid, end-to-end snapping and rotation applied. */
+    private propPlacementAt(
+        cx: number,
+        cz: number,
+    ): { x: number; z: number; yaw: number } {
+        const s = this.state;
+        const yaw = s.propRandomYaw
+            ? this.nextPropYaw
+            : THREE.MathUtils.degToRad(s.propYaw);
+        const x = snapToGrid(cx, s.propGrid);
+        const z = snapToGrid(cz, s.propGrid);
+
+        if (s.propEdgeSnap && s.propModel !== null) {
+            const edge = snapToEdges(
+                this.world.props,
+                s.propModel,
+                s.propScale,
+                x,
+                z,
+            );
+
+            if (edge) {
+                return edge;
+            }
+        }
+
+        return { x, z, yaw };
+    }
+
+    /** Places copies of the selected model along the clicked path (one undo step). */
+    placePropsAlong(): number {
+        const s = this.state;
+
+        if (s.propModel === null || s.propPathPoints.length < 2) {
+            return 0;
+        }
+
+        const model = s.propModel;
+        const spots = placementsAlong(
+            this.world.props,
+            model,
+            s.propScale,
+            s.propPathPoints,
+            s.propSpacing,
+        );
+        this.scriptedEdit(
+            'Place props along a path',
+            { x0: 0, z0: 0, x1: 0, z1: 0 },
+            ['props'],
+            () => {
+                for (const spot of spots) {
+                    this.world.props.add({
+                        model,
+                        ...spot,
+                        scale: s.propScale,
+                        offset: 0,
+                        ...(s.propAlign ? { align: true } : {}),
+                    });
+                }
+            },
+        );
+        s.propPathPoints = [];
+        this.notify();
+
+        return spots.length;
+    }
+
+    // ---------------------------------------------------------------- roads, rivers and stamps
+
+    /** Which splines the current tool edits (null: none). */
+    splineKind(): SplineKind | null {
+        const s = this.state;
+
+        if (s.group === 'roads') {
+            return 'road';
+        }
+
+        if (s.group === 'water' && s.waterTool === 'river') {
+            return 'river';
+        }
+
+        return null;
+    }
+
+    private syncSplineTool(): void {
+        this.splineTool?.setActive(this.active ? this.splineKind() : null);
+    }
+
+    private splineShortcuts(): void {
+        const input = this.input;
+        const tool = this.splineTool;
+
+        if (input.wasPressed('Enter') || input.wasPressed('NumpadEnter')) {
+            tool.finish();
+        }
+
+        if (input.wasPressed('Backspace') && tool.draft.length) {
+            tool.undoPoint();
+        } else if (
+            (input.wasPressed('Delete') || input.wasPressed('Backspace')) &&
+            tool.selected
+        ) {
+            this.deleteSelectedSpline();
+        }
+
+        if (input.wasPressed('Escape')) {
+            tool.cancel();
+        }
+    }
+
+    /** Runs a spline edit; shows why it failed instead of throwing (UI). */
+    private guarded<T>(fn: () => T): T | null {
+        try {
+            return fn();
+        } catch (error) {
+            if (error instanceof SplineError) {
+                this.callbacks.flash?.(error.message);
+
+                return null;
+            }
+
+            throw error;
+        }
+    }
+
+    private createSpline(
+        kind: SplineKind,
+        points: SplinePoint[],
+    ): string | null {
+        const s = this.state;
+
+        return this.guarded(() =>
+            kind === 'road'
+                ? createRoad(this, {
+                      points,
+                      profile: s.roadProfile,
+                      width: s.roadWidth,
+                      shoulder: s.roadShoulder,
+                      bank: s.roadBank,
+                      smoothing: s.roadSmoothing,
+                      clear_foliage: s.roadClearFoliage,
+                      ...(s.roadLayer !== undefined
+                          ? { layer: s.roadLayer }
+                          : {}),
+                  }).road.id
+                : createRiver(this, {
+                      points,
+                      width: s.riverWidth,
+                      depth: s.riverDepth,
+                      bank: s.riverBank,
+                  }).river.id,
+        );
+    }
+
+    /** Runs a change to the selected road or river (re-carved as one undo step). */
+    editSelectedSpline(fn: (id: string) => unknown): void {
+        const id = this.splineTool.selected;
+
+        if (id) {
+            this.guarded(() => fn(id));
+            this.notify();
+        }
+    }
+
+    deleteSelectedSpline(): void {
+        const id = this.splineTool.selected;
+
+        if (id) {
+            this.guarded(() => deleteSpline(this, id));
+            this.splineTool.select(null);
+        }
+    }
+
+    /** The Sculpt tool's stamp at a position with the panel's settings. */
+    stampAt(x: number, z: number): StampParams {
+        const s = this.state;
+
+        return {
+            shape: s.stampShape,
+            x,
+            z,
+            radius: s.stampRadius,
+            height: s.stampHeight,
+            rotation: s.stampRotation,
+            blend: s.stampBlend,
+            strength: s.stampStrength,
+            falloff: s.stampFalloff,
+            seed: s.stampSeed,
+        };
+    }
+
+    /** Applies a landscape stamp (one undo step); returns its summary. */
+    applyStamp(params: StampParams): Record<string, number | string> {
+        const stamp = new Stamp(this.world.heights, params);
+
+        return this.scriptedEdit(
+            `Stamp ${params.shape}`,
+            stamp.rect,
+            ['height'],
+            () => stamp.apply(),
+        );
     }
 
     private placeSpawn(): void {

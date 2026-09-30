@@ -428,6 +428,8 @@ export type MapAssets = {
     landcover: string | null;
     /** Placed props (PropsFile JSON). */
     props?: string | null;
+    /** Roads and rivers as editable splines (SplinesFile JSON). */
+    splines?: string | null;
 };
 
 /** A placeable model of the prop library (App\\Models\\PropModel::toGameArray). */
@@ -461,6 +463,8 @@ export type PropInstance = {
     scale: number;
     /** Metres above (+) or into (−) the ground. */
     offset: number;
+    /** Tilted to follow the terrain slope under it (default upright). */
+    align?: boolean;
 };
 
 /** Serialized props file (maps/{id}/props.json). */
@@ -485,6 +489,7 @@ export type GameManifest = {
         save_water: string;
         save_foliage: string;
         save_props?: string;
+        save_splines?: string;
         save_meta: string;
         save_thumbnail: string;
         /** PATCH a foliage type's settings from the in-game editor: `${update_foliage_type}/{id}`. */
@@ -571,3 +576,63 @@ export const NO_WATER = -100000;
 
 /** Number of splat channels (two RGBA8 textures). */
 export const SPLAT_CHANNELS = 8;
+
+/** A point of a spline's course (world metres). */
+export type SplinePoint = { x: number; z: number };
+
+/**
+ * What a spline did to the terrain, so it can be edited or removed later: the grid samples it touched
+ * (base64 Uint32 indices), the height it added there (base64 Float32, subtracted again on re-carve so
+ * later sculpting survives) and the paint / water it replaced (base64 bytes / Float32).
+ */
+export type SplineFootprint = {
+    cells: string;
+    heights: string;
+    splat?: string;
+    water?: string;
+};
+
+/** Road surface profile: footpath, paved road with shoulders and banking, or rutted dirt track. */
+export type RoadProfile = 'path' | 'road' | 'track';
+
+/** An editable road / path (maps/{id}/splines.json). */
+export type RoadSpline = {
+    id: string;
+    name: string;
+    /** Control points; the course is a smooth curve through them. */
+    points: SplinePoint[];
+    /** Width of the road bed (m). */
+    width: number;
+    profile: RoadProfile;
+    /** Terrain layer slot painted along it (null: no paint). */
+    layer: number | null;
+    /** Width of the soft banks on each side that blend into the terrain (m). */
+    shoulder: number;
+    /** 0-1: how much the bed leans into curves (superelevation). */
+    bank: number;
+    /** Length (m) over which the grade is evened out. */
+    smoothing: number;
+    /** Remove placed foliage along it. */
+    clear_foliage: boolean;
+    footprint?: SplineFootprint | null;
+};
+
+/** An editable river (maps/{id}/splines.json): carved downhill from its first point. */
+export type RiverSpline = {
+    id: string;
+    name: string;
+    points: SplinePoint[];
+    /** Water width (m). */
+    width: number;
+    /** Channel depth below the surface (m). */
+    depth: number;
+    /** Width of the banks sloping into the channel (m). */
+    bank: number;
+    footprint?: SplineFootprint | null;
+};
+
+export type SplinesFile = {
+    version: 1;
+    roads: RoadSpline[];
+    rivers: RiverSpline[];
+};

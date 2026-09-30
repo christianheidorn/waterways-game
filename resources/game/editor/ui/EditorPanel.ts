@@ -17,7 +17,9 @@ import {
     MousePointerClick,
     Paintbrush,
     Pipette,
+    Route,
     Rows3,
+    Stamp as StampIcon,
     Sparkles,
     Spline,
     TreePine,
@@ -49,6 +51,14 @@ import type { Editor, FoliageTool, SculptTool, WaterTool } from '../Editor';
 import { FoliageThumbnails } from '../FoliageThumbnails';
 import { WorldPanel } from './WorldPanel';
 import type { WorldHost } from './WorldPanel';
+import {
+    propAlongSection,
+    propSnapSection,
+    riverSection,
+    roadsSection,
+    stampSection,
+} from './buildingSections';
+import type { PanelSection } from './buildingSections';
 
 type ToolDef<T extends string> = {
     value: T;
@@ -69,7 +79,8 @@ const GROUPS: {
     { value: 'water', label: 'Water', icon: Droplets, key: '4' },
     { value: 'place', label: 'Place', icon: Flag, key: '5' },
     { value: 'request', label: 'Request', icon: MessageSquarePlus, key: '6' },
-    { value: 'world', label: 'World', icon: Globe, key: '7' },
+    { value: 'roads', label: 'Roads', icon: Route, key: '7' },
+    { value: 'world', label: 'World', icon: Globe, key: '8' },
 ];
 
 const SCULPT_TOOLS: ToolDef<SculptTool>[] = [
@@ -121,6 +132,12 @@ const SCULPT_TOOLS: ToolDef<SculptTool>[] = [
         icon: ArrowUpDown,
         hint: 'Cut slopes into steps',
     },
+    {
+        value: 'stamp',
+        label: 'Stamp',
+        icon: StampIcon,
+        hint: 'Stamp a landform (mountain, volcano, mesa, dunes, …) where you click · R turns it',
+    },
 ];
 
 const FOLIAGE_TOOLS: ToolDef<FoliageTool>[] = [
@@ -155,7 +172,7 @@ const WATER_TOOLS: ToolDef<WaterTool>[] = [
         value: 'river',
         label: 'River',
         icon: Waves,
-        hint: 'Paint a river that follows the terrain downhill',
+        hint: 'Draw a river from its source: click points, Enter carves it. Click a river to edit it',
     },
     {
         value: 'erase',
@@ -275,10 +292,14 @@ export class EditorPanel {
                       .map((m) => m.id)
                       .join()}`
                 : '';
+        const splineTool = this.editor.splineTool;
+        const splines = this.editor.splineKind()
+            ? `${splineTool.selected ?? ''}|${this.editor.worldData.splines.roads.length}|${this.editor.worldData.splines.rivers.length}|${JSON.stringify(splineTool.current()?.points ?? null)}|${splineTool.current()?.name ?? ''}`
+            : '';
         const key =
             s.group === 'world'
                 ? 'world'
-                : `${props}:${requests}:${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}`;
+                : `${splines}:${s.sculptTool === 'stamp' ? 'stamp' : ''}:${props}:${requests}:${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}`;
 
         if (key !== this.renderedKey) {
             this.renderedKey = key;
@@ -308,8 +329,15 @@ export class EditorPanel {
                         this.editor.setSculptTool(t),
                     ),
                 );
-                this.body.append(this.brushSection(s.sculptTool !== 'ramp'));
-                this.body.append(...this.sculptOptions());
+                if (s.sculptTool === 'stamp') {
+                    this.body.append(this.building(stampSection(this.editor)));
+                } else {
+                    this.body.append(
+                        this.brushSection(s.sculptTool !== 'ramp'),
+                    );
+                    this.body.append(...this.sculptOptions());
+                }
+
                 this.body.append(
                     section(
                         'Whole map',
@@ -394,8 +422,16 @@ export class EditorPanel {
                         this.editor.notify();
                     }),
                 );
+                if (s.waterTool === 'river') {
+                    this.body.append(this.building(riverSection(this.editor)));
+                    break;
+                }
+
                 this.body.append(this.brushSection(true, false));
                 this.body.append(this.waterOptions());
+                break;
+            case 'roads':
+                this.body.append(this.building(roadsSection(this.editor)));
                 break;
             case 'request':
                 this.body.append(this.requestTool());
@@ -465,6 +501,13 @@ export class EditorPanel {
                 ),
             ),
         );
+    }
+
+    /** A building-tools section (buildingSections.ts), refreshed with the panel. */
+    private building(part: PanelSection): HTMLElement {
+        this.refreshers.push(part.refresh);
+
+        return part.el;
     }
 
     private toolGrid<T extends string>(
@@ -727,6 +770,7 @@ export class EditorPanel {
                     label: 'Select & edit',
                     icon: MousePointer2,
                 },
+                { value: 'along', label: 'Along a path', icon: Route },
             ],
             s.propMode,
             (v) => {
@@ -739,8 +783,13 @@ export class EditorPanel {
 
         if (s.propMode === 'select') {
             wrap.append(this.selectedPropSection());
+            wrap.append(this.building(propSnapSection(this.editor)));
 
             return wrap;
+        }
+
+        if (s.propMode === 'along') {
+            wrap.append(this.building(propAlongSection(this.editor)));
         }
 
         const grid = h('div', { class: 'ww-material-grid' });
@@ -845,6 +894,7 @@ export class EditorPanel {
                 ),
             ),
         );
+        wrap.append(this.building(propSnapSection(this.editor)));
 
         return wrap;
     }
@@ -1929,6 +1979,9 @@ export class EditorPanel {
                 tool =
                     'Click to outline the area · Backspace removes the last point';
                 break;
+            case 'roads':
+                tool =
+                    'Click points for a new road, Enter builds it · click a road to select it, drag its points · Delete removes it';
             case 'world':
                 tool =
                     'Layers, weather, undo history, snapshots and new maps · changes save and apply live';

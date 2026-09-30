@@ -18,6 +18,7 @@ export type EditorToolGroup =
     | 'water'
     | 'place'
     | 'request'
+    | 'roads'
     /** World settings (layers, environment), history, snapshots and new maps. */
     | 'world';
 

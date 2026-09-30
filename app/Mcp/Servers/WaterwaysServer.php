@@ -4,6 +4,7 @@ namespace App\Mcp\Servers;
 
 use App\Mcp\Tools\AddTerrainLayer;
 use App\Mcp\Tools\ApplyBiome;
+use App\Mcp\Tools\ApplyStamp;
 use App\Mcp\Tools\BakeFoliageAsset;
 use App\Mcp\Tools\CloseEditor;
 use App\Mcp\Tools\ControlEditor;
@@ -13,6 +14,7 @@ use App\Mcp\Tools\CreateRequest;
 use App\Mcp\Tools\DeleteLibraryItem;
 use App\Mcp\Tools\DeleteTerrainLayer;
 use App\Mcp\Tools\EditFoliage;
+use App\Mcp\Tools\EditRoad;
 use App\Mcp\Tools\EditWater;
 use App\Mcp\Tools\GenerateImage;
 use App\Mcp\Tools\GenerateMaterial;
@@ -85,7 +87,9 @@ Building the world (live in the open editor, each call one undo step, saved by d
 - Plan on get_map_image (top-down, labelled coordinate grid; kinds map, height, slope, layers, water; crop with `area`) and sample_terrain (exact heights / slopes along a line). Both read the saved map and need no editor.
 - Shapes are world-metre outlines: circle, rect, polygon, path (with width) or map, with a soft `falloff` edge.
 - sculpt_terrain: raise / lower, set_height, flatten, smooth, noise, terrace, hill (landforms: hills, massifs, ridges; negative = basins, valleys), erode, grade (road beds along paths).
-- edit_water: lake (flood a basin to a level), river (along a path, downhill from its first point), erase.
+- edit_water: lake (flood a basin to a level), river (along a path, downhill from its first point; kept as an editable spline: list_rivers / update_river / delete_river), erase.
+- edit_road: roads, paths and tracks as editable splines (graded bed, soft banks, painted layer, foliage cleared); update re-carves, delete takes them out again.
+- apply_stamp: landforms in one call (mountain, volcano, crater, mesa, dunes, ridge, canyon, hills) with position, rotation, size, height and blend mode.
 - paint_terrain: paint layers (optionally only on matching slope / height); painted layers grow their ground cover, so apply a biome to a slot and paint it to plant forests, meadows, beaches.
 - edit_foliage: scatter or clear individual plants in an area.
 - Vegetation (trees, bushes, plants, grass) is foliage: foliage types placed with edit_foliage or grown as ground cover (apply_biome / update_terrain_layer + paint_terrain). Foliage gets LODs, impostors and GPU culling, so thousands of trees stay cheap. Props (place_props) are for buildings, structures and unique objects: every copy draws its full model in every pass, so never plant forests with props.
@@ -102,8 +106,8 @@ Assets (3D models, images, materials)
 - Foliage models must be baked (LODs) before use: bake_foliage_asset does it in the open editor.
 
 Everything else the UI offers
-- Placed props: update_props moves, turns, resizes or re-rolls them. Player start direction: update_map spawn facing / look_at.
-- Play mode: control_player teleports, walks (real movement), looks around and jumps; take_screenshot shows the player's view. Photo mode: take_photo (cinematic still with a temporary look). Graphics menu (per device): set_device_graphics. Map card image: set_map_thumbnail.
+- Placed props: update_props moves, turns, resizes, re-rolls or tilts them; place_props snaps (grid, end-to-end, slope) and places rows along paths (fences). Player start direction: update_map spawn facing / look_at.
+- Play mode: control_player teleports, walks (real movement), looks around and jumps; take_screenshot shows the player's view. Walk mode inside the editor (J): control_editor action "walk", then control_player. Photo mode: take_photo (cinematic still with a temporary look). Graphics menu (per device): set_device_graphics. Map card image: set_map_thumbnail.
 - Libraries: list_characters / manage_character (player character), update_library_item (materials, foliage assets, starter biomes), delete_library_item (destructive: ask first). Ask the user something about an area with create_request.
 
 New maps from templates or a description
@@ -183,5 +187,8 @@ class WaterwaysServer extends Server
         CreateRequest::class,
         // Building II: map templates
         ListMapTemplates::class,
+        // Building I: roads, river splines, stamps (docs/ROADMAP.md phase 3)
+        EditRoad::class,
+        ApplyStamp::class,
     ];
 }

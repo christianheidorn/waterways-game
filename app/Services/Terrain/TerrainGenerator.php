@@ -152,6 +152,8 @@ class TerrainGenerator
         // Fresh terrain invalidates painting and foliage; the game auto-paints on load unless
         // the splat is painted from real-world land cover (before the map is marked ready).
         $this->storage->delete($map, 'foliage');
+        // Roads and rivers were carved into the old terrain.
+        $this->storage->delete($map, 'splines');
         $mapping = null;
 
         if ($landCover !== null) {

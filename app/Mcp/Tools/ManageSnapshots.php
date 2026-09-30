@@ -2,6 +2,7 @@
 
 namespace App\Mcp\Tools;
 
+use App\Mcp\MapSnapshots;
 use App\Models\Map;
 use App\Models\MapSnapshot;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -12,7 +13,7 @@ use Laravel\Mcp\Server\Attributes\Name;
 use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
 
 #[Name('map_snapshots')]
-#[Description('Restore points of a map (saved terrain, paint, water, foliage, layers and environment). action "list" shows them (automatic ones are taken before agent tools change a map, at most every 10 minutes); "create" takes one now (`label`), e.g. before a big change; "restore" puts the map back to `snapshot_id` and reloads the open editor. Unsaved editor edits are not part of a snapshot: save them first (control_editor save) if they should be.')]
+#[Description('Restore points of a map (saved terrain, paint, water, foliage, layers and environment). action "list" shows them and the snapshot settings (automatic ones are taken before agent tools change a map, at most every 10 minutes, and while the user edits: on the first save of a session, then at most every `auto_snapshot_minutes`; `editing` marks those; the last `auto_snapshot_keep` automatic ones are kept — change both with update_game_settings group "editor"); "create" takes one now (`label`), e.g. before a big change; "restore" puts the map back to `snapshot_id` and reloads the open editor. Unsaved editor edits are not part of a snapshot: save them first (control_editor save) if they should be.')]
 #[IsDestructive]
 class ManageSnapshots extends WaterwaysTool
 {
@@ -40,6 +41,8 @@ class ManageSnapshots extends WaterwaysTool
             'restore' => $this->restore($map->snapshots()->find((int) $request->get('snapshot_id')), $map, $request),
             default => $this->json([
                 'map' => $map->slug,
+                // Editor settings auto_snapshot_minutes / auto_snapshot_keep (update_game_settings group "editor").
+                'settings' => $this->snapshots()->settings(),
                 'snapshots' => $map->snapshots()->latest('id')->get()->map(fn (MapSnapshot $s) => $this->summary($s))->values(),
             ]),
         };
@@ -66,6 +69,6 @@ class ManageSnapshots extends WaterwaysTool
      */
     private function summary(MapSnapshot $s): array
     {
-        return ['id' => $s->id, 'label' => $s->label, 'auto' => $s->auto, 'created_at' => $s->created_at->toIso8601String()];
+        return MapSnapshots::summary($s);
     }
 }

@@ -12,6 +12,7 @@ use App\Services\Terrain\TerrainShaping;
 use App\Services\Terrain\TerrainStorage;
 use App\Support\EnvironmentDefaults;
 use App\Support\GameManifest;
+use App\Support\MapTemplates;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -32,12 +33,13 @@ class MapController extends Controller
     {
         return Inertia::render('maps/create', [
             'resolutions' => Map::RESOLUTIONS,
+            'templates' => MapTemplates::all(),
         ]);
     }
 
     public function store(Request $request): RedirectResponse
     {
-        $map = self::createMap($this->validateTerrain($request, requireName: true));
+        $map = self::createMap(self::validateNewMap($request->all()));
 
         $this->toast('success', 'Map created — generating terrain…');
 
@@ -86,15 +88,22 @@ class MapController extends Controller
      */
     public static function createMap(array $data): Map
     {
+        $brief = trim((string) ($data['brief'] ?? ''));
+        unset($data['brief']);
+
         $map = Map::query()->create([
             ...TerrainShaping::DEFAULTS,
             ...$data,
             'slug' => self::uniqueSlug($data['name']),
             'seed' => $data['seed'] ?? random_int(1, 999_999),
-            'environment' => EnvironmentDefaults::group()->defaults(),
+            'environment' => MapTemplates::environment($data['template'] ?? null, EnvironmentDefaults::group()->defaults()),
             'terrain_status' => TerrainStatus::Queued,
             'is_default' => ! Map::query()->exists(),
         ]);
+
+        if ($brief !== '') {
+            MapTemplates::storeBrief($map, $brief);
+        }
 
         GenerateMapTerrain::dispatch($map);
 
@@ -150,6 +159,25 @@ class MapController extends Controller
     private function validateTerrain(Request $request, bool $requireName): array
     {
         return $request->validate(self::terrainRules($request->input('source') === MapSource::RealWorld->value, $requireName));
+    }
+
+    /**
+     * Validates a new map (studio form, editor, MCP): a template fills in its terrain defaults, and
+     * `brief` (a description of the world to build) becomes a build request for agents.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array<string, mixed>
+     */
+    public static function validateNewMap(array $input): array
+    {
+        $input = MapTemplates::withDefaults($input);
+        $realWorld = ($input['source'] ?? null) === MapSource::RealWorld->value;
+
+        return validator($input, [
+            ...self::terrainRules($realWorld, requireName: true),
+            'template' => ['nullable', 'string', Rule::in(array_keys(MapTemplates::TEMPLATES))],
+            'brief' => ['nullable', 'string', 'max:4000'],
+        ])->validate();
     }
 
     /**

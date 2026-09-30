@@ -38,6 +38,12 @@ type GridRegistration = {
 /** Tile edge length in grid samples. */
 export const HISTORY_TILE = 64;
 
+/** One step of the history list (History panel, control_editor "history"). */
+export type HistoryStep = { label: string };
+
+/** The history as a list: `steps` oldest first; the first `position` are applied, the rest can be redone. */
+export type HistoryListing = { steps: HistoryStep[]; position: number };
+
 export class History {
     private readonly maxSteps: number;
     private readonly onChange?: (canUndo: boolean, canRedo: boolean) => void;
@@ -46,6 +52,8 @@ export class History {
     private undoStack: Entry[] = [];
     private redoStack: Entry[] = [];
     private current: Entry | null = null;
+    /** Bumped on every change of the stacks (History panel refresh). */
+    private revision = 0;
 
     constructor(opts: {
         maxSteps: number;
@@ -83,6 +91,52 @@ export class History {
         return this.redoStack.length
             ? this.redoStack[this.redoStack.length - 1].label
             : null;
+    }
+
+    /** Changes whenever steps are added, undone, redone or cleared. */
+    get version(): number {
+        return this.revision;
+    }
+
+    /** Every step, oldest first; `position` of them are applied (undo moves it down, redo up). */
+    list(): HistoryListing {
+        const name = (e: Entry) => ({
+            label: e.label
+                ? e.label[0].toUpperCase() + e.label.slice(1)
+                : 'Edit',
+        });
+
+        return {
+            steps: [
+                ...this.undoStack.map(name),
+                ...[...this.redoStack].reverse().map(name),
+            ],
+            position: this.undoStack.length,
+        };
+    }
+
+    /**
+     * Undoes or redoes steps until `position` of them are applied (see list()). Returns how many
+     * steps were undone or redone.
+     */
+    jumpTo(position: number): number {
+        if (this.current) {
+            this.endStroke();
+        }
+
+        const total = this.undoStack.length + this.redoStack.length;
+        const target = Math.max(0, Math.min(total, Math.floor(position)));
+        let moved = 0;
+
+        while (this.undoStack.length > target && this.undo()) {
+            moved++;
+        }
+
+        while (this.undoStack.length < target && this.redo()) {
+            moved++;
+        }
+
+        return moved;
     }
 
     beginStroke(label: string): void {
@@ -276,6 +330,7 @@ export class History {
     }
 
     private emit(): void {
+        this.revision++;
         this.onChange?.(this.canUndo(), this.canRedo());
     }
 

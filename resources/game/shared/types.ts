@@ -217,6 +217,9 @@ export type GraphicsSettings = {
 export type EditorSettings = {
     autosave_minutes: number;
     undo_steps: number;
+    /** Automatic snapshots after saves: at most every N minutes (0 = off), the last `keep` are kept. */
+    auto_snapshot_minutes?: number;
+    auto_snapshot_keep?: number;
     fly_speed: number;
     show_stats: boolean;
 };
@@ -494,7 +497,64 @@ export type GameManifest = {
         agent?: string;
         /** Build requests for agents: GET / POST, PATCH / DELETE `${agent_requests}/{id}`. */
         agent_requests?: string;
+        /** World tab: GET {group, values}, PATCH changed fields. Layer settings: PATCH `${update_layers}/{id}`. */
+        environment?: string;
+        /** Ready materials of the library (GET). */
+        materials?: string;
+        /** GET list, POST take one, POST `${snapshots}/auto` after saves, POST `${snapshots}/{id}/restore`. */
+        snapshots?: string;
+        /** GET the map templates. */
+        map_templates?: string;
+        /** POST a new map ({name, template?, brief?}). */
+        create_map?: string;
     };
+    /** Foliage types scattered on the first load of a template map (null: every type). */
+    initial_foliage?: number[] | null;
+};
+
+/** Mirrors App\Support\SettingField::toArray() (World tab environment form). */
+export type SettingFieldDef = {
+    key: string;
+    label: string;
+    type: 'number' | 'boolean' | 'select' | 'color' | 'text';
+    default: unknown;
+    min?: number;
+    max?: number;
+    step?: number;
+    options?: Record<string, string>;
+    description?: string;
+    unit?: string;
+};
+
+export type SettingGroupDef = {
+    key: string;
+    title: string;
+    description: string;
+    fields: SettingFieldDef[];
+};
+
+/** A library material for the World tab's material picker (Material::toGameArray + category). */
+export type MaterialSummary = TerrainMaterialRef & { category: string | null };
+
+/** App\Mcp\MapSnapshots::summary(). */
+export type SnapshotSummary = {
+    id: number;
+    label: string;
+    auto: boolean;
+    /** Taken automatically while the user edited. */
+    editing: boolean;
+    created_at: string;
+};
+
+/** App\Support\MapTemplates::describe(). */
+export type MapTemplateSummary = {
+    key: string;
+    name: string;
+    summary: string;
+    terrain: Record<string, unknown>;
+    environment: Record<string, unknown>;
+    biomes: Record<string, string>;
+    foliage_kinds: string[];
 };
 
 /** Serialized foliage file (maps/{id}/foliage.json). */

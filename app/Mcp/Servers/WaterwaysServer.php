@@ -28,6 +28,7 @@ use App\Mcp\Tools\ImportModel;
 use App\Mcp\Tools\ListBiomes;
 use App\Mcp\Tools\ListCharacters;
 use App\Mcp\Tools\ListFoliageTypes;
+use App\Mcp\Tools\ListMapTemplates;
 use App\Mcp\Tools\ListMaterials;
 use App\Mcp\Tools\ListPropModels;
 use App\Mcp\Tools\ListProps;
@@ -105,8 +106,16 @@ Everything else the UI offers
 - Play mode: control_player teleports, walks (real movement), looks around and jumps; take_screenshot shows the player's view. Photo mode: take_photo (cinematic still with a temporary look). Graphics menu (per device): set_device_graphics. Map card image: set_map_thumbnail.
 - Libraries: list_characters / manage_character (player character), update_library_item (materials, foliage assets, starter biomes), delete_library_item (destructive: ask first). Ask the user something about an area with create_request.
 
+New maps from templates or a description
+- list_map_templates shows curated starting points (coastal village, alpine lake, river valley, desert canyon); create_map `template` makes one (terrain, biomes on layers, environment, foliage).
+- When the user describes a world ("a foggy fjord with a fishing village"), pick the closest template (or plain procedural), create_map with the description, wait for terrain_status "ready", open_editor if needed, then build it step by step with the existing tools: sculpt_terrain landforms, edit_water, update_environment, apply_biome / update_terrain_layer + paint_terrain, edit_foliage, place_props; look with take_screenshot after each step and describe what you built.
+- Maps the user created "from a description" in the studio or editor carry an open request over the whole map with that description (list_requests): build it the same way and report with update_request.
+
+Editor history
+- control_editor "history" lists the editor's undo steps (like its History panel); "history_jump" goes back or forward to any of them.
+
 Safety
-- Before an agent tool changes a map, a snapshot is taken automatically (at most every 10 minutes); map_snapshots lists, creates and restores them. regenerate_terrain discards the user's terrain work: confirm with them first.
+- Before an agent tool changes a map, a snapshot is taken automatically (at most every 10 minutes); while the user edits, the editor takes automatic snapshots after saves too (editor settings auto_snapshot_minutes / auto_snapshot_keep). map_snapshots lists, creates and restores them. regenerate_terrain discards the user's terrain work: confirm with them first.
 - Prefer small, verifiable steps; tell the user what you changed.
 MD)]
 class WaterwaysServer extends Server
@@ -172,5 +181,7 @@ class WaterwaysServer extends Server
         UpdateLibraryItem::class,
         DeleteLibraryItem::class,
         CreateRequest::class,
+        // Building II: map templates
+        ListMapTemplates::class,
     ];
 }

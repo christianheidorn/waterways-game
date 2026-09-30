@@ -9,6 +9,7 @@ import {
     Droplets,
     Eraser,
     Flag,
+    Globe,
     Grid3x3,
     Layers,
     MessageSquarePlus,
@@ -46,6 +47,8 @@ import {
 import type { FalloffType } from '../Brush';
 import type { Editor, FoliageTool, SculptTool, WaterTool } from '../Editor';
 import { FoliageThumbnails } from '../FoliageThumbnails';
+import { WorldPanel } from './WorldPanel';
+import type { WorldHost } from './WorldPanel';
 
 type ToolDef<T extends string> = {
     value: T;
@@ -66,6 +69,7 @@ const GROUPS: {
     { value: 'water', label: 'Water', icon: Droplets, key: '4' },
     { value: 'place', label: 'Place', icon: Flag, key: '5' },
     { value: 'request', label: 'Request', icon: MessageSquarePlus, key: '6' },
+    { value: 'world', label: 'World', icon: Globe, key: '7' },
 ];
 
 const SCULPT_TOOLS: ToolDef<SculptTool>[] = [
@@ -183,6 +187,8 @@ export class EditorPanel {
     /** Foliage type whose settings are shown under the list (last clicked tile). */
     private editingTypeId: number | null = null;
     private rebuildFoliageSettings: (() => void) | null = null;
+    /** World tab: layer settings, environment, history, snapshots, new maps. */
+    readonly world: WorldPanel;
 
     constructor(
         private readonly editor: Editor,
@@ -217,8 +223,14 @@ export class EditorPanel {
             showRequest: (id: number) => void;
             /** Prop library (ready models). */
             propModels: () => PropModelRef[];
+            /** World tab (settings saved to the studio, history, snapshots, templates). */
+            world: Omit<WorldHost, 'groundCover'>;
         },
     ) {
+        this.world = new WorldPanel(editor, {
+            ...actions.world,
+            groundCover: () => this.groundCover(),
+        });
         this.groupSeg = segmented(
             GROUPS.map((g) => ({
                 value: g.value,
@@ -263,7 +275,10 @@ export class EditorPanel {
                       .map((m) => m.id)
                       .join()}`
                 : '';
-        const key = `${props}:${requests}:${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}`;
+        const key =
+            s.group === 'world'
+                ? 'world'
+                : `${props}:${requests}:${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}`;
 
         if (key !== this.renderedKey) {
             this.renderedKey = key;
@@ -272,6 +287,10 @@ export class EditorPanel {
             for (const fn of this.refreshers) {
                 fn();
             }
+        }
+
+        if (s.group === 'world') {
+            this.world.refresh();
         }
 
         this.hint.textContent = this.currentHint();
@@ -380,6 +399,9 @@ export class EditorPanel {
                 break;
             case 'request':
                 this.body.append(this.requestTool());
+                break;
+            case 'world':
+                this.body.append(this.world.el);
                 break;
             case 'place':
                 this.body.append(
@@ -1906,6 +1928,10 @@ export class EditorPanel {
             case 'request':
                 tool =
                     'Click to outline the area · Backspace removes the last point';
+                break;
+            case 'world':
+                tool =
+                    'Layers, weather, undo history, snapshots and new maps · changes save and apply live';
                 break;
         }
 

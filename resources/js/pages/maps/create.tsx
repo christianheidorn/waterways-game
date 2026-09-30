@@ -13,14 +13,31 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Spinner } from '@/components/ui/spinner';
 import { Textarea } from '@/components/ui/textarea';
+import { cn } from '@/lib/utils';
 import maps from '@/routes/maps';
 
 type CreateMapForm = TerrainFormData & {
     name: string;
     description: string;
+    template: string | null;
+    brief: string;
 };
 
-export default function CreateMap({ resolutions }: { resolutions: number[] }) {
+/** App\Support\MapTemplates::describe(). */
+type MapTemplate = {
+    key: string;
+    name: string;
+    summary: string;
+    terrain: { size?: number; resolution?: number } & Record<string, unknown>;
+};
+
+export default function CreateMap({
+    resolutions,
+    templates = [],
+}: {
+    resolutions: number[];
+    templates?: MapTemplate[];
+}) {
     const form = useForm<CreateMapForm>({
         name: '',
         description: '',
@@ -36,7 +53,25 @@ export default function CreateMap({ resolutions }: { resolutions: number[] }) {
         use_landcover: true,
         seed: null,
         ...SHAPING_DEFAULTS,
+        template: null,
+        brief: '',
     });
+
+    const pickTemplate = (template: MapTemplate | null) => {
+        form.setData((prev) => ({
+            ...prev,
+            template: template?.key ?? null,
+            ...(template
+                ? {
+                      source: 'procedural' as const,
+                      size: Number(template.terrain.size ?? prev.size),
+                      resolution: Number(
+                          template.terrain.resolution ?? prev.resolution,
+                      ),
+                  }
+                : {}),
+        }));
+    };
 
     const submit = (e: FormEvent) => {
         e.preventDefault();
@@ -44,6 +79,7 @@ export default function CreateMap({ resolutions }: { resolutions: number[] }) {
         form.transform((data) => ({
             ...data,
             description: data.description.trim() || null,
+            brief: data.brief.trim() || null,
             center_lat: data.source === 'real_world' ? data.center_lat : null,
             center_lng: data.source === 'real_world' ? data.center_lng : null,
             seed: data.source === 'procedural' ? data.seed : null,
@@ -100,6 +136,62 @@ export default function CreateMap({ resolutions }: { resolutions: number[] }) {
                             <InputError message={form.errors.description} />
                         </div>
                     </section>
+
+                    {templates.length > 0 && (
+                        <section className="grid gap-4 rounded-xl border bg-card p-4 shadow-xs sm:p-6">
+                            <div className="grid gap-1">
+                                <Label>Start from</Label>
+                                <p className="text-sm text-muted-foreground">
+                                    A template sets up terrain, biomes, weather
+                                    and plants. You can still change everything
+                                    afterwards.
+                                </p>
+                            </div>
+                            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                                {[null, ...templates].map((t) => (
+                                    <button
+                                        key={t?.key ?? 'blank'}
+                                        type="button"
+                                        onClick={() => pickTemplate(t)}
+                                        className={cn(
+                                            'rounded-lg border p-3 text-left text-sm transition-colors hover:bg-accent',
+                                            form.data.template ===
+                                                (t?.key ?? null) &&
+                                                'border-primary ring-1 ring-primary',
+                                        )}
+                                    >
+                                        <div className="font-medium">
+                                            {t?.name ?? 'Blank'}
+                                        </div>
+                                        <div className="mt-1 text-muted-foreground">
+                                            {t?.summary ??
+                                                'Procedural or real-world terrain with the default layers.'}
+                                        </div>
+                                    </button>
+                                ))}
+                            </div>
+                            <InputError message={form.errors.template} />
+                            <div className="grid gap-2">
+                                <Label htmlFor="brief">
+                                    Describe the world for Claude{' '}
+                                    <span className="font-normal text-muted-foreground">
+                                        (optional)
+                                    </span>
+                                </Label>
+                                <Textarea
+                                    id="brief"
+                                    value={form.data.brief}
+                                    onChange={(e) =>
+                                        form.setData('brief', e.target.value)
+                                    }
+                                    placeholder="e.g. A foggy fjord with a fishing village, pine forests and a waterfall. Claude picks this up as a request (MCP list_requests) and builds it."
+                                    maxLength={4000}
+                                    rows={3}
+                                />
+                                <InputError message={form.errors.brief} />
+                            </div>
+                        </section>
+                    )}
 
                     <TerrainSourceFields
                         data={form.data}

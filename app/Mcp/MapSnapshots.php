@@ -6,6 +6,7 @@ use App\Models\Map;
 use App\Models\MapSnapshot;
 use App\Models\TerrainLayer;
 use App\Services\Terrain\TerrainStorage;
+use App\Support\GameSettingsRepository;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -14,6 +15,8 @@ use Illuminate\Support\Facades\DB;
  * are copied aside, the layers and map settings are kept as data. Agents take an automatic one before
  * changing a map (at most every few minutes), and can take, list and restore them explicitly.
  *
+ * The editor also takes automatic ones of the user's own work after saves (afterEditorSave).
+ *
  * Only what is saved is captured: unsaved editor changes live in the browser until saved.
  */
 class MapSnapshots
@@ -21,8 +24,11 @@ class MapSnapshots
     /** A new automatic snapshot is only taken when the last one is older than this. */
     public const AUTO_INTERVAL_MINUTES = 10;
 
-    /** Automatic snapshots kept per map (the oldest are deleted). */
+    /** Automatic snapshots kept per map by default (the oldest are deleted; editor setting auto_snapshot_keep). */
     public const AUTO_KEEP = 15;
+
+    /** Label prefix of the automatic snapshots taken while the user edits. */
+    public const EDITING_LABEL = 'Editing session';
 
     /** Map attributes a snapshot restores. */
     private const MAP_ATTRIBUTES = ['name', 'description', 'environment', 'spawn_x', 'spawn_z', 'spawn_yaw', 'min_height', 'max_height'];
@@ -30,7 +36,10 @@ class MapSnapshots
     /** Assets copied (land cover is source data and never edited). */
     private const ASSETS = ['heightmap', 'splatmap', 'water', 'foliage', 'props'];
 
-    public function __construct(private readonly TerrainStorage $storage) {}
+    public function __construct(
+        private readonly TerrainStorage $storage,
+        private readonly GameSettingsRepository $settings,
+    ) {}
 
     public function create(Map $map, string $label, bool $auto = false): MapSnapshot
     {
@@ -72,6 +81,48 @@ class MapSnapshots
         return $recent ? null : $this->create($map, "Before: {$reason}", auto: true);
     }
 
+    /**
+     * An automatic snapshot of the user's own work after an editor save: always on the first save of
+     * an editing session, then when the last automatic snapshot is older than the editor setting
+     * auto_snapshot_minutes (0 turns them off).
+     */
+    public function afterEditorSave(Map $map, bool $firstSave): ?MapSnapshot
+    {
+        $minutes = (int) $this->settings->get('editor')['auto_snapshot_minutes'];
+
+        if ($minutes <= 0) {
+            return null;
+        }
+
+        $recent = MapSnapshot::query()
+            ->where('map_id', $map->id)
+            ->where('auto', true)
+            ->where('created_at', '>=', Carbon::now()->subMinutes($minutes))
+            ->exists();
+
+        if ($recent && ! $firstSave) {
+            return null;
+        }
+
+        return $this->create($map, self::EDITING_LABEL.($firstSave ? ' (first save)' : ''), auto: true);
+    }
+
+    /**
+     * Snapshot settings, as get_settings / update_game_settings group "editor" hold them.
+     *
+     * @return array{auto_snapshot_minutes: int, auto_snapshot_keep: int, agent_interval_minutes: int}
+     */
+    public function settings(): array
+    {
+        $editor = $this->settings->get('editor');
+
+        return [
+            'auto_snapshot_minutes' => (int) $editor['auto_snapshot_minutes'],
+            'auto_snapshot_keep' => (int) $editor['auto_snapshot_keep'],
+            'agent_interval_minutes' => self::AUTO_INTERVAL_MINUTES,
+        ];
+    }
+
     /** Puts the map back as it was: assets, layers and settings (bumps the revision so clients reload). */
     public function restore(MapSnapshot $snapshot): void
     {
@@ -100,6 +151,21 @@ class MapSnapshots
         }
     }
 
+    /**
+     * @return array{id: int, label: string, auto: bool, editing: bool, created_at: string}
+     */
+    public static function summary(MapSnapshot $s): array
+    {
+        return [
+            'id' => $s->id,
+            'label' => $s->label,
+            'auto' => $s->auto,
+            // Taken automatically while the user edited (not before an agent change).
+            'editing' => $s->auto && str_starts_with($s->label, self::EDITING_LABEL),
+            'created_at' => $s->created_at->toIso8601String(),
+        ];
+    }
+
     public function delete(MapSnapshot $snapshot): void
     {
         $this->storage->disk()->deleteDirectory($snapshot->storageDirectory());
@@ -112,7 +178,7 @@ class MapSnapshots
             ->where('map_id', $map->id)
             ->where('auto', true)
             ->latest('id')
-            ->skip(self::AUTO_KEEP)
+            ->skip(max(1, (int) ($this->settings->get('editor')['auto_snapshot_keep'] ?? self::AUTO_KEEP)))
             ->take(PHP_INT_MAX)
             ->get()
             ->each(fn (MapSnapshot $s) => $this->delete($s));

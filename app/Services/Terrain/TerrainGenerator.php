@@ -8,6 +8,7 @@ use App\Models\Map;
 use App\Services\LandCover\LandCoverGrid;
 use App\Services\LandCover\LandCoverService;
 use App\Support\DefaultTerrainLayers;
+use App\Support\MapTemplates;
 use Illuminate\Support\Str;
 
 /**
@@ -55,6 +56,7 @@ class TerrainGenerator
             case MapSource::Procedural:
                 $result = $this->procedural->proceduralWithWater(
                     $map->resolution, $map->size, $map->seed, $stage(5, 85), TerrainShaping::fromMap($map),
+                    fn (HeightGrid $grid) => MapTemplates::shape($map->template, $grid),
                 );
                 break;
 
@@ -186,6 +188,7 @@ class TerrainGenerator
 
         if (! $map->layers()->exists()) {
             DefaultTerrainLayers::createFor($map);
+            MapTemplates::applyLayers($map);
         }
 
     }

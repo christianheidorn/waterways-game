@@ -94,6 +94,7 @@ export class EditorState {
         water: { ...DEFAULT_BRUSH, radius: 30, strength: 1, falloff: 0.25 },
         place: { ...DEFAULT_BRUSH, radius: 2, strength: 1, falloff: 0 },
         request: { ...DEFAULT_BRUSH, radius: 2, strength: 1, falloff: 0 },
+        world: { ...DEFAULT_BRUSH, radius: 2, strength: 1, falloff: 0 },
     };
     flattenMode: FlattenMode = 'both';
     flattenTarget = 0;
@@ -383,6 +384,18 @@ export class Editor {
         }
     }
 
+    /** Goes back or forward to a step of the history list (History panel); returns the steps moved. */
+    jumpHistory(position: number): number {
+        this.endStroke();
+        const moved = this.history.jumpTo(position);
+
+        if (moved) {
+            this.flushRebuilds();
+        }
+
+        return moved;
+    }
+
     /** Re-applies the automatic material rules to the whole map (undoable). */
     /**
      * Softens the whole terrain: an edge-aware blur that removes stair steps and hard creases while
@@ -625,6 +638,7 @@ export class Editor {
             'water',
             'place',
             'request',
+            'world',
         ];
 
         if (input.buttons.has(2)) {
@@ -787,7 +801,8 @@ export class Editor {
             hidden ||
             !this.cursorValid ||
             s.group === 'place' ||
-            s.group === 'request'
+            s.group === 'request' ||
+            s.group === 'world'
         ) {
             this.world.material.hideBrush();
 
@@ -864,6 +879,11 @@ export class Editor {
         if (s.group === 'place') {
             this.placeSpawn();
 
+            return;
+        }
+
+        // World settings: no tool acts on the terrain.
+        if (s.group === 'world') {
             return;
         }
 

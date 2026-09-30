@@ -3,6 +3,7 @@ import type { AgentBridgeHost } from './AgentBridge';
 import type { GameMode } from '../shared/protocol';
 import type { TerrainViewMode } from '../world/TerrainDebugView';
 import type { Heightfield } from '../world/Heightfield';
+import type { HistoryListing } from '../editor/History';
 import { bakeFoliageAssetInBackground } from '../editor/agent/bakeFoliageAsset';
 import type { FoliageBakeJob } from '../editor/agent/bakeFoliageAsset';
 import type {
@@ -43,6 +44,9 @@ export type AgentContext = {
     unsaved: () => string[];
     save: () => Promise<void>;
     history: () => { canUndo: boolean; canRedo: boolean };
+    /** The undo history as a list (World → History), and a jump to one of its steps. */
+    historyList: () => HistoryListing;
+    jumpHistory: (position: number) => number;
     undo: () => void;
     redo: () => void;
     autoPaint: () => void;
@@ -379,6 +383,19 @@ export function createAgentHost(ctx: AgentContext): AgentBridgeHost {
                     await ctx.save();
 
                     return { saved: channels, still_unsaved: ctx.unsaved() };
+                }
+                case 'history':
+                    return { ...ctx.historyList(), unsaved: ctx.unsaved() };
+                case 'history_jump': {
+                    const moved = ctx.jumpHistory(
+                        Number(payload.position) || 0,
+                    );
+
+                    return {
+                        moved,
+                        ...ctx.historyList(),
+                        unsaved: ctx.unsaved(),
+                    };
                 }
                 case 'undo':
                 case 'redo': {

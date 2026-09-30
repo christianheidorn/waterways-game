@@ -31,6 +31,7 @@ use Illuminate\Support\Facades\Storage;
  * @property float $bank_angle
  * @property float $smoothing
  * @property int $seed
+ * @property string|null $template
  * @property float $min_height
  * @property float $max_height
  * @property float|null $spawn_x
@@ -50,7 +51,7 @@ use Illuminate\Support\Facades\Storage;
     'name', 'slug', 'description', 'source', 'resolution', 'size', 'center_lat', 'center_lng',
     'height_scale', 'import_water', 'lake_depth', 'river_depth', 'shore_angle', 'bank_angle', 'smoothing', 'seed', 'min_height', 'max_height', 'spawn_x', 'spawn_z', 'spawn_yaw',
     'environment', 'terrain_status', 'terrain_progress', 'terrain_message', 'revision', 'is_default',
-    'terrain_generated_at', 'landcover_mapping', 'use_landcover',
+    'terrain_generated_at', 'landcover_mapping', 'use_landcover', 'template',
 ])]
 class Map extends Model
 {

@@ -4,11 +4,13 @@ use App\Http\Controllers\Api\AgentBridgeController;
 use App\Http\Controllers\Api\AgentRequestController;
 use App\Http\Controllers\Api\AiController;
 use App\Http\Controllers\Api\BiomeApiController;
+use App\Http\Controllers\Api\EditorSettingsApiController;
 use App\Http\Controllers\Api\FoliageAiController;
 use App\Http\Controllers\Api\FoliageAssetApiController;
 use App\Http\Controllers\Api\FoliageTypeApiController;
 use App\Http\Controllers\Api\MapAiController;
 use App\Http\Controllers\Api\MapDataController;
+use App\Http\Controllers\Api\MapSnapshotApiController;
 use App\Http\Controllers\Api\MaterialApiController;
 use App\Http\Controllers\Api\TerrainLayerApiController;
 use Illuminate\Support\Facades\Route;
@@ -28,6 +30,14 @@ Route::prefix('maps/{map}')->name('api.maps.')->group(function () {
     Route::post('agent/poll', [AgentBridgeController::class, 'poll'])->name('agent.poll');
     Route::post('agent/commands/{command}', [AgentBridgeController::class, 'complete'])->name('agent.complete');
     Route::post('thumbnail', [MapDataController::class, 'storeThumbnail'])->name('thumbnail.store');
+    // Settings and snapshots inside the editor (World tab).
+    Route::get('environment', [EditorSettingsApiController::class, 'environment'])->name('environment.show');
+    Route::patch('environment', [EditorSettingsApiController::class, 'updateEnvironment'])->name('environment.update');
+    Route::patch('layers/{layer}', [EditorSettingsApiController::class, 'updateLayer'])->name('layers.update');
+    Route::get('snapshots', [MapSnapshotApiController::class, 'index'])->name('snapshots.index');
+    Route::post('snapshots', [MapSnapshotApiController::class, 'store'])->name('snapshots.store');
+    Route::post('snapshots/auto', [MapSnapshotApiController::class, 'auto'])->name('snapshots.auto');
+    Route::post('snapshots/{snapshot}/restore', [MapSnapshotApiController::class, 'restore'])->name('snapshots.restore');
 
     Route::post('ai/suggest-materials', [MapAiController::class, 'suggestMaterials'])->name('ai.suggest-materials');
     Route::post('ai/review', [MapAiController::class, 'review'])->name('ai.review');
@@ -35,6 +45,9 @@ Route::prefix('maps/{map}')->name('api.maps.')->group(function () {
 });
 
 Route::post('biomes', [BiomeApiController::class, 'store'])->name('api.biomes.store');
+Route::get('materials', [EditorSettingsApiController::class, 'materials'])->name('api.materials.index');
+Route::get('map-templates', [EditorSettingsApiController::class, 'templates'])->name('api.map-templates.index');
+Route::post('maps', [EditorSettingsApiController::class, 'createMap'])->name('api.maps.store');
 
 Route::get('materials/browse/{source}', [MaterialApiController::class, 'browse'])->name('api.materials.browse');
 Route::get('materials/{material}', [MaterialApiController::class, 'show'])->name('api.materials.show');

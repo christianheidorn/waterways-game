@@ -107,6 +107,8 @@ final class GameSettingsSchema
             'editor' => new SettingGroup('editor', 'Editor', 'In-game world editor behaviour.', [
                 SettingField::number('autosave_minutes', 'Autosave interval', 0, 0, 60, 1, 'min', '0 disables autosave.'),
                 SettingField::number('undo_steps', 'Undo steps', 50, 5, 200, 1),
+                SettingField::number('auto_snapshot_minutes', 'Automatic snapshots', 10, 0, 120, 1, 'min', 'While you edit, a restore point of the saved map is taken on the first save of a session and then after saves at most this often. 0 turns them off.'),
+                SettingField::number('auto_snapshot_keep', 'Automatic snapshots kept', 15, 1, 100, 1, null, 'Older automatic snapshots of a map are deleted; ones you take yourself are kept.'),
                 SettingField::number('fly_speed', 'Camera fly speed', 60, 5, 1000, 1, 'm/s'),
                 SettingField::boolean('show_stats', 'Show performance stats', true),
             ]),

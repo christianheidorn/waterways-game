@@ -66,10 +66,21 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
 | Foliage | Paint (density-aware, rule-aware), Erase, Single placement, _Scatter_ (procedural forests, meadows, shoreline reeds), Clear                |
 | Water   | Lake (level picked from terrain or Ctrl+click, optional carving), River (follows terrain downhill), Erase                                  |
 | Place   | Player start (position + facing)                                                                                                           |
+| World   | Layer look, material, auto-paint rules, ground cover / biome; weather and environment; undo history; snapshots; new maps from templates    |
 
 - **Brush:** size, strength and falloff, with four falloff types (smooth, linear, spherical, tip). The brush
   is previewed on the terrain.
-- **Undo:** tile-based copy-on-write undo/redo covers heights, splat, water and foliage.
+- **Undo:** tile-based copy-on-write undo/redo covers heights, splat, water and foliage. **World → History**
+  lists every step; click one to jump back or forward to it.
+- **Settings without leaving the editor (World, key 7):** terrain layers (look, material from the library,
+  auto-paint rules, ground cover and biomes), weather and the whole environment. Changes apply live and save
+  to the map at once.
+- **Snapshots:** World → Snapshots takes and restores restore points of the saved map. While you edit, one
+  is taken automatically on the first save of a session and then after saves at most every 10 minutes; the
+  last 15 automatic ones are kept (Settings → Game → Editor).
+- **Map templates:** new maps can start from a template (coastal village, alpine lake, river valley, desert
+  canyon: terrain, biomes, weather and plants) or from a description, which Claude picks up as a request and
+  builds (studio → New map, or World → New map in the editor).
 - **Viewport:** Unreal-style camera controls and an optional 100 m grid.
 - **View modes** (like Unreal's viewport _View Mode_ menu): the eye button at the top right (next to the
   graphics button) or V / Shift+V switch how the viewport draws the world, to see why something looks or
@@ -532,7 +543,7 @@ Open <http://localhost:8000>. The dashboard shows the seeded **Waterways Valley*
 | Alt + LMB                      | Orbit around the point under the cursor                     |
 | Wheel                          | Zoom towards the cursor                                     |
 | F                              | Focus the point under the cursor                            |
-| 1–5                            | Sculpt / Paint / Foliage / Water / Place                    |
+| 1–7                            | Sculpt / Paint / Foliage / Water / Place / Request / World  |
 | `[` `]`, `-` `=`               | Brush size, strength                                        |
 | Ctrl + click                   | Pick the flatten target or water level                      |
 | Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) | Undo / redo                                                 |

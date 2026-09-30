@@ -6,6 +6,7 @@ import { ViewModes } from '../editor/ViewModes';
 import { RequestOverlay } from '../editor/RequestOverlay';
 import { Props } from '../world/Props';
 import { AgentBridge } from './AgentBridge';
+import { WorldSettings } from './WorldSettings';
 import { createAgentHost } from './AgentCommands';
 import { runWorldEdit } from '../editor/agent/runWorldEdit';
 import { profilePerformance } from '../editor/agent/profilePerformance';
@@ -124,6 +125,8 @@ export class Game {
     private playerCamera!: ThirdPersonCamera;
     private editor!: Editor;
     private panel!: EditorPanel;
+    /** World tab: settings saved to the studio, snapshots, templates. */
+    private worldSettings!: WorldSettings;
     private viewModes!: ViewModes;
     private mode: GameMode;
     private timer = new THREE.Timer();
@@ -245,6 +248,13 @@ export class Game {
             unsaved: () => [...this.dirty],
             save: () => this.save(),
             history: () => this.history,
+            historyList: () => this.editor.history.list(),
+            jumpHistory: (position) => {
+                const moved = this.editor.jumpHistory(position);
+                this.editor.notify();
+
+                return moved;
+            },
             undo: () => this.editor.undo(),
             redo: () => this.editor.redo(),
             autoPaint: () => this.editor.autoPaint(),
@@ -876,6 +886,8 @@ export class Game {
                     this.history = { canUndo, canRedo };
                     this.hud.setHistory(canUndo, canRedo);
                     this.bridge.send({ type: 'history', canUndo, canRedo });
+                    // The World tab's history list.
+                    this.panel?.refresh();
                 },
                 onToolGroup: (group) => {
                     this.bridge.send({ type: 'toolGroupChanged', group });
@@ -895,6 +907,23 @@ export class Game {
             },
             settings.editor,
         );
+        this.worldSettings = new WorldSettings({
+            api: this.api,
+            manifest: () => this.manifest,
+            editor: this.editor,
+            setLayers: (layers) => this.setLayers(layers),
+            applyEnvironment: (env) => this.applyEnvironment(env),
+            flash: (message) => this.hud.flash(message),
+            layerSaved: (layer) =>
+                this.bridge.send({ type: 'terrainLayerSaved', layer }),
+            heightRange: () => this.world.heights.minMax(),
+            unsaved: () => [...this.dirty],
+            save: () => this.save(),
+            reload: () => {
+                this.discarding = true;
+                window.location.reload();
+            },
+        });
         this.panel = new EditorPanel(this.editor, {
             autoPaint: () => this.editor.autoPaint(),
             softenMap: () => {
@@ -925,6 +954,7 @@ export class Game {
             deleteRequest: (id) => void this.changeRequest(id, 'delete'),
             showRequest: (id) => this.showRequest(id),
             propModels: () => this.manifest.prop_models ?? [],
+            world: this.worldSettings.host(),
         });
         this.hud.panelSlot.append(this.panel.el);
         this.requestOverlay = new RequestOverlay(() => this.world.heights);
@@ -992,7 +1022,9 @@ export class Game {
                     waterLevelAt: (x, z) => this.world.water.levelAt(x, z),
                     landCoverAt: this.world.landCoverAt,
                 },
-                this.manifest.foliage_types.map((t) => t.id),
+                // A template map grows its own plant kinds (App\Support\MapTemplates).
+                this.manifest.initial_foliage ??
+                    this.manifest.foliage_types.map((t) => t.id),
                 this.manifest.map.id,
             );
             this.markDirty('foliage');
@@ -1982,6 +2014,8 @@ export class Game {
             this.hud.flash('World saved');
             this.bridge.send({ type: 'saveState', state: 'saved' });
             this.bridge.send({ type: 'dirty', dirty: this.dirty.size > 0 });
+            // Automatic snapshot of the user's work (first save, then every few minutes).
+            void this.worldSettings.afterSave();
         } catch (error) {
             for (const channel of channels) {
                 this.dirty.add(channel);

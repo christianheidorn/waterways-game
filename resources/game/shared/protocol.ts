@@ -17,7 +17,9 @@ export type EditorToolGroup =
     | 'foliage'
     | 'water'
     | 'place'
-    | 'request';
+    | 'request'
+    /** World settings (layers, environment), history, snapshots and new maps. */
+    | 'world';
 
 export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 

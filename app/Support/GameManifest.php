@@ -38,6 +38,8 @@ final class GameManifest
             'biomes' => Biome::query()->orderBy('name')->get()->map->toStudioArray()->values()->all(),
             'foliage_types' => FoliageType::query()->with('asset')->orderBy('name')->get()->map->toGameArray()->values()->all(),
             'character' => $this->character->get()?->toGameArray(),
+            // Foliage types scattered on the first load of a template map (null: all types).
+            'initial_foliage' => MapTemplates::initialFoliage($map),
             'assets' => [
                 'heightmap' => $asset('heightmap'),
                 'splatmap' => $asset('splatmap'),
@@ -62,6 +64,13 @@ final class GameManifest
                 'agent' => url("/api/maps/{$map->slug}/agent"),
                 // Build requests for agents (outline + note + images), made in the editor.
                 'agent_requests' => url("/api/maps/{$map->slug}/agent-requests"),
+                // Settings inside the editor (World tab): environment, layer settings, material library,
+                // snapshots (automatic ones after saves) and new maps from templates.
+                'environment' => url("/api/maps/{$map->slug}/environment"),
+                'materials' => url('/api/materials'),
+                'snapshots' => url("/api/maps/{$map->slug}/snapshots"),
+                'map_templates' => url('/api/map-templates'),
+                'create_map' => url('/api/maps'),
             ],
         ];
     }

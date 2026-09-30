@@ -10,6 +10,7 @@ import {
     Droplets,
     ExternalLink,
     Flag,
+    Globe,
     MessageSquarePlus,
     Gamepad2,
     Hammer,
@@ -86,6 +87,7 @@ const TOOL_GROUPS: {
     { value: 'water', label: 'Water', icon: Droplets },
     { value: 'place', label: 'Place', icon: Flag },
     { value: 'request', label: 'Request', icon: MessageSquarePlus },
+    { value: 'world', label: 'World', icon: Globe },
 ];
 
 const formatHour = (v: number) => {

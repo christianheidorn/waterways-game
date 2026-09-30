@@ -9,15 +9,16 @@ use Laravel\Mcp\Server\Attributes\Description;
 use Laravel\Mcp\Server\Attributes\Name;
 
 #[Name('control_editor')]
-#[Description('Drives the open editor. action: "save" writes unsaved terrain, paint, water and foliage edits to the server (edits made in the editor are only kept once saved); "undo" / "redo" steps through the editor history (`steps`, default 1); "set_view_mode" switches the analysis view (`view_mode`); "set_mode" switches between edit and play (`mode`); "auto_paint" re-applies every layer\'s auto-paint rules to the whole map (undoable, unsaved until "save").')]
+#[Description('Drives the open editor. action: "save" writes unsaved terrain, paint, water and foliage edits to the server (edits made in the editor are only kept once saved); "undo" / "redo" steps through the editor history (`steps`, default 1); "history" lists the undo history (every step with its label, oldest first, and `position` = how many are applied, as the History panel of the editor shows it); "history_jump" moves to `position` (0 = before the first listed step), undoing or redoing every step in between; "set_view_mode" switches the analysis view (`view_mode`); "set_mode" switches between edit and play (`mode`); "auto_paint" re-applies every layer\'s auto-paint rules to the whole map (undoable, unsaved until "save").')]
 class ControlEditor extends WaterwaysTool
 {
     public function schema(JsonSchema $schema): array
     {
         return [
             'map' => $this->mapArgument($schema),
-            'action' => $schema->string()->enum(['save', 'undo', 'redo', 'set_view_mode', 'set_mode', 'auto_paint'])->required(),
+            'action' => $schema->string()->enum(['save', 'undo', 'redo', 'history', 'history_jump', 'set_view_mode', 'set_mode', 'auto_paint'])->required(),
             'steps' => $schema->integer()->min(1)->max(100),
+            'position' => $schema->integer()->min(0)->description('history_jump: the number of history steps that stay applied (from "history").'),
             'view_mode' => $schema->string()->enum(['lit', 'lighting', 'layers', 'slope', 'height', 'density', 'wireframe']),
             'mode' => $schema->string()->enum(['edit', 'play']),
         ];
@@ -26,7 +27,8 @@ class ControlEditor extends WaterwaysTool
     protected function run(Request $request): Response
     {
         $data = $request->validate([
-            'action' => ['required', 'in:save,undo,redo,set_view_mode,set_mode,auto_paint'],
+            'action' => ['required', 'in:save,undo,redo,history,history_jump,set_view_mode,set_mode,auto_paint'],
+            'position' => ['required_if:action,history_jump', 'integer', 'min:0'],
             'steps' => ['sometimes', 'integer', 'between:1,100'],
             'view_mode' => ['required_if:action,set_view_mode', 'in:lit,lighting,layers,slope,height,density,wireframe'],
             'mode' => ['required_if:action,set_mode', 'in:edit,play'],

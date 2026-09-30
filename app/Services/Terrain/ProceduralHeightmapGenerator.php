@@ -30,14 +30,19 @@ class ProceduralHeightmapGenerator
      * Terrain plus the water surface grid for its river and lake.
      *
      * @param  (callable(float, string): void)|null  $progress  fraction 0-1 and a message
+     * @param  (callable(HeightGrid): void)|null  $landforms  reshapes the base terrain before water is carved (map templates)
      */
-    public function proceduralWithWater(int $resolution, float $size, int $seed, ?callable $progress = null, ?TerrainShaping $shaping = null): WaterSurfaceResult
+    public function proceduralWithWater(int $resolution, float $size, int $seed, ?callable $progress = null, ?TerrainShaping $shaping = null, ?callable $landforms = null): WaterSurfaceResult
     {
         $progress ??= static fn () => null;
         $shaping ??= new TerrainShaping;
         $progress(0.0, 'Sculpting hills and mountains');
 
         $grid = $this->baseTerrain($resolution, $size, $seed, $progress);
+
+        if ($landforms !== null) {
+            $landforms($grid);
+        }
 
         $progress(0.6, 'Carving river valley');
         $river = $this->carveRiver($grid, $size, $seed);

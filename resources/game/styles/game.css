@@ -765,6 +765,27 @@ body.ww-body {
     background-blend-mode: multiply;
 }
 
+.ww-prop-thumb {
+    height: 78px;
+    background-color: oklch(0.3 0.01 250 / 0.6);
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-blend-mode: normal;
+}
+
+.ww-prop-thumb.is-loading {
+    animation: ww-thumb-pulse 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes ww-thumb-pulse {
+    from {
+        opacity: 0.45;
+    }
+    to {
+        opacity: 0.9;
+    }
+}
+
 .ww-material-slot {
     position: absolute;
     top: 5px;

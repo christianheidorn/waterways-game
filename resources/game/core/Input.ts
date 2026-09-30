@@ -28,6 +28,14 @@ export class Input {
                 return;
             }
 
+            // Editor shortcuts, not the browser's (save page, bookmark).
+            if (
+                (ev.ctrlKey || ev.metaKey) &&
+                ['KeyS', 'KeyZ', 'KeyY', 'KeyD'].includes(ev.code)
+            ) {
+                ev.preventDefault();
+            }
+
             if (!this.keys.has(ev.code)) {
                 this.pressed.add(ev.code);
             }

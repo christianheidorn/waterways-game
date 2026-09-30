@@ -9,7 +9,7 @@ import type {
     TerrainLayer,
 } from '../shared/types';
 import type { Foliage } from '../world/Foliage';
-import type { Props } from '../world/Props';
+import { Props } from '../world/Props';
 import type { GridRect, Heightfield } from '../world/Heightfield';
 import type { SplatMap } from '../world/SplatMap';
 import type { Terrain } from '../world/Terrain';
@@ -118,6 +118,9 @@ export class EditorState {
     propYaw = 0;
     propRandomYaw = true;
     propScale = 1;
+    /** Props: place new ones, or select placed ones to move / turn / resize. */
+    propMode: 'place' | 'select' = 'place';
+    selectedProp: string | null = null;
     requestNote = '';
 
     get brush(): BrushSettings {
@@ -140,6 +143,20 @@ export class Editor {
     private rampMarker: THREE.Mesh;
     private spawnMarker: THREE.Group;
     private raycaster = new THREE.Raycaster();
+    /** Props: see-through preview of the next placement, and the box around the selected prop. */
+    private propGhost: THREE.Object3D | null = null;
+    private propGhostModel: number | null = null;
+    private propGhostLoading: number | null = null;
+    /** Rotation (rad) of the next placement with random rotation, pre-rolled so the preview matches. */
+    private nextPropYaw = Math.random() * Math.PI * 2;
+    private selectionBox: THREE.LineSegments;
+    private propDrag: {
+        id: string;
+        dx: number;
+        dz: number;
+        moved: boolean;
+    } | null = null;
+    private propEditTimer: number | null = null;
     private pendingHeightRect: GridRect | null = null;
     private pendingWaterRect: GridRect | null = null;
     private rebuildTimer = 0;
@@ -238,6 +255,20 @@ export class Editor {
 
         this.spawnMarker = createSpawnMarker();
         scene.add(this.spawnMarker);
+
+        this.selectionBox = new THREE.LineSegments(
+            new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+            new THREE.LineBasicMaterial({
+                color: 0x3fd8ff,
+                depthTest: false,
+                transparent: true,
+                opacity: 0.9,
+            }),
+        );
+        this.selectionBox.matrixAutoUpdate = false;
+        this.selectionBox.renderOrder = 11;
+        this.selectionBox.visible = false;
+        scene.add(this.selectionBox);
         this.updateSpawnMarker();
 
         for (const type of world.foliageTypes.slice(0, 1)) {
@@ -273,6 +304,11 @@ export class Editor {
         if (!active) {
             this.endStroke();
             this.world.material.hideBrush();
+            this.selectionBox.visible = false;
+
+            if (this.propGhost) {
+                this.propGhost.visible = false;
+            }
         }
     }
 
@@ -469,6 +505,7 @@ export class Editor {
         }
 
         this.updateBrushOverlay(overUi || rmb);
+        this.updatePropOverlays(overUi || rmb);
 
         this.rebuildTimer -= dt;
 
@@ -482,7 +519,8 @@ export class Editor {
     }
 
     dispose(): void {
-        this.scene.remove(this.rampMarker, this.spawnMarker);
+        this.scene.remove(this.rampMarker, this.spawnMarker, this.selectionBox);
+        this.setPropGhost(null, null);
         this.rampMarker.geometry.dispose();
         (this.rampMarker.material as THREE.Material).dispose();
         this.listeners.clear();
@@ -665,9 +703,52 @@ export class Editor {
             this.callbacks.requestPlay(!input.alt);
         }
 
+        if (this.state.group === 'place' && this.state.placeTool === 'props') {
+            this.propShortcuts();
+        }
+
         if (input.wasPressed('Escape')) {
             this.rampStart = null;
             this.rampMarker.visible = false;
+        }
+    }
+
+    /** Props: R / Shift+R turn by 15°, Delete removes, Ctrl+D duplicates, Esc deselects. */
+    private propShortcuts(): void {
+        const input = this.input;
+        const s = this.state;
+        const step = input.shift ? -15 : 15;
+
+        if (input.wasPressed('KeyR') && !input.ctrl) {
+            if (s.propMode === 'select') {
+                this.rotateSelectedProp(step);
+            } else {
+                if (s.propRandomYaw) {
+                    s.propYaw = Math.round(
+                        THREE.MathUtils.radToDeg(this.nextPropYaw),
+                    );
+                    s.propRandomYaw = false;
+                }
+
+                s.propYaw = (((s.propYaw + step) % 360) + 360) % 360;
+                this.notify();
+            }
+        }
+
+        if (s.propMode !== 'select' || !s.selectedProp) {
+            return;
+        }
+
+        if (input.wasPressed('Delete') || input.wasPressed('Backspace')) {
+            this.deleteSelectedProp();
+        }
+
+        if (input.ctrl && input.wasPressed('KeyD')) {
+            this.duplicateSelectedProp();
+        }
+
+        if (input.wasPressed('Escape')) {
+            this.selectProp(null);
         }
     }
 
@@ -759,10 +840,15 @@ export class Editor {
         }
 
         if (s.group === 'place' && s.placeTool === 'props') {
-            this.placeProp(this.input.shift);
-            // One prop per click: wait for the button to be released.
+            if (s.propMode === 'select') {
+                this.grabProp();
+            } else {
+                this.placeProp(this.input.shift);
+                // One prop per click: wait for the button to be released.
+                this.history.beginStroke('noop');
+            }
+
             this.stroking = true;
-            this.history.beginStroke('noop');
 
             return;
         }
@@ -872,10 +958,23 @@ export class Editor {
         this.stroking = false;
         this.history.endStroke();
         this.flushRebuilds();
+
+        if (this.propDrag?.moved) {
+            this.callbacks.markDirty('props');
+        }
+
+        this.propDrag = null;
     }
 
     private applyStroke(dt: number): void {
         const s = this.state;
+
+        if (s.group === 'place') {
+            this.dragProp();
+
+            return;
+        }
+
         const b = s.brush;
         const { x, z } = this.cursor;
         const hf = this.world.heights;
@@ -1171,7 +1270,7 @@ export class Editor {
                 x: this.cursor.x,
                 z: this.cursor.z,
                 yaw: s.propRandomYaw
-                    ? Math.random() * Math.PI * 2
+                    ? this.nextPropYaw
                     : THREE.MathUtils.degToRad(s.propYaw),
                 scale: s.propScale,
                 offset: 0,
@@ -1180,6 +1279,247 @@ export class Editor {
 
         this.history.endStroke();
         this.callbacks.markDirty('props');
+        this.nextPropYaw = Math.random() * Math.PI * 2;
+    }
+
+    // ---------------------------------------------------------------- props: select and edit
+
+    /** Selects the prop under the cursor (or clears the selection) and starts dragging it. */
+    private grabProp(): void {
+        const s = this.state;
+        this.history.beginStroke('Move prop');
+        const hit = this.world.props.pick(this.raycaster.ray);
+        s.selectedProp = hit?.id ?? null;
+        this.propDrag = hit
+            ? {
+                  id: hit.id,
+                  dx: hit.x - this.cursor.x,
+                  dz: hit.z - this.cursor.z,
+                  moved: false,
+              }
+            : null;
+        this.notify();
+    }
+
+    private dragProp(): void {
+        const drag = this.propDrag;
+
+        if (!drag) {
+            return;
+        }
+
+        const p = this.world.props.get(drag.id);
+        const x = this.cursor.x + drag.dx;
+        const z = this.cursor.z + drag.dz;
+
+        if (!p || (Math.abs(p.x - x) < 0.01 && Math.abs(p.z - z) < 0.01)) {
+            return;
+        }
+
+        if (!drag.moved) {
+            // Recorded on the first real move, so a plain click leaves no undo step.
+            this.history.touchCustom('props', 'all');
+            drag.moved = true;
+        }
+
+        this.world.props.update(drag.id, { x, z });
+    }
+
+    /** The selected placed prop, if it still exists (undo can remove it). */
+    get selectedProp() {
+        const id = this.state.selectedProp;
+
+        return id ? this.world.props.get(id) : null;
+    }
+
+    selectProp(id: string | null): void {
+        this.state.selectedProp = id;
+        this.notify();
+    }
+
+    /**
+     * Changes the selected prop. Consecutive changes (dragging a slider) merge into one undo step
+     * unless `step` asks for a step of its own (keyboard shortcuts).
+     */
+    editSelectedProp(
+        patch: { yaw?: number; scale?: number; offset?: number },
+        step = false,
+    ): void {
+        const p = this.selectedProp;
+
+        if (!p) {
+            return;
+        }
+
+        if (step || this.propEditTimer === null || !this.history.recording) {
+            this.history.beginStroke('Edit prop');
+            this.history.touchCustom('props', 'all');
+        }
+
+        if (this.propEditTimer !== null) {
+            window.clearTimeout(this.propEditTimer);
+        }
+
+        this.world.props.update(p.id, patch);
+        this.callbacks.markDirty('props');
+
+        if (step) {
+            this.history.endStroke();
+            this.propEditTimer = null;
+        } else {
+            this.propEditTimer = window.setTimeout(() => {
+                this.propEditTimer = null;
+                this.history.endStroke();
+            }, 500);
+        }
+    }
+
+    rotateSelectedProp(degrees: number): void {
+        const p = this.selectedProp;
+
+        if (p) {
+            this.editSelectedProp(
+                {
+                    yaw: normalizeAngle(
+                        p.yaw + THREE.MathUtils.degToRad(degrees),
+                    ),
+                },
+                true,
+            );
+            this.notify();
+        }
+    }
+
+    deleteSelectedProp(): void {
+        const p = this.selectedProp;
+
+        if (!p) {
+            return;
+        }
+
+        this.history.beginStroke('Remove prop');
+        this.history.touchCustom('props', 'all');
+        this.world.props.remove([p.id]);
+        this.history.endStroke();
+        this.callbacks.markDirty('props');
+        this.selectProp(null);
+    }
+
+    /** Copies the selected prop next to it and selects the copy. */
+    duplicateSelectedProp(): void {
+        const p = this.selectedProp;
+
+        if (!p) {
+            return;
+        }
+
+        const step = Math.max(
+            2,
+            this.world.props.modelRadius(p.model, p.scale) * 1.2,
+        );
+        this.history.beginStroke('Duplicate prop');
+        this.history.touchCustom('props', 'all');
+        const copy = this.world.props.add({
+            model: p.model,
+            x: p.x + step,
+            z: p.z,
+            yaw: p.yaw,
+            scale: p.scale,
+            offset: p.offset,
+        });
+        this.history.endStroke();
+        this.callbacks.markDirty('props');
+        this.selectProp(copy.id);
+    }
+
+    /** Placement preview (Place mode) and the selection box (Select mode). */
+    private updatePropOverlays(hidden: boolean): void {
+        const s = this.state;
+        const propsTool =
+            this.active && s.group === 'place' && s.placeTool === 'props';
+        const placing =
+            propsTool && s.propMode === 'place' && s.propModel !== null;
+
+        if (s.selectedProp && !this.world.props.get(s.selectedProp)) {
+            this.selectProp(null);
+        }
+
+        const bounds =
+            propsTool && s.propMode === 'select' && s.selectedProp
+                ? this.world.props.boundsMatrix(s.selectedProp)
+                : null;
+        this.selectionBox.visible = bounds !== null;
+
+        if (bounds) {
+            this.selectionBox.matrix.copy(bounds);
+            this.selectionBox.matrixWorld.copy(bounds);
+        }
+
+        if (!placing) {
+            if (this.propGhost) {
+                this.propGhost.visible = false;
+            }
+
+            return;
+        }
+
+        if (
+            this.propGhostModel !== s.propModel &&
+            this.propGhostLoading !== s.propModel
+        ) {
+            const model = s.propModel!;
+            this.propGhostLoading = model;
+            void this.world.props.preview(model).then((object) => {
+                if (this.propGhostLoading !== model) {
+                    Props.disposePreview(object);
+
+                    return;
+                }
+
+                this.propGhostLoading = null;
+                this.setPropGhost(object, model);
+            });
+        }
+
+        const ghost = this.propGhost;
+
+        if (!ghost) {
+            return;
+        }
+
+        ghost.visible = !hidden && this.cursorValid && !this.input.shift;
+
+        if (ghost.visible) {
+            const radius =
+                ((ghost.userData.radius as number) ?? 1) * s.propScale;
+            ghost.position.set(
+                this.cursor.x,
+                this.world.props.groundAt(this.cursor.x, this.cursor.z, radius),
+                this.cursor.z,
+            );
+            ghost.rotation.y = s.propRandomYaw
+                ? this.nextPropYaw
+                : THREE.MathUtils.degToRad(s.propYaw);
+            ghost.scale.setScalar(s.propScale);
+        }
+    }
+
+    private setPropGhost(
+        object: THREE.Object3D | null,
+        model: number | null,
+    ): void {
+        if (this.propGhost) {
+            this.scene.remove(this.propGhost);
+            Props.disposePreview(this.propGhost);
+        }
+
+        this.propGhost = object;
+        this.propGhostModel = model;
+
+        if (object) {
+            object.visible = false;
+            this.scene.add(object);
+        }
     }
 
     private placeSpawn(): void {
@@ -1325,4 +1665,10 @@ function createSpawnMarker(): THREE.Group {
     group.add(pole, flag, ring, arrow);
 
     return group;
+}
+
+function normalizeAngle(rad: number): number {
+    const full = Math.PI * 2;
+
+    return ((rad % full) + full) % full;
 }

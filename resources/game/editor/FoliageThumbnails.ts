@@ -26,7 +26,11 @@ export class FoliageThumbnails {
     version = 0;
 
     private readonly entries = new Map<string, Entry>();
-    private readonly queue: { key: string; type: FoliageType }[] = [];
+    private readonly queue: {
+        key: string;
+        type?: FoliageType;
+        url?: string;
+    }[] = [];
     private renderer: THREE.WebGLRenderer | null = null;
     private working = false;
     private idleTimer: number | null = null;
@@ -43,6 +47,22 @@ export class FoliageThumbnails {
 
         this.entries.set(key, { url: null, failed: false });
         this.queue.push({ key, type });
+        this.pump();
+
+        return null;
+    }
+
+    /** Data URL of a rendered glTF model (prop library previews), or null while it renders. */
+    getModel(url: string): string | null {
+        const key = `model:${url}`;
+        const entry = this.entries.get(key);
+
+        if (entry) {
+            return entry.url;
+        }
+
+        this.entries.set(key, { url: null, failed: false });
+        this.queue.push({ key, url });
         this.pump();
 
         return null;
@@ -71,7 +91,7 @@ export class FoliageThumbnails {
         this.cancelRelease();
         // One render per frame keeps the editor responsive while a long list fills in.
         requestAnimationFrame(() => {
-            void this.render(job.type)
+            void (job.type ? this.render(job.type) : this.renderModel(job.url!))
                 .then((url) => {
                     this.entries.set(job.key, { url, failed: false });
                 })
@@ -182,6 +202,39 @@ export class FoliageThumbnails {
 
         try {
             return this.draw(root);
+        } finally {
+            for (const d of disposables) {
+                d.dispose();
+            }
+        }
+    }
+
+    private async renderModel(url: string): Promise<string> {
+        const gltf = await new GLTFLoader().loadAsync(url);
+        const disposables: { dispose(): void }[] = [];
+
+        gltf.scene.traverse((obj) => {
+            const mesh = obj as THREE.Mesh;
+
+            if (mesh.isMesh) {
+                disposables.push(mesh.geometry);
+
+                for (const m of Array.isArray(mesh.material)
+                    ? mesh.material
+                    : [mesh.material]) {
+                    disposables.push(m);
+
+                    for (const value of Object.values(m)) {
+                        if ((value as THREE.Texture)?.isTexture) {
+                            disposables.push(value as THREE.Texture);
+                        }
+                    }
+                }
+            }
+        });
+
+        try {
+            return this.draw(gltf.scene);
         } finally {
             for (const d of disposables) {
                 d.dispose();

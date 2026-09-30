@@ -1009,6 +1009,7 @@ export class Game {
         this.world.water.update(dt);
         this.world.wetness.update(dt);
         this.world.foliage.update(dt, this.camera);
+        this.world.props.updateView(this.camera);
 
         const waterLevel = this.world.water.levelAt(
             this.camera.position.x,

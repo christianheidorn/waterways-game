@@ -1,5 +1,9 @@
 import {
     ArrowUpDown,
+    Copy,
+    MousePointer2,
+    Plus,
+    Trash2,
     Blend,
     Box,
     Droplets,
@@ -686,13 +690,44 @@ export class EditorPanel {
     private propsTool(): HTMLElement {
         const s = this.editor.state;
         const library = this.actions.propModels();
-        const grid = h('div', { class: 'ww-material-grid' });
+        const wrap = h('div', {});
 
         if (s.propModel === null && library[0]) {
             s.propModel = library[0].id;
         }
 
+        const mode = segmented(
+            [
+                { value: 'place', label: 'Place', icon: Plus },
+                {
+                    value: 'select',
+                    label: 'Select & edit',
+                    icon: MousePointer2,
+                },
+            ],
+            s.propMode,
+            (v) => {
+                s.propMode = v;
+                this.renderedKey = '';
+                this.editor.notify();
+            },
+        );
+        wrap.append(h('div', { class: 'ww-section' }, mode.el));
+
+        if (s.propMode === 'select') {
+            wrap.append(this.selectedPropSection());
+
+            return wrap;
+        }
+
+        const grid = h('div', { class: 'ww-material-grid' });
+
         for (const model of library) {
+            const thumb =
+                model.thumbnail_url ??
+                (model.model_url
+                    ? this.foliageThumbs.getModel(model.model_url)
+                    : null);
             grid.append(
                 h(
                     'button',
@@ -707,15 +742,10 @@ export class EditorPanel {
                         },
                     },
                     h('span', {
-                        class: 'ww-material-thumb',
-                        style: model.thumbnail_url
-                            ? {
-                                  backgroundImage: `url("${model.thumbnail_url}")`,
-                              }
-                            : {
-                                  background:
-                                      'linear-gradient(135deg, #6b5b4b, #9a8f86)',
-                              },
+                        class: `ww-material-thumb ww-prop-thumb ${thumb ? '' : 'is-loading'}`,
+                        style: thumb
+                            ? { backgroundImage: `url("${thumb}")` }
+                            : {},
                     }),
                     h(
                         'span',
@@ -733,20 +763,30 @@ export class EditorPanel {
             );
         }
 
-        const random = toggle('Random rotation', s.propRandomYaw, (v) => {
-            s.propRandomYaw = v;
-            this.renderedKey = '';
-            this.editor.notify();
-        });
         const yaw = slider({
             label: 'Rotation',
             min: 0,
-            max: 359,
-            step: 1,
+            max: 355,
+            step: 5,
             unit: '°',
             value: s.propYaw,
-            onInput: (v) => (s.propYaw = v),
+            onInput: (v) => {
+                s.propYaw = v;
+
+                if (s.propRandomYaw) {
+                    s.propRandomYaw = false;
+                    random.set(false);
+                }
+            },
         });
+        const random = toggle(
+            'Random rotation for each prop',
+            s.propRandomYaw,
+            (v) => {
+                s.propRandomYaw = v;
+                this.editor.notify();
+            },
+        );
         const scale = slider({
             label: 'Size',
             min: 0.25,
@@ -757,23 +797,117 @@ export class EditorPanel {
             format: (v) => `${v.toFixed(2)}×`,
             onInput: (v) => (s.propScale = v),
         });
+        this.refreshers.push(() => {
+            yaw.set(s.propYaw);
+            random.set(s.propRandomYaw);
+        });
+
+        wrap.append(
+            section(
+                'Props',
+                library.length
+                    ? grid
+                    : h(
+                          'p',
+                          { class: 'ww-muted' },
+                          'No props in the library yet. Claude can import models (e.g. from Blender) with import_model.',
+                      ),
+                yaw.el,
+                random.el,
+                scale.el,
+                h(
+                    'p',
+                    { class: 'ww-muted' },
+                    'Click to place (the preview shows where) · R / Shift+R turns by 15° · Shift+click removes the nearest prop · Ctrl+Z undoes',
+                ),
+            ),
+        );
+
+        return wrap;
+    }
+
+    /** Select & edit: the selected placed prop's rotation, size and height, plus duplicate / delete. */
+    private selectedPropSection(): HTMLElement {
+        const p = this.editor.selectedProp;
+
+        if (!p) {
+            return section(
+                'Select & edit',
+                h(
+                    'p',
+                    { class: 'ww-muted' },
+                    'Click a placed prop to select it. Drag it to move it; then turn, resize or remove it here.',
+                ),
+            );
+        }
+
+        const model = this.actions.propModels().find((m) => m.id === p.model);
+        const deg = (rad: number) =>
+            Math.round(((rad * 180) / Math.PI + 360) % 360);
+        const yaw = slider({
+            label: 'Rotation',
+            min: 0,
+            max: 359,
+            step: 1,
+            unit: '°',
+            value: deg(p.yaw),
+            onInput: (v) =>
+                this.editor.editSelectedProp({ yaw: (v * Math.PI) / 180 }),
+        });
+        const scale = slider({
+            label: 'Size',
+            min: 0.1,
+            max: 8,
+            step: 0.01,
+            log: true,
+            value: p.scale,
+            format: (v) => `${v.toFixed(2)}×`,
+            onInput: (v) => this.editor.editSelectedProp({ scale: v }),
+        });
+        const offset = slider({
+            label: 'Height above ground',
+            min: -10,
+            max: 10,
+            step: 0.05,
+            unit: ' m',
+            value: p.offset,
+            onInput: (v) => this.editor.editSelectedProp({ offset: v }),
+        });
+        this.refreshers.push(() => {
+            const now = this.editor.selectedProp;
+
+            if (now?.id === p.id) {
+                yaw.set(deg(now.yaw));
+                scale.set(now.scale);
+                offset.set(now.offset);
+            }
+        });
 
         return section(
-            'Props',
-            library.length
-                ? grid
-                : h(
-                      'p',
-                      { class: 'ww-muted' },
-                      'No props in the library yet. Claude can import models (e.g. from Blender) with import_model.',
-                  ),
-            random.el,
-            s.propRandomYaw ? null : yaw.el,
+            model?.name ?? 'Prop',
+            yaw.el,
+            h(
+                'div',
+                { class: 'ww-row' },
+                button('−15°', () => this.editor.rotateSelectedProp(-15)),
+                button('+15°', () => this.editor.rotateSelectedProp(15)),
+            ),
             scale.el,
+            offset.el,
+            h(
+                'div',
+                { class: 'ww-row' },
+                button('Duplicate', () => this.editor.duplicateSelectedProp(), {
+                    icon: Copy,
+                }),
+                button('Delete', () => this.editor.deleteSelectedProp(), {
+                    icon: Trash2,
+                }),
+            ),
             h(
                 'p',
                 { class: 'ww-muted' },
-                'Click to place · Shift+click removes the nearest prop · Ctrl+Z undoes',
+                'Drag to move · R / Shift+R turns by 15° · Delete removes · Ctrl+D duplicates · Esc deselects · Ctrl+Z undoes',
             ),
         );
     }

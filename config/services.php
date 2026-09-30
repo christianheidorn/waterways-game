@@ -46,6 +46,23 @@ return [
     // (the local stdio server, `php artisan mcp:start waterways`, needs none).
     'mcp' => [
         'token' => env('WATERWAYS_MCP_TOKEN'),
+
+        // Hidden editors the MCP server starts itself (open_editor; App\Mcp\HeadlessEditor).
+        'headless' => [
+            // Chrome / Chromium / Edge / Brave binary; found automatically when empty.
+            'browser' => env('WATERWAYS_BROWSER_PATH'),
+            // Extra command-line flags, space separated (e.g. SwiftShader flags on machines without a GPU).
+            'flags' => env('WATERWAYS_BROWSER_FLAGS', ''),
+            // Game page to open ({map} is replaced by the map slug); defaults to the studio's game page.
+            'url' => env('WATERWAYS_HEADLESS_URL'),
+            'window' => env('WATERWAYS_HEADLESS_WINDOW', '1600,900'),
+            // Seconds open_editor waits for the editor to load.
+            'start_timeout' => (int) env('WATERWAYS_HEADLESS_START_TIMEOUT', 120),
+            // A hidden editor that ran no command for this long is closed.
+            'idle_minutes' => (int) env('WATERWAYS_HEADLESS_IDLE_MINUTES', 15),
+            // Live tools start a hidden editor by themselves when the map is not open.
+            'auto' => (bool) env('WATERWAYS_AUTO_HEADLESS', false),
+        ],
     ],
 
     'openrouter' => [

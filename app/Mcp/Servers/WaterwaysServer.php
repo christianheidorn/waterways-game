@@ -5,6 +5,7 @@ namespace App\Mcp\Servers;
 use App\Mcp\Tools\AddTerrainLayer;
 use App\Mcp\Tools\ApplyBiome;
 use App\Mcp\Tools\BakeFoliageAsset;
+use App\Mcp\Tools\CloseEditor;
 use App\Mcp\Tools\ControlEditor;
 use App\Mcp\Tools\CreateMap;
 use App\Mcp\Tools\DeleteTerrainLayer;
@@ -28,6 +29,7 @@ use App\Mcp\Tools\ListPropModels;
 use App\Mcp\Tools\ListProps;
 use App\Mcp\Tools\ListRequests;
 use App\Mcp\Tools\ManageSnapshots;
+use App\Mcp\Tools\OpenEditor;
 use App\Mcp\Tools\PaintTerrain;
 use App\Mcp\Tools\PlaceProps;
 use App\Mcp\Tools\RegenerateTerrain;
@@ -61,7 +63,7 @@ Concepts
 - Environment (per map): weather, time of day, sun, clouds, fog, wind, water look. Game settings (global): player, graphics, editor.
 
 Working live
-- World edits, screenshots and editor control need the map open in the user's editor (Studio → Maps → map → Open Studio). get_project_overview shows which map is open. If none is, ask the user to open it; settings and library changes work without it and appear live when it is open.
+- World edits, screenshots and editor control need the map open in the user's editor (Studio → Maps → map → Open Studio). get_project_overview shows which map is open. If none is, start a hidden editor with open_editor (runs unattended; close_editor when done) or ask the user to open it; settings and library changes work without it and appear live when it is open.
 - Edits made inside the editor stay unsaved until control_editor action "save". Server-side changes (layers, environment, biomes, foliage types, settings) are saved immediately.
 - Look before and after you change things: take_screenshot (views overview / top_down / a position, and analysis view modes: layers, slope, height, density, lighting, wireframe).
 
@@ -133,5 +135,7 @@ class WaterwaysServer extends Server
         GenerateMaterial::class,
         GenerateModel::class,
         GetAssetStatus::class,
+        OpenEditor::class,
+        CloseEditor::class,
     ];
 }

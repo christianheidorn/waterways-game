@@ -60,6 +60,41 @@ Changes to settings and libraries work without an open editor, and appear live w
   (`control_editor` action `save`), just like your own edits.
 - If two tabs have the same map open, each command runs in exactly one of them.
 
+## Hidden editors (unattended work)
+
+When nobody has the map open, an agent can start its own hidden editor with `open_editor`: the server runs a
+headless Chrome-family browser on this machine that shows the map's editor (the game page in edit mode with
+`?agent=1`). Agents can then build and take screenshots unattended, for example overnight. `close_editor` stops it.
+
+- **Browser:** Google Chrome, Chromium, Microsoft Edge or Brave. The server finds it by itself (macOS apps in
+  `/Applications`, then `google-chrome`, `chromium`, â€¦ on the PATH). Set `WATERWAYS_BROWSER_PATH` in `.env` to use
+  another binary. On a Mac, headless Chrome renders with Metal and WebGPU works as in a normal window. If the editor
+  falls back to WebGL or shows no WebGPU, add `WATERWAYS_BROWSER_FLAGS="--enable-unsafe-webgpu"`.
+- **The studio must be reachable** at `APP_URL` (for example `http://waterways-game.test` with Herd, or the
+  `composer dev` address), because the hidden browser loads the game page from there. `WATERWAYS_HEADLESS_URL`
+  overrides the page (`{map}` is replaced by the map slug).
+- **One editor per map.** `open_editor` uses an editor that is already open (yours or a hidden one) and never
+  starts a second one. If you open a map while a hidden editor works on it, the hidden one hands over: agent
+  commands go to your tab, the hidden editor saves its unsaved edits and closes. Reload your tab if it was opened
+  before that save, so you see the agent's last edits.
+- **Idle shutdown:** a hidden editor that ran no command for `WATERWAYS_HEADLESS_IDLE_MINUTES` (default 15) saves
+  and closes. This is checked on the hidden editor's own polls, on every tool call and, if the Laravel scheduler
+  runs (`php artisan schedule:work`), every minute.
+- `php artisan waterways:headless` lists hidden editors; `waterways:headless stop [--map=slug]` stops them (unsaved
+  edits in them are lost), `stop --idle` closes only idle ones like the scheduler.
+- The browser runs detached (it keeps running when the MCP server exits), with its own profile in
+  `storage/app/headless/` and a log in `storage/logs/headless-<map>.log`.
+
+| Variable                           | Default         | Meaning                                                                                 |
+| ---------------------------------- | --------------- | --------------------------------------------------------------------------------------- |
+| `WATERWAYS_BROWSER_PATH`           | found by itself | Browser binary                                                                          |
+| `WATERWAYS_BROWSER_FLAGS`          | none            | Extra browser flags, space separated (e.g. SwiftShader flags on machines without a GPU) |
+| `WATERWAYS_HEADLESS_URL`           | game page       | Page to open, `{map}` = map slug                                                        |
+| `WATERWAYS_HEADLESS_WINDOW`        | `1600,900`      | Window size (screenshots)                                                               |
+| `WATERWAYS_HEADLESS_START_TIMEOUT` | `120`           | Seconds `open_editor` waits for the editor to load                                      |
+| `WATERWAYS_HEADLESS_IDLE_MINUTES`  | `15`            | Idle minutes before a hidden editor closes                                              |
+| `WATERWAYS_AUTO_HEADLESS`          | `false`         | Live tools start a hidden editor by themselves when the map is not open                 |
+
 ## Safety
 
 - **Local only.** The stdio server is a process on your machine. The HTTP endpoint needs a token.
@@ -80,6 +115,7 @@ Changes to settings and libraries work without an open editor, and appear live w
 | `get_map`                                                           | Map settings, coordinate system, environment, the 8 layer slots (materials, auto-paint rules, ground cover), terrain statistics (height range, layer coverage, water), saved foliage counts, editor state                                                                                                      |
 | `get_settings`                                                      | Fields (type, range, options, description) and current values of `environment` (per map), `player`, `graphics` or `editor`                                                                                                                                                                                     |
 | `list_foliage_types`, `list_biomes`, `list_materials`               | The libraries                                                                                                                                                                                                                                                                                                  |
+| `open_editor`, `close_editor`                                       | Start a hidden (headless) editor for a map when none is open, and close it again. See [Hidden editors](#hidden-editors-unattended-work)                                                                                                                                                                        |
 | `get_editor_state`                                                  | Live: mode, camera, view mode, selected tool, unsaved changes, undo/redo, fps and draw calls                                                                                                                                                                                                                   |
 | `take_screenshot`                                                   | Live: renders the map from the current view, an `overview`, a `top_down` view (north up), the player start, or any position and target, optionally in an analysis view (layers, slope, height, foliage density, lighting only, wireframe). Returns the image and puts your camera back afterwards              |
 | `set_camera`                                                        | Live: moves your editor camera, for example to show you something                                                                                                                                                                                                                                              |
@@ -173,6 +209,10 @@ reach the agent; without a key, the tools say which one to add under Settings â†
     - It runs them (`resources/game/core/AgentCommands.ts`) and posts results to `/agent/commands/{id}`.
     - Each poll also records the session and a little state in `agent_sessions`.
     - The MCP process and the web server share only the database, so no websockets or extra services are needed.
+- **Hidden editors** (`App\Mcp\HeadlessEditor`, table `headless_browsers`): starts the browser through
+  `App\Mcp\Headless\BrowserLauncher` (a detached background process), tracks pid, map and last use, and closes it.
+  The page reports `headless: true` in its poll state; `EditorBridge::poll` then lets it step aside for the user's
+  tab (it only runs commands addressed to it, i.e. its final save).
 - **Snapshots** (`App\Mcp\MapSnapshots`, table `map_snapshots`): stored assets are copied to
   `storage/app/private/maps/{id}/snapshots/{snapshot}`, and layers and settings are kept as JSON.
 - **World edits:** the engine side is in `resources/game/editor/agent`.
@@ -205,6 +245,6 @@ reach the agent; without a key, the tools say which one to add under Settings â†
 | **2. World building**    | Terrain, water, paint and foliage operations on shapes (circles, rectangles, outlines, paths), top-down map images with coordinate grids, terrain sampling                                                                                                  | **Done** |
 | **3. Claude requests**   | An editor tool to outline an area, attach a reference image and a note. Agents list open requests with world coordinates and a screenshot, build them, and mark them done with before / after images for review                                             | **Done** |
 | **4. Props and assets**  | A props system in the game (placing models with snapping and rotation, later collision), GLB import (e.g. from Blender MCP) as props or foliage types, image and texture generation through the project's OpenRouter key, Meshy generation, placement tools | **Done** |
-| **5. Headless sessions** | The server starts its own hidden editor when none is open, so agents can build and render unattended                                                                                                                                                        | Planned  |
+| **5. Headless sessions** | The server starts its own hidden editor when none is open, so agents can build and render unattended                                                                                                                                                        | **Done** |
 
 Not yet: collision for props, prop thumbnails, .gltf props (convert to .glb first).

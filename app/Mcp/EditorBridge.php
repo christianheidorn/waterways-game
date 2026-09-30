@@ -52,13 +52,20 @@ class EditorBridge
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      *
-     * @throws ToolError when no editor is open or the command fails / times out
+     * @throws ToolError when no editor is open (and none may be started) or the command fails / times out
      */
     public function run(Map $map, string $type, array $payload = [], int $timeout = 30): array
     {
         if ($this->session($map) === null) {
-            throw new ToolError($this->notOpenMessage($map));
+            if (! config('services.mcp.headless.auto')) {
+                throw new ToolError($this->notOpenMessage($map));
+            }
+
+            // WATERWAYS_AUTO_HEADLESS: start a hidden editor instead of failing.
+            $this->headless()->open($map);
         }
+
+        $this->headless()->touch($map);
 
         $command = AgentCommand::query()->create([
             'map_id' => $map->id,
@@ -77,6 +84,7 @@ class EditorBridge
                 $result = json_decode($command->result ?? 'null', true);
                 $error = $command->error;
                 $command->delete();
+                $this->headless()->touch($map);
 
                 if ($error !== null || $command->status === 'failed') {
                     throw new ToolError($error ?: "The editor could not run {$type}.");
@@ -134,6 +142,14 @@ class EditorBridge
             ['map_id' => $map->id, 'mode' => $mode, 'state' => $state, 'last_seen_at' => Carbon::now()],
         );
 
+        // A hidden editor (HeadlessEditor) steps aside when the user opens the same map or it sat
+        // idle: it then only runs commands addressed to it (its final save) until it is closed.
+        $headless = ($state['headless'] ?? false) === true ? $this->headless()->onPoll($map) : 'serve';
+
+        if ($headless === 'closed') {
+            return [];
+        }
+
         AgentCommand::query()
             ->where('status', 'pending')
             ->where('created_at', '<', Carbon::now()->subSeconds(self::STALE_COMMAND))
@@ -142,6 +158,12 @@ class EditorBridge
         $commands = AgentCommand::query()
             ->where('map_id', $map->id)
             ->where('status', 'pending')
+            // Commands can be addressed to one session (session_id set when queued).
+            ->when(
+                $headless === 'yield',
+                fn ($q) => $q->where('session_id', $sessionId),
+                fn ($q) => $q->where(fn ($q) => $q->whereNull('session_id')->orWhere('session_id', $sessionId)),
+            )
             ->orderBy('id')
             ->limit(10)
             ->get();
@@ -187,7 +209,13 @@ class EditorBridge
             ? " The editor currently open is map \"{$open->map?->slug}\"; ask the user to open \"{$map->slug}\" instead (Studio → Maps → {$map->name} → Open Studio)."
             : " Ask the user to open it in the studio (Maps → {$map->name} → Open Studio) and keep the tab visible.";
 
-        return "Map \"{$map->slug}\" is not open in an editor, and this needs the live game.".$hint;
+        return "Map \"{$map->slug}\" is not open in an editor, and this needs the live game.".$hint
+            .' Or start a hidden editor yourself with open_editor (no user needed; close_editor when done).';
+    }
+
+    private function headless(): HeadlessEditor
+    {
+        return app(HeadlessEditor::class);
     }
 
     protected function sleep(): void

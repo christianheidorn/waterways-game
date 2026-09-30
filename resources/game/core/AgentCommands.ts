@@ -51,6 +51,8 @@ const VIEW_MODES: readonly TerrainViewMode[] = [
 
 type Vec = { x: number; y?: number; z: number };
 
+const HEADLESS = new URLSearchParams(location.search).get('agent') === '1';
+
 /** Longest a screenshot waits for foliage to grow after the camera moved (ms). */
 const SETTLE_MAX_MS = 10000;
 
@@ -81,6 +83,8 @@ export function createAgentHost(ctx: AgentContext): AgentBridgeHost {
             can_undo: h.canUndo,
             can_redo: h.canRedo,
             tab_visible: !document.hidden,
+            // A hidden editor the MCP server started (App\Mcp\HeadlessEditor opens ?agent=1).
+            headless: HEADLESS,
             ...ctx.editorState(),
         };
     };

@@ -29,6 +29,8 @@ export type AgentContext = {
     undo: () => void;
     redo: () => void;
     autoPaint: () => void;
+    /** A scripted world edit (editor/agent/runWorldEdit); throws with a message for the agent. */
+    worldEdit: (payload: Record<string, unknown>) => Record<string, unknown>;
     refresh: (parts: string[]) => Promise<void>;
     reload: () => void;
     editorState: () => Record<string, unknown>;
@@ -279,6 +281,20 @@ export function createAgentHost(ctx: AgentContext): AgentBridgeHost {
                     return {
                         steps: done,
                         ...ctx.history(),
+                        unsaved: ctx.unsaved(),
+                    };
+                }
+                case 'world_edit': {
+                    requireEdit('editing the world');
+                    const result = ctx.worldEdit(payload);
+
+                    if (payload.save !== false) {
+                        await ctx.save();
+                    }
+
+                    return {
+                        result,
+                        undo: 'control_editor action "undo" reverts this edit (one step).',
                         unsaved: ctx.unsaved(),
                     };
                 }

@@ -79,6 +79,27 @@ abstract class WaterwaysTool extends Tool
         }
     }
 
+    /**
+     * Runs a scripted world edit in the map's open editor (one undo step there), after an automatic
+     * snapshot, and saves it unless `save` is false.
+     *
+     * @param  array<string, mixed>  $payload  kind, action, shape, params (see editor/agent/runWorldEdit.ts)
+     */
+    protected function worldEdit(Map $map, Request $request, string $label, array $payload): Response
+    {
+        $snapshot = $this->snapshots()->autoBefore($map, $label);
+        $save = $request->get('save') !== false;
+        $result = $this->bridge()->run($map, 'world_edit', [...$payload, 'save' => $save], timeout: 180);
+
+        return $this->json([
+            'map' => $map->slug,
+            ...$result,
+            'saved' => $save,
+            'snapshot_taken' => $snapshot?->id,
+            'tip' => 'Check the result with take_screenshot or get_map_image.',
+        ]);
+    }
+
     /** Structured result as JSON text (readable by any MCP client). */
     protected function json(mixed $data): Response
     {

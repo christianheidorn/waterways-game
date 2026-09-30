@@ -5,6 +5,7 @@ import { EditorPanel } from '../editor/ui/EditorPanel';
 import { ViewModes } from '../editor/ViewModes';
 import { AgentBridge } from './AgentBridge';
 import { createAgentHost } from './AgentCommands';
+import { runWorldEdit } from '../editor/agent/runWorldEdit';
 import type { AgentContext } from './AgentCommands';
 import { Player } from '../player/Player';
 import { ThirdPersonCamera } from '../player/ThirdPersonCamera';
@@ -229,6 +230,7 @@ export class Game {
             undo: () => this.editor.undo(),
             redo: () => this.editor.redo(),
             autoPaint: () => this.editor.autoPaint(),
+            worldEdit: (payload) => runWorldEdit(this.editor, payload),
             refresh: (parts) => this.refreshFromServer(parts),
             // Only after the agent checked that unsaved changes may go (see map_snapshots restore).
             reload: () => {

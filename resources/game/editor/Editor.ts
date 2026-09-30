@@ -464,6 +464,67 @@ export class Editor {
         this.listeners.clear();
     }
 
+    /** World data for scripted edits (AI agents, see editor/agent). */
+    get worldData(): EditorWorld {
+        return this.world;
+    }
+
+    /** Placement rules context for foliage (terrain, water, land cover). */
+    placementContext() {
+        return this.ctx();
+    }
+
+    /**
+     * Runs a scripted edit (AI agents) as one undo step: the channels are recorded over `rect` (grid
+     * samples) before `fn` changes the world data, then terrain, water, paint and foliage are rebuilt
+     * and marked unsaved like after a brush stroke.
+     */
+    scriptedEdit<T>(
+        label: string,
+        rect: GridRect,
+        channels: ('height' | 'splat' | 'water' | 'foliage')[],
+        fn: () => T,
+    ): T {
+        this.endStroke();
+        this.history.beginStroke(label);
+
+        for (const channel of channels) {
+            if (channel !== 'foliage') {
+                this.history.touch(channel, rect);
+            }
+        }
+
+        let result: T;
+
+        try {
+            result = fn();
+        } finally {
+            this.history.endStroke();
+        }
+
+        if (channels.includes('height')) {
+            this.onHeightsChanged(rect);
+        }
+
+        if (channels.includes('splat')) {
+            this.world.splat.syncRect(rect);
+            this.callbacks.markDirty('splatmap');
+        }
+
+        if (channels.includes('water')) {
+            this.queueWaterRebuild(rect);
+            this.callbacks.markDirty('water');
+        }
+
+        if (channels.includes('foliage')) {
+            this.callbacks.markDirty('foliage');
+        }
+
+        this.flushRebuilds();
+
+        return result;
+    }
+
     /** Player start set from outside the editor (e.g. by an agent). */
     setSpawn(spawn: { x: number; z: number; yaw: number } | null): void {
         this.world.spawn = spawn;

@@ -1478,6 +1478,74 @@ export class Foliage {
             : null;
     }
 
+    /**
+     * Places one instance of a type if its rules allow it here and no instance of the type is closer
+     * than `spacing` metres (scripted scattering). Returns whether it was placed.
+     */
+    placeAt(
+        ctx: FoliagePlacementContext,
+        typeId: number,
+        x: number,
+        z: number,
+        spacing: number,
+    ): boolean {
+        const renderer = this.renderers.get(typeId);
+
+        return renderer && !renderer.cover
+            ? this.tryPlace(ctx, renderer, x, z, spacing)
+            : false;
+    }
+
+    /**
+     * Removes instances of the given types (null: all) inside a world rect, each with the probability
+     * `chance(x, z)` (0-1). Ground cover is never erased (it follows the terrain layers). Returns the
+     * number removed.
+     */
+    eraseWhere(
+        typeIds: number[] | null,
+        rect: { x0: number; z0: number; x1: number; z1: number },
+        chance: (x: number, z: number) => number,
+    ): number {
+        let removed = 0;
+
+        for (const [id, renderer] of this.renderers) {
+            if (renderer.cover || (typeIds && !typeIds.includes(id))) {
+                continue;
+            }
+
+            for (const cell of this.cellsInRect(renderer, rect)) {
+                const data = cell.data;
+                const next: number[] = [];
+                let changed = false;
+
+                for (let i = 0; i < data.length; i += FOLIAGE_STRIDE) {
+                    const p = chance(data[i], data[i + 2]);
+
+                    if (p > 0 && this.random() < p) {
+                        if (!changed) {
+                            this.onBeforeModify?.(id, cell.key);
+                            changed = true;
+                        }
+
+                        removed++;
+                        continue;
+                    }
+
+                    for (let k = 0; k < FOLIAGE_STRIDE; k++) {
+                        next.push(data[i + k]);
+                    }
+                }
+
+                if (changed) {
+                    cell.data = next;
+                    this.markDirty(renderer, cell);
+                }
+            }
+        }
+
+        return removed;
+    }
+
     /** Place one instance exactly (single-click placement). */
     placeSingle(
         ctx: FoliagePlacementContext,

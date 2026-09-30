@@ -7,17 +7,23 @@ use App\Mcp\Tools\ApplyBiome;
 use App\Mcp\Tools\ControlEditor;
 use App\Mcp\Tools\CreateMap;
 use App\Mcp\Tools\DeleteTerrainLayer;
+use App\Mcp\Tools\EditFoliage;
+use App\Mcp\Tools\EditWater;
 use App\Mcp\Tools\GetEditorState;
 use App\Mcp\Tools\GetMap;
+use App\Mcp\Tools\GetMapImage;
 use App\Mcp\Tools\GetProjectOverview;
 use App\Mcp\Tools\GetSettings;
 use App\Mcp\Tools\ListBiomes;
 use App\Mcp\Tools\ListFoliageTypes;
 use App\Mcp\Tools\ListMaterials;
 use App\Mcp\Tools\ManageSnapshots;
+use App\Mcp\Tools\PaintTerrain;
 use App\Mcp\Tools\RegenerateTerrain;
+use App\Mcp\Tools\SampleTerrain;
 use App\Mcp\Tools\SaveFoliageType;
 use App\Mcp\Tools\SaveLayerAsBiome;
+use App\Mcp\Tools\SculptTerrain;
 use App\Mcp\Tools\SetCamera;
 use App\Mcp\Tools\TakeScreenshot;
 use App\Mcp\Tools\UpdateEnvironment;
@@ -30,7 +36,7 @@ use Laravel\Mcp\Server\Attributes\Name;
 use Laravel\Mcp\Server\Attributes\Version;
 
 #[Name('Waterways')]
-#[Version('0.1.0')]
+#[Version('0.2.0')]
 #[Instructions(<<<'MD'
 Waterways is an open-world game with a map editor (Three.js in the browser, Laravel studio). This server lets you build and tune worlds.
 
@@ -45,6 +51,15 @@ Working live
 - World edits, screenshots and editor control need the map open in the user's editor (Studio → Maps → map → Open Studio). get_project_overview shows which map is open. If none is, ask the user to open it; settings and library changes work without it and appear live when it is open.
 - Edits made inside the editor stay unsaved until control_editor action "save". Server-side changes (layers, environment, biomes, foliage types, settings) are saved immediately.
 - Look before and after you change things: take_screenshot (views overview / top_down / a position, and analysis view modes: layers, slope, height, density, lighting, wireframe).
+
+Building the world (live in the open editor, each call one undo step, saved by default)
+- Plan on get_map_image (top-down, labelled coordinate grid; kinds map, height, slope, layers, water; crop with `area`) and sample_terrain (exact heights / slopes along a line). Both read the saved map and need no editor.
+- Shapes are world-metre outlines: circle, rect, polygon, path (with width) or map, with a soft `falloff` edge.
+- sculpt_terrain: raise / lower, set_height, flatten, smooth, noise, terrace, hill (landforms: hills, massifs, ridges; negative = basins, valleys), erode, grade (road beds along paths).
+- edit_water: lake (flood a basin to a level), river (along a path, downhill from its first point), erase.
+- paint_terrain: paint layers (optionally only on matching slope / height); painted layers grow their ground cover, so apply a biome to a slot and paint it to plant forests, meadows, beaches.
+- edit_foliage: scatter or clear individual plants in an area.
+- A good order: landforms → water → paint layers / biomes → details; look (take_screenshot) after each step; control_editor undo reverts the last step.
 
 Safety
 - Before an agent tool changes a map, a snapshot is taken automatically (at most every 10 minutes); map_snapshots lists, creates and restores them. regenerate_terrain discards the user's terrain work: confirm with them first.
@@ -63,9 +78,15 @@ class WaterwaysServer extends Server
         ListBiomes::class,
         ListMaterials::class,
         GetEditorState::class,
+        GetMapImage::class,
+        SampleTerrain::class,
         TakeScreenshot::class,
         SetCamera::class,
         ControlEditor::class,
+        SculptTerrain::class,
+        PaintTerrain::class,
+        EditWater::class,
+        EditFoliage::class,
         CreateMap::class,
         UpdateMap::class,
         RegenerateTerrain::class,

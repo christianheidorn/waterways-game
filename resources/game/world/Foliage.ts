@@ -1140,7 +1140,8 @@ export class Foliage {
 
                         if (
                             data &&
-                            this.renderers.get(renderer.type.id) === renderer &&
+                            // Cover renderers are keyed by coverKey(), not the type id.
+                            !renderer.disposed &&
                             renderer.cells.get(key) === cell
                         ) {
                             cell.data = Array.from(data);

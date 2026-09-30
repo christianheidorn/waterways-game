@@ -3,12 +3,14 @@
 namespace Tests\Feature\Mcp;
 
 use App\Mcp\EditorBridge;
+use App\Mcp\PerformanceBaselines;
 use App\Mcp\PerformanceFindings;
 use App\Mcp\Servers\WaterwaysServer;
 use App\Mcp\Tools\ProfilePerformance;
 use App\Models\Map;
 use App\Models\PropModel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class PerformanceToolsTest extends TestCase
@@ -132,5 +134,60 @@ class PerformanceToolsTest extends TestCase
 
         $this->assertStringContainsString('No frame finished during the measurement', $findings[0]);
         $this->assertStringNotContainsString('Negligible', implode(' ', $findings));
+    }
+
+    public function test_profiles_are_saved_as_baselines_and_compared_before_and_after(): void
+    {
+        Storage::fake('local');
+        $map = Map::factory()->create();
+        $pine = PropModel::factory()->create(['name' => 'Pine', 'triangles' => 180000, 'meshes' => 3, 'materials' => 2]);
+        $hut = PropModel::factory()->create(['name' => 'Hut', 'triangles' => 3000, 'meshes' => 1, 'materials' => 1]);
+        $before = $this->profile($pine->id, $hut->id);
+        // After removing the heavy props: the props cost is gone, the scene pass is faster.
+        $after = $before;
+        $after['frame'] = [...$before['frame'], 'fps' => 55, 'gpu_ms' => 12.1, 'frame_ms' => 12.1, 'draw_calls' => 610, 'triangles' => 6000000];
+        $after['passes'][0]['gpu_ms'] = 6.2;
+        $after['costs'][1] = ['system' => 'props', 'cost_ms' => 0.2, 'gpu_ms' => 0.2];
+        $profiles = [$before, $after];
+        $editor = new FakeEditor($map, function (string $type) use (&$profiles) {
+            return $type === 'profile' ? array_shift($profiles) : [];
+        });
+        $this->app->instance(EditorBridge::class, $editor);
+
+        WaterwaysServer::tool(ProfilePerformance::class, ['map' => $map->slug, 'compare_to' => 'Before props'])
+            ->assertHasErrors(['No baseline "Before props"', 'none (profile with save_as first)']);
+
+        WaterwaysServer::tool(ProfilePerformance::class, ['map' => $map->slug, 'save_as' => 'Before props'])
+            ->assertOk()->assertSee(['"saved_as": "before-props"', '"baselines": [', '"before-props"']);
+        Storage::disk('local')->assertExists("performance/{$map->id}/before-props.json");
+
+        $response = WaterwaysServer::tool(ProfilePerformance::class, ['map' => $map->slug, 'compare_to' => 'before-props']);
+        $response->assertOk()->assertSee([
+            '"comparison"',
+            '"baseline": "before-props"',
+            'GPU time vs \"before-props\": 34.2 → 12.1 ms (-22.1 ms, better).',
+            'fps 28 → 55.',
+            'Scene: -11.9 ms (better).',
+            'props: -24.6 ms (better).',
+        ]);
+        $this->assertCount(2, $editor->ran);
+
+        WaterwaysServer::tool(ProfilePerformance::class, ['map' => $map->slug, 'delete_baseline' => 'before-props'])
+            ->assertOk()->assertSee(['"deleted": "before-props"']);
+        Storage::disk('local')->assertMissing("performance/{$map->id}/before-props.json");
+        WaterwaysServer::tool(ProfilePerformance::class, ['map' => $map->slug, 'delete_baseline' => 'before-props'])->assertHasErrors(['No baseline']);
+        $this->assertCount(2, $editor->ran, 'deleting a baseline does not measure');
+    }
+
+    public function test_comparisons_flag_different_settings_and_ignore_noise(): void
+    {
+        $base = ['frame' => ['fps' => 60, 'gpu_ms' => 8.0], 'noise_ms' => 0.5, 'backend' => 'webgpu', 'passes' => [['name' => 'Scene', 'gpu_ms' => 5.0]]];
+        $next = ['frame' => ['fps' => 60, 'gpu_ms' => 8.3], 'noise_ms' => 0.4, 'backend' => 'webgl', 'passes' => [['name' => 'Scene', 'gpu_ms' => 5.2], ['name' => 'Bloom', 'gpu_ms' => 0.4]]];
+
+        $comparison = PerformanceBaselines::compare($base, $next, 'x', '2026-01-01');
+
+        $this->assertSame('same', $comparison['frame']['gpu_ms']['verdict']);
+        $this->assertSame(['name' => 'Bloom', 'before' => null, 'after' => 0.4], $comparison['passes'][1]);
+        $this->assertStringContainsString('Not like for like: backend', implode(' ', $comparison['summary']));
     }
 }

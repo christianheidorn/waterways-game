@@ -66,7 +66,9 @@ class PerformanceBaselines
 
     public function delete(Map $map, string $name): bool
     {
-        return Storage::disk('local')->delete($this->path($map, self::normalizeName($name)));
+        $path = $this->path($map, self::normalizeName($name));
+
+        return Storage::disk('local')->exists($path) && Storage::disk('local')->delete($path);
     }
 
     /**

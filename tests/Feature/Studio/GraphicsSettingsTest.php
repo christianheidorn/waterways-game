@@ -29,6 +29,7 @@ class GraphicsSettingsTest extends TestCase
         $this->assertEquals(0, $defaults['vignette']);
         $this->assertFalse($defaults['dynamic_resolution']);
         $this->assertEquals(60, $defaults['target_fps']);
+        $this->assertSame('auto', $defaults['frame_rate_target']);
         $this->assertEquals(0, $defaults['max_fps']);
         $this->assertEquals(120, $defaults['foliage_shadow_distance']);
         $this->assertEquals(1, $defaults['foliage_lod_bias']);
@@ -49,6 +50,7 @@ class GraphicsSettingsTest extends TestCase
             'saturation' => 1.2,
             'dynamic_resolution' => true,
             'target_fps' => 90,
+            'frame_rate_target' => '120',
             'max_fps' => 120,
             'effects_quality' => 'epic',
             'cloud_quality' => 'high',
@@ -62,6 +64,7 @@ class GraphicsSettingsTest extends TestCase
         $this->assertEquals(16, $values['anisotropy']);
         $this->assertTrue($values['dynamic_resolution']);
         $this->assertEquals(120, $values['max_fps']);
+        $this->assertSame('120', $values['frame_rate_target']);
 
         foreach ([
             ['quality_preset' => 'ultra'],
@@ -76,6 +79,7 @@ class GraphicsSettingsTest extends TestCase
             ['sharpen' => 1.5],
             ['vignette' => -0.1],
             ['target_fps' => 20],
+            ['frame_rate_target' => '90'],
             ['max_fps' => 500],
             ['foliage_shadow_distance' => 5000],
             ['foliage_lod_bias' => 0.1],

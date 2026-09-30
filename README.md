@@ -168,11 +168,26 @@ Every source is **baked in the browser** (`resources/game/tools/FoliageBaker.ts`
 
 - normalises the model to metres, with its pivot at the base;
 - decimates to per-kind triangle budgets, dropping and enlarging leaf cards instead of collapsing them;
-- builds an LOD1 and a three-card impostor;
+- builds an LOD1 and, for trees and bushes, an **octahedral impostor**: 8 × 8 orthographic views over the upper
+  hemisphere in an albedo and a normal atlas. The game turns one quad per instance to the camera and blends
+  the 4 views around the view direction, lit with the baked normals, so distant trees keep their shape from
+  any angle and from above (bakes before this keep their three crossed cards until they are re-baked: _Re-optimise_
+  on the foliage page, or `update_library_item` `rebake` + `bake_foliage_asset` over MCP);
 - limits textures to 1K;
 - uploads a game-ready GLB with a thumbnail.
 
 Keep the foliage page open while assets show _Waiting to be optimised_.
+
+**Compressed assets.** `php artisan waterways:optimize-assets` (MCP: `optimize_assets`) writes a compressed copy
+next to each baked foliage asset and prop model (`model.opt.glb`, by `resources/node/optimize-glb.mjs` with glTF
+Transform): meshes with `EXT_meshopt_compression` (lossless) and textures as KTX2 / Basis Universal (UASTC for
+normal maps, ETC1S for the rest, with mipmaps). KTX2 textures stay compressed on the GPU (BC / ETC / ASTC after
+transcoding), about a quarter of the texture memory. The game loads the copy with `MeshoptDecoder` and
+`KTX2Loader` (transcoder in `public/basis/`) and falls back to the original when there is no up-to-date copy
+or it fails to load; a re-bake or re-import makes the copy stale until it is optimised again. The command
+reports file sizes and estimated GPU texture memory before and after (`--dry-run`, `--kind`, `--id`,
+`--no-textures` for a fast meshes-only pass, `--force`). Texture encoding takes about half a minute per model,
+and needs Node.js on the server.
 
 **In the game editor** the Foliage tool shows your types as tiles with thumbnails: baked model thumbnails, or
 thumbnails of the procedural mesh rendered in-game. Below the tiles, **Type settings** edits the last-clicked type
@@ -262,6 +277,11 @@ about missing or over-budget LODs.
   (`world/foliage/HiZ.ts`). Hi-Z builds a depth pyramid from the previous frame's depth and skips plants
   hidden behind terrain or other trees. It is conservative: anything uncertain counts as visible, and it is
   off for a frame after camera cuts.
+- **Two-phase occlusion**: the instances the first test rejects against last frame's depth are tested again
+  right after the scene pass, against a pyramid of this frame's depth, and the ones that turn out visible are
+  drawn into the same frame (their own indirect draws, same materials). Nothing pops in a frame late when you
+  move past a hill or a trunk. The pyramid built there is reused by the next frame's first test. With MSAA the
+  resolved scene colour can't be drawn over, so only the first phase runs.
 - The survivors are compacted into per-LOD lists, and each LOD draws with **one indirect draw call**. The CPU
   does no per-instance work, however much foliage a map has.
 - Shadow casters get their own lists, within the foliage shadow distance: all of them for the cached far
@@ -272,11 +292,16 @@ about missing or over-budget LODs.
 - Leaves and blades are translucent: sky light passes through the canopy and they glow when backlit, so
   foliage keeps its colour under overcast skies.
 - The F10 foliage table shows the instances drawn per LOD and the occluded count; "Foliage culling" in the pass
-  table is the compute cost.
+  table is the compute cost. `profile_performance` reports the occluded instances and those drawn late by the
+  second phase.
 
 On the WebGL 2 backend (no compute shaders), foliage uses CPU culling of 32–128 m cells with instanced meshes;
 sparse cells are merged into 256 m batches and distant terrain is drawn by quadtree nodes, so the fallback
-needs about as many draw calls as the pre-WebGPU renderer.
+needs about as many draw calls as the pre-WebGPU renderer. There (no GPU compute) the editor moves its heavy
+CPU work to a **web worker** (`editor/workers/`): erosion brush steps (on a copy of the region they touch, one
+step in flight, results of a finished stroke dropped), the foliage scatter's noise candidates, and ground cover
+tiles (the worker keeps copies of the height, water and paint grids, patched after each edit). `?workers=1`
+or `?workers=0` forces the worker on or off; results are identical to the inline path.
 
 ## Player characters
 
@@ -301,7 +326,7 @@ quality field. If you change any value by hand, the preset shows as _Custom_. Th
 leave these values alone:
 
 - artistic values: bloom intensity, saturation, contrast, vignette
-- frame-rate values: dynamic resolution, target FPS, FPS limit
+- frame-rate values: dynamic resolution, frame rate target, target FPS, FPS limit
 
 | Preset    | Draw dist. | Shadows (dist.) | AA   | AO          | Terrain tex. / aniso | Foliage density / dist. / shadow | Render scale / Retina cap |
 | --------- | ---------- | --------------- | ---- | ----------- | -------------------- | -------------------------------- | ------------------------- |
@@ -389,6 +414,10 @@ the in-game menu has a Reload button and shows the backend the game is running o
     - Otherwise it uses the smoothed frame interval. With vsync on, it steps up after a stable period and waits
       longer after each step up that fails.
     - The stats overlay shows the current scale.
+    - **Frame rate target** (`frame_rate_target`): _Refresh_ (default) measures the display refresh rate from
+      animation frame intervals (e.g. 120 Hz on a ProMotion display) and holds it; when even the lowest scale
+      can't, it holds half the refresh rate for a while and then tries again. _60_ and _120_ are fixed;
+      _Manual_ uses the target FPS field. The F10 menu shows the measured refresh and the rate being held.
 - **`max_fps`** limits the frame rate by skipping animation frames. The simulation delta still covers the
   full interval.
 - **Anisotropic filtering** applies to every mipmapped texture in the scene and is capped at the GPU's
@@ -592,10 +621,13 @@ resources/game/            The game (TypeScript + Three.js WebGPURenderer with T
                            Foliage (+ procedural FoliageGeometry, baked GLB LODs, foliage/: TSL material,
                            GPU culling, Hi-Z, impostors), collision/ (CollisionWorld, shapes, foliage and prop
                            colliders, voxel box fitting, the Collision view)
-  tools/FoliageBaker.ts    In-browser foliage asset optimiser (LODs, impostor, cards, thumbnail)
+  tools/FoliageBaker.ts    In-browser foliage asset optimiser (LODs, octahedral impostor, cards, thumbnail)
+  util/gltf.ts             glTF loading with meshopt and KTX2 (compressed copies, falling back to originals)
   player/                  Character controller, third-person camera, procedural / glTF character
   editor/                  Editor (tools, strokes), Brush, History (undo), FlyCamera, terrainOps, UI panel,
-                           ViewModes (view modes; their shader side is world/TerrainDebugView)
+                           ViewModes (view modes; their shader side is world/TerrainDebugView), workers/
+                           (erosion, scatter and ground cover off the main thread on WebGL 2)
+resources/node/            optimize-glb.mjs: meshopt + KTX2 compression of library GLBs (optimize-assets)
 ```
 
 **Studio ↔ game communication**

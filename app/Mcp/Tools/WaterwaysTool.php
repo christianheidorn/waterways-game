@@ -3,6 +3,7 @@
 namespace App\Mcp\Tools;
 
 use App\Mcp\EditorBridge;
+use App\Mcp\HeadlessEditor;
 use App\Mcp\MapSnapshots;
 use App\Mcp\ToolError;
 use App\Models\Map;
@@ -12,6 +13,7 @@ use Laravel\Mcp\Request;
 use Laravel\Mcp\Response;
 use Laravel\Mcp\ResponseFactory;
 use Laravel\Mcp\Server\Tool;
+use Throwable;
 
 /**
  * Base of the Waterways agent tools: resolves maps, turns expected failures (ToolError) into
@@ -21,6 +23,13 @@ abstract class WaterwaysTool extends Tool
 {
     public function handle(Request $request): Response|ResponseFactory
     {
+        // Hidden editors close when idle; agents' calls are one of the moments that is checked.
+        try {
+            app(HeadlessEditor::class)->sweep();
+        } catch (Throwable $e) {
+            report($e);
+        }
+
         try {
             return $this->run($request);
         } catch (ToolError $e) {

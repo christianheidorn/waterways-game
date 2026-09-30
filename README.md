@@ -489,6 +489,7 @@ paint layers and biomes, and scatter or clear foliage, all live in the editor yo
 world through screenshots and top-down map images with coordinate grids. Setup, safety (automatic snapshots, local only) and the tool list are in [docs/MCP.md](docs/MCP.md).
 In short: `claude mcp add waterways -- php artisan mcp:start waterways` in the project folder (or add that
 command to Claude Desktop), then open the map in the studio.
+Without an open editor, agents can start a hidden one (`open_editor`, needs Chrome, Chromium, Edge or Brave) and work unattended.
 
 ## Requirements
 

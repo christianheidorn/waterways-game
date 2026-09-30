@@ -3,6 +3,7 @@
 namespace App\Mcp\Tools;
 
 use App\Mcp\EditorBridge;
+use App\Mcp\HeadlessEditor;
 use App\Models\AgentSession;
 use App\Models\Biome;
 use App\Models\Character;
@@ -19,7 +20,7 @@ use Laravel\Mcp\Server\Attributes\Name;
 use Laravel\Mcp\Server\Tools\Annotations\IsReadOnly;
 
 #[Name('get_project_overview')]
-#[Description('Start here. Lists the maps (with generation status), the libraries (foliage types, biomes, materials, characters), the graphics preset, which AI services are configured, and which map is open in an editor (needed for live editing and screenshots).')]
+#[Description('Start here. Lists the maps (with generation status), the libraries (foliage types, biomes, materials, characters), the graphics preset, which AI services are configured, and which map is open in an editor (needed for live editing and screenshots; `headless: true` marks a hidden editor started with open_editor).')]
 #[IsReadOnly]
 class GetProjectOverview extends WaterwaysTool
 {
@@ -43,7 +44,7 @@ class GetProjectOverview extends WaterwaysTool
                 ->with('map:id,slug,name')
                 ->where('last_seen_at', '>=', Carbon::now()->subSeconds(EditorBridge::SESSION_TIMEOUT))
                 ->get()
-                ->map(fn (AgentSession $s) => ['map' => $s->map?->slug, 'mode' => $s->mode])
+                ->map(fn (AgentSession $s) => ['map' => $s->map?->slug, 'mode' => $s->mode, 'headless' => HeadlessEditor::isHeadless($s)])
                 ->values(),
             'libraries' => [
                 'foliage_types' => FoliageType::query()->count(),

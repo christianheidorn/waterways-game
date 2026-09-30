@@ -3,6 +3,8 @@ import type { AgentBridgeHost } from './AgentBridge';
 import type { GameMode } from '../shared/protocol';
 import type { TerrainViewMode } from '../world/TerrainDebugView';
 import type { Heightfield } from '../world/Heightfield';
+import { bakeFoliageAssetInBackground } from '../editor/agent/bakeFoliageAsset';
+import type { FoliageBakeJob } from '../editor/agent/bakeFoliageAsset';
 
 /** What the agent commands need from the game (built by Game; keeps them out of its internals). */
 export type AgentContext = {
@@ -311,6 +313,14 @@ export function createAgentHost(ctx: AgentContext): AgentBridgeHost {
                     );
 
                     return {};
+                case 'bake_foliage_asset':
+                    // Answers right away; the server watches the asset's status while it bakes.
+                    bakeFoliageAssetInBackground(
+                        payload as unknown as FoliageBakeJob,
+                        () => ctx.refresh(['foliage_types']),
+                    );
+
+                    return { started: true };
                 case 'reload':
                     // Answer first: the page goes away.
                     window.setTimeout(ctx.reload, 100);

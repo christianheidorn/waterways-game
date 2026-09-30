@@ -488,7 +488,9 @@ layers, biomes, foliage, weather and settings, and shape the world: sculpt landf
 paint layers and biomes, scatter or clear foliage and place props, all live in the editor you have open. With
 the editor's **Request** tool you outline an area, describe what you want and add reference images; Claude
 picks the request up, builds it and reports back with a screenshot. It sees the
-world through screenshots and top-down map images with coordinate grids. Setup, safety (automatic snapshots, local only) and the tool list are in [docs/MCP.md](docs/MCP.md).
+world through screenshots and top-down map images with coordinate grids. It can also bring in assets: import
+GLB models (e.g. built with Blender MCP) as props or foliage, and generate images, terrain materials and Meshy
+models with the project's AI keys. Setup, safety (automatic snapshots, local only) and the tool list are in [docs/MCP.md](docs/MCP.md).
 In short: `claude mcp add waterways -- php artisan mcp:start waterways` in the project folder (or add that
 command to Claude Desktop), then open the map in the studio.
 

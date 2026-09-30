@@ -129,12 +129,30 @@ class MaterialController extends Controller
             return $this->notConfigured();
         }
 
-        $summary = MaterialPrompts::summary($data['prompt']);
+        $this->queueGeneration($data, $request->boolean('enhance'));
+
+        $this->toast('info', $data['variants'] > 1 ? "Generating {$data['variants']} variants…" : 'Generating material…');
+
+        return back();
+    }
+
+    /**
+     * Creates the materials of an AI generation (one per variant) and queues their generation. Also
+     * used by the MCP tool generate_material.
+     *
+     * @param  array{prompt: string, category: string, tile_size: float|int|string, variants: int, model?: string|null, resolution?: string|null, name?: string|null}  $data
+     * @return list<Material>
+     */
+    public function queueGeneration(array $data, bool $enhance): array
+    {
+        $ai = app(AiSettings::class);
+        $summary = trim((string) ($data['name'] ?? '')) ?: MaterialPrompts::summary($data['prompt']);
         $seedBase = random_int(1, 1_000_000);
+        $materials = [];
 
         for ($n = 1; $n <= $data['variants']; $n++) {
             $material = $this->library->create([
-                'name' => "{$summary} #{$n}",
+                'name' => $data['variants'] > 1 || empty($data['name']) ? "{$summary} #{$n}" : $summary,
                 'category' => $data['category'],
                 'tile_size' => (float) $data['tile_size'],
                 'source' => 'ai',
@@ -150,14 +168,13 @@ class MaterialController extends Controller
                 'category' => $data['category'],
                 'model' => $data['model'] ?? null,
                 'resolution' => $data['resolution'] ?? null,
-                'enhance' => $request->boolean('enhance'),
+                'enhance' => $enhance,
                 'seed' => $seedBase + $n,
             ]));
+            $materials[] = $material;
         }
 
-        $this->toast('info', $data['variants'] > 1 ? "Generating {$data['variants']} variants…" : 'Generating material…');
-
-        return back();
+        return $materials;
     }
 
     public function aiEdit(Request $request, Material $material, AiSettings $ai): RedirectResponse

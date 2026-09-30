@@ -98,6 +98,13 @@ Changes to settings and libraries work without an open editor, and appear live w
 | `edit_foliage`                                                      | Live: `scatter` types in a shape (their rules, density, groves) or `clear` placed foliage (e.g. for clearings or roads)                                                                                                                                                                                        |
 | `list_requests`, `get_request`, `update_request`                    | Build requests made in the editor (see below): the note, the outline in world coordinates with its bounds, the user's screenshot and reference images, a map crop with the outline. `update_request` sets the status (`in_progress`, `needs_input`, `done`), leaves a message and attaches a result screenshot |
 | `place_props`, `remove_props`, `list_props`                         | Live: place props from the prop library at exact positions (rotation, scale, height offset) or scatter them in a shape (spacing, slope, water); remove by id or shape; list what is placed (no editor needed)                                                                                                  |
+| `list_prop_models`                                                  | The prop model library (placeable objects) with status, size and tags                                                                                                                                                                                                                                          |
+| `import_model`                                                      | Imports a glTF model from a local `path` (e.g. exported by Blender MCP), a `url` or `base64` (≤ 100 MB) as a **prop** (`props/{id}/model.glb`, size measured, ready at once) or a **foliage** asset (optionally with a foliage type; baked in the open editor right away)                                      |
+| `bake_foliage_asset`                                                | Live: optimises a foliage asset waiting for its bake (LODs, impostor, thumbnail) in the open editor, as the studio's Foliage page does. Any open map works                                                                                                                                                     |
+| `generate_image`                                                    | An image from the project's OpenRouter image model (purposes `reference`, `texture`, `sprite` or free), optionally guided by earlier images. Returns it and stores it under `agent-images/` with its local file path, for reuse (references, materials, Blender)                                               |
+| `generate_material`                                                 | A PBR terrain material from a prompt (queued AI generation, like the studio) or from an image (processed right away); assign it with `update_terrain_layer`                                                                                                                                                    |
+| `generate_model`                                                    | Meshy text / image to 3D in the background: props (stored as ready props), or foliage assets (also as OpenRouter plant cards)                                                                                                                                                                                  |
+| `get_asset_status`                                                  | Status, message and preview URLs of a prop model, foliage asset or material                                                                                                                                                                                                                                    |
 
 ### Shapes
 
@@ -139,6 +146,23 @@ grounded. In the editor, **Place → Props** shows the library: click to place, 
 prop, with random or fixed rotation and a size slider. Agents use `place_props` / `remove_props` /
 `list_props`.
 
+## Assets
+
+Agents can make the assets they need and bring them into the game:
+
+- **Blender:** with Blender MCP connected too, the agent models an object, exports it as `.glb` (metres, +Y up,
+  pivot at the base) to a file, and imports it with `import_model` `path`. The MCP server runs on your machine, so it
+  reads the file directly.
+- **Images:** `generate_image` draws references (for modelling), textures or sprites with the project's OpenRouter
+  key. Images are stored under `storage/app/public/agent-images/`; the result includes the local file path.
+- **Materials:** `generate_material` from a prompt or from an image, then `update_terrain_layer` `material_id`.
+- **Meshy:** `generate_model` creates props or foliage models with the project's Meshy key.
+- **Foliage bake:** foliage models are optimised in a browser. The studio's Foliage page does this by itself;
+  for agents, the open editor does it too (`bake_foliage_asset`, and `import_model` when an editor is open).
+
+Generation runs in the queue worker (`composer dev` starts it); agents poll `get_asset_status`. API keys never
+reach the agent; without a key, the tools say which one to add under Settings → AI.
+
 ## How it works
 
 - `routes/ai.php` registers the server: `App\Mcp\Servers\WaterwaysServer`, with tools in `app/Mcp/Tools`.
@@ -164,6 +188,12 @@ prop, with random or fixed rotation and a size slider. Agents use `place_props` 
   (`resources/game/editor/RequestOverlay.ts`, `EditorPanel.requestTool`) and `Game.sendRequest`.
 - **Props** (`App\Models\PropModel`, `resources/game/world/Props.ts`): glTF templates scaled to the model's
   target height with the base centre at the origin, cloned per instance.
+- **Assets** (`App\Mcp\Assets`): `ModelSource` checks and loads models (extension, size, glTF magic and JSON),
+  `GltfInspector` measures them from the POSITION accessor bounds through the node hierarchy, `EditorBakes` runs
+  the foliage bake in an editor (`bake_foliage_asset` command → `editor/agent/bakeFoliageAsset.ts`, which runs
+  `tools/FoliageBaker.ts` and uploads to `/api/foliage/assets/{id}/bake`), and `AgentImages` stores generated
+  images. Meshy props are made by `App\Jobs\GenerateMeshyProp`; everything else reuses the studio's services and
+  jobs.
 - **Tests:** `tests/Feature/Mcp` drives every tool through the MCP test client. A fake editor answers
   bridge commands.
 
@@ -174,5 +204,7 @@ prop, with random or fixed rotation and a size slider. Agents use `place_props` 
 | **1. Server core**       | Project, map, layer, biome, foliage type and settings tools, the live editor bridge, screenshots and analysis views, snapshots, setup for Claude Desktop / Code                                                                                             | **Done** |
 | **2. World building**    | Terrain, water, paint and foliage operations on shapes (circles, rectangles, outlines, paths), top-down map images with coordinate grids, terrain sampling                                                                                                  | **Done** |
 | **3. Claude requests**   | An editor tool to outline an area, attach a reference image and a note. Agents list open requests with world coordinates and a screenshot, build them, and mark them done with before / after images for review                                             | **Done** |
-| **4. Props and assets**  | A props system in the game (placing models with snapping and rotation, later collision), GLB import (e.g. from Blender MCP) as props or foliage types, image and texture generation through the project's OpenRouter key, Meshy generation, placement tools | Planned  |
+| **4. Props and assets**  | A props system in the game (placing models with snapping and rotation, later collision), GLB import (e.g. from Blender MCP) as props or foliage types, image and texture generation through the project's OpenRouter key, Meshy generation, placement tools | **Done** |
 | **5. Headless sessions** | The server starts its own hidden editor when none is open, so agents can build and render unattended                                                                                                                                                        | Planned  |
+
+Not yet: collision for props, prop thumbnails, .gltf props (convert to .glb first).

@@ -415,6 +415,8 @@ export type GameManifest = {
         update_layers?: string;
         /** POST a new biome from a layer ({layer_id, name}); apply: `${update_layers}/{id}/biome`. */
         biomes?: string;
+        /** Agent bridge: POST `${agent}/poll`, results to `${agent}/commands/{id}`. */
+        agent?: string;
     };
 };
 

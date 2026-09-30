@@ -1,0 +1,117 @@
+# Waterways MCP server: let Claude build your world
+
+Waterways includes an [MCP](https://modelcontextprotocol.io) server. AI agents such as Claude Desktop or Claude Code
+can connect to it and do most of what you can do in the studio and the editor:
+
+- set up and tune maps, terrain layers, biomes, foliage, weather and game settings;
+- look at the world through screenshots;
+- work live in the editor you have open, while you watch.
+
+## Setup
+
+The server runs on your machine as a local process started by the AI client:
+`php artisan mcp:start waterways`. It uses the same database and storage as the studio. The studio must be
+running as usual (for example `composer dev`), because the live editor talks to it.
+
+**Claude Code:** in the project folder, run once:
+
+```bash
+claude mcp add waterways -- php artisan mcp:start waterways
+```
+
+Then start `claude` in the project folder. Add `--scope user` and the absolute path to `artisan` to use the server
+from anywhere.
+
+**Claude Desktop:** Settings → Developer → Edit Config, then add:
+
+```json
+{
+    "mcpServers": {
+        "waterways": {
+            "command": "php",
+            "args": [
+                "/path/to/waterways-game/artisan",
+                "mcp:start",
+                "waterways"
+            ]
+        }
+    }
+}
+```
+
+Use absolute paths. If `php` is not on the PATH of desktop apps (for example with Herd), use the full path to the
+PHP binary. Restart Claude Desktop afterwards.
+
+**Other clients (HTTP):** set `WATERWAYS_MCP_TOKEN` in `.env`. The server is then also available at
+`http://<studio-host>/mcp`, and requests must send `Authorization: Bearer <token>`. Without a token, the HTTP
+endpoint does not exist.
+
+You can connect other MCP servers at the same time, for example Blender MCP for modelling assets.
+
+## Working live in the editor
+
+Terrain edits, screenshots and editor control need the game engine, which runs in your browser. **Open the map in
+the studio** (Maps → map → Open Studio) and keep the tab visible; browsers pause background tabs. The editor
+checks the server about once a second for commands from agents, runs them in front of you and reports the result.
+Changes to settings and libraries work without an open editor, and appear live when one is open.
+
+- The agent sees which map is open (`get_project_overview`). Map tools default to that map.
+- Edits made inside the editor stay unsaved until they are saved, by you or by the agent
+  (`control_editor` action `save`), just like your own edits.
+- If two tabs have the same map open, each command runs in exactly one of them.
+
+## Safety
+
+- **Local only.** The stdio server is a process on your machine. The HTTP endpoint needs a token.
+- **API keys never leave the server.** Agents use the project's configured services; tools never return keys.
+- **Snapshots.** Before an agent tool changes a map, the server takes an automatic snapshot (at most every
+  10 minutes; the last 15 are kept). A snapshot holds the saved terrain, paint, water and foliage, plus the layers
+  and environment. `map_snapshots` lists, creates and restores snapshots, and a restore first snapshots the
+  current state, so it can be undone too.
+- **Unsaved work is protected.** Restoring a snapshot or regenerating terrain reloads the open editor. If the
+  editor has unsaved changes, the tool refuses until the agent saves them or you agree to drop them.
+- `regenerate_terrain` and `delete_terrain_layer` are marked as destructive, so clients ask before using them.
+
+## Tools (phase 1)
+
+| Tool                                                                | What it does                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_project_overview`                                              | Maps, libraries, graphics preset, configured AI services, which map is open in an editor                                                                                                                                                                                                          |
+| `get_map`                                                           | Map settings, coordinate system, environment, the 8 layer slots (materials, auto-paint rules, ground cover), terrain statistics (height range, layer coverage, water), saved foliage counts, editor state                                                                                         |
+| `get_settings`                                                      | Fields (type, range, options, description) and current values of `environment` (per map), `player`, `graphics` or `editor`                                                                                                                                                                        |
+| `list_foliage_types`, `list_biomes`, `list_materials`               | The libraries                                                                                                                                                                                                                                                                                     |
+| `get_editor_state`                                                  | Live: mode, camera, view mode, selected tool, unsaved changes, undo/redo, fps and draw calls                                                                                                                                                                                                      |
+| `take_screenshot`                                                   | Live: renders the map from the current view, an `overview`, a `top_down` view (north up), the player start, or any position and target, optionally in an analysis view (layers, slope, height, foliage density, lighting only, wireframe). Returns the image and puts your camera back afterwards |
+| `set_camera`                                                        | Live: moves your editor camera, for example to show you something                                                                                                                                                                                                                                 |
+| `control_editor`                                                    | Live: save, undo / redo, view mode, edit / play, auto paint                                                                                                                                                                                                                                       |
+| `create_map`, `regenerate_terrain`, `update_map`                    | New maps (procedural or real-world), terrain regeneration, name, description, player start, default map                                                                                                                                                                                           |
+| `update_environment`, `update_game_settings`                        | Weather, time of day, fog, …; player, graphics and editor settings                                                                                                                                                                                                                                |
+| `update_terrain_layer`, `add_terrain_layer`, `delete_terrain_layer` | Layer look, materials, auto-paint rules, ground cover                                                                                                                                                                                                                                             |
+| `apply_biome`, `save_layer_as_biome`                                | Biomes on layer slots, and new biomes from layers                                                                                                                                                                                                                                                 |
+| `save_foliage_type`                                                 | Create or update foliage types                                                                                                                                                                                                                                                                    |
+| `map_snapshots`                                                     | List, create and restore snapshots                                                                                                                                                                                                                                                                |
+
+## How it works
+
+- `routes/ai.php` registers the server: `App\Mcp\Servers\WaterwaysServer`, with tools in `app/Mcp/Tools`.
+- **Live bridge** (`App\Mcp\EditorBridge`): a tool that needs the engine queues a command in `agent_commands`
+  and waits for the result.
+    - The open editor (`resources/game/core/AgentBridge.ts`) polls `POST /api/maps/{map}/agent/poll` and claims
+      pending commands.
+    - It runs them (`resources/game/core/AgentCommands.ts`) and posts results to `/agent/commands/{id}`.
+    - Each poll also records the session and a little state in `agent_sessions`.
+    - The MCP process and the web server share only the database, so no websockets or extra services are needed.
+- **Snapshots** (`App\Mcp\MapSnapshots`, table `map_snapshots`): stored assets are copied to
+  `storage/app/private/maps/{id}/snapshots/{snapshot}`, and layers and settings are kept as JSON.
+- **Tests:** `tests/Feature/Mcp` drives every tool through the MCP test client. A fake editor answers
+  bridge commands.
+
+## Roadmap
+
+| Phase                    | Scope                                                                                                                                                                                                                                                                                                                                                           | Status   |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| **1. Server core**       | The tools above, the live editor bridge, screenshots and analysis views, snapshots, setup for Claude Desktop / Code                                                                                                                                                                                                                                             | **Done** |
+| **2. World building**    | High-level terrain operations on outlines and paths (raise, lower, flatten, smooth, terrace, hills and valleys, erosion), water (lakes at a level, rivers along a path, sea level), painting layers / biomes inside outlines, scattering and clearing foliage in areas, and `describe_map` renders (top-down height / layer / slope maps for spatial reasoning) | Next     |
+| **3. Claude requests**   | An editor tool to outline an area, attach a reference image and a note. Agents list open requests with world coordinates and a screenshot, build them, and mark them done with before / after images for review                                                                                                                                                 | Planned  |
+| **4. Props and assets**  | A props system in the game (placing models with snapping and rotation, later collision), GLB import (e.g. from Blender MCP) as props or foliage types, image and texture generation through the project's OpenRouter key, Meshy generation, placement tools                                                                                                     | Planned  |
+| **5. Headless sessions** | The server starts its own hidden editor when none is open, so agents can build and render unattended                                                                                                                                                                                                                                                            | Planned  |

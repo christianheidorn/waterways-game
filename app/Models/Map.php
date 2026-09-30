@@ -102,6 +102,12 @@ class Map extends Model
         return $this->hasMany(TerrainLayer::class)->with('material')->orderBy('slot');
     }
 
+    /** @return HasMany<MapSnapshot, $this> */
+    public function snapshots(): HasMany
+    {
+        return $this->hasMany(MapSnapshot::class);
+    }
+
     public function getRouteKeyName(): string
     {
         return 'slug';

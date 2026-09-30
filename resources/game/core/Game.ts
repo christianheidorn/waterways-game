@@ -3,6 +3,9 @@ import { Editor } from '../editor/Editor';
 import type { DirtyChannel } from '../editor/Editor';
 import { EditorPanel } from '../editor/ui/EditorPanel';
 import { ViewModes } from '../editor/ViewModes';
+import { AgentBridge } from './AgentBridge';
+import { createAgentHost } from './AgentCommands';
+import type { AgentContext } from './AgentCommands';
 import { Player } from '../player/Player';
 import { ThirdPersonCamera } from '../player/ThirdPersonCamera';
 import type {
@@ -113,6 +116,11 @@ export class Game {
     private mode: GameMode;
     private timer = new THREE.Timer();
     private dirty = new Set<DirtyChannel>();
+    private history = { canUndo: false, canRedo: false };
+    private lastStats: Record<string, number | undefined> = {};
+    private agentBridge: AgentBridge | null = null;
+    /** An agent reloads the page on purpose (restored snapshot): no "leave page?" prompt. */
+    private discarding = false;
     private saving = false;
     private statsTimer = 0;
     private frameTimes: number[] = [];
@@ -181,12 +189,95 @@ export class Game {
                 mode: this.mode,
             });
             this.bridge.send({ type: 'dirty', dirty: this.dirty.size > 0 });
+            this.startAgentBridge();
         } catch (error) {
             const message =
                 error instanceof Error ? error.message : String(error);
             console.error(error);
             this.loading.error(message);
             this.bridge.send({ type: 'error', message });
+        }
+    }
+
+    // ---------------------------------------------------------------- agents
+
+    /**
+     * Lets AI agents work in this editor through the MCP server (App\Mcp\EditorBridge): commands
+     * they queue for this map are polled and run here, live, in front of the user.
+     */
+    private startAgentBridge(): void {
+        const url = this.manifest.endpoints.agent;
+
+        if (!url) {
+            return;
+        }
+
+        const ctx: AgentContext = {
+            camera: this.camera,
+            heights: () => this.world.heights,
+            spawn: () => this.manifest.map.spawn,
+            mode: () => this.mode,
+            setMode: (mode) => this.setMode(mode),
+            syncFlyCamera: () => this.editor.fly.setFromCamera(),
+            viewMode: () => this.viewModes.current,
+            setViewMode: (mode) => this.viewModes.set(mode),
+            settling: () => this.world.foliage.settling,
+            capture: (maxWidth) => this.captureImage(maxWidth),
+            unsaved: () => [...this.dirty],
+            save: () => this.save(),
+            history: () => this.history,
+            undo: () => this.editor.undo(),
+            redo: () => this.editor.redo(),
+            autoPaint: () => this.editor.autoPaint(),
+            refresh: (parts) => this.refreshFromServer(parts),
+            // Only after the agent checked that unsaved changes may go (see map_snapshots restore).
+            reload: () => {
+                this.discarding = true;
+                window.location.reload();
+            },
+            editorState: () => ({
+                tool_group: this.editor.state.group,
+                paint_layer_slot: this.editor.state.paintLayer,
+            }),
+            stats: () => ({ ...this.lastStats }),
+        };
+        this.agentBridge = new AgentBridge(this.api, url, createAgentHost(ctx));
+        this.agentBridge.start();
+    }
+
+    /** Re-reads parts of the manifest after an agent changed them on the server, and applies them. */
+    private async refreshFromServer(parts: string[]): Promise<void> {
+        const m = await this.api.manifest();
+
+        if (parts.includes('layers')) {
+            this.manifest.biomes = m.biomes;
+            this.setLayers(m.layers);
+        }
+
+        if (parts.includes('foliage_types')) {
+            this.onShellMessage({
+                type: 'updateFoliageTypes',
+                foliageTypes: m.foliage_types,
+            });
+        }
+
+        if (parts.includes('environment')) {
+            this.onShellMessage({
+                type: 'updateEnvironment',
+                environment: m.environment,
+            });
+        }
+
+        if (parts.includes('settings')) {
+            this.onShellMessage({
+                type: 'updateSettings',
+                settings: m.settings,
+            });
+        }
+
+        if (parts.includes('map')) {
+            this.manifest.map.spawn = m.map.spawn;
+            this.editor.setSpawn(m.map.spawn);
         }
     }
 
@@ -292,7 +383,7 @@ export class Game {
             }
         });
         window.addEventListener('beforeunload', (e) => {
-            if (this.dirty.size && !this.config.embedded) {
+            if (this.dirty.size && !this.config.embedded && !this.discarding) {
                 e.preventDefault();
             }
         });
@@ -479,6 +570,7 @@ export class Game {
                     }
                 },
                 onHistory: (canUndo, canRedo) => {
+                    this.history = { canUndo, canRedo };
                     this.hud.setHistory(canUndo, canRedo);
                     this.bridge.send({ type: 'history', canUndo, canRedo });
                 },
@@ -843,6 +935,15 @@ export class Game {
                 ? this.effectiveRenderScale()
                 : undefined,
             gpuMs: this.profiler?.lastMs ?? undefined,
+        };
+        this.lastStats = {
+            fps: Math.round(stats.fps),
+            frame_ms: Math.round(stats.frameMs * 10) / 10,
+            gpu_ms: stats.gpuMs,
+            draw_calls: stats.drawCalls,
+            triangles: stats.triangles,
+            foliage_instances: stats.foliageInstances,
+            foliage_drawn: stats.foliageDrawn,
         };
         this.graphicsMenu?.setStats(stats, {
             renderScale: this.effectiveRenderScale(),
@@ -1614,18 +1715,33 @@ export class Game {
     }
 
     /** Renders the current view without editor overlays and posts it to the studio (AI review). */
-    private sendScreenshot(requestId: string): void {
+    /** Renders a still frame (no brush) and copies it, scaled to at most maxWidth, as a JPEG. */
+    private captureImage(maxWidth: number): {
+        dataUrl: string;
+        width: number;
+        height: number;
+    } {
         this.world.material.hideBrush();
         this.postFx.beginStill();
         this.renderFrame(0);
         const src = this.renderer.domElement;
-        const scale = Math.min(1, 1280 / src.width);
+        const scale = Math.min(1, maxWidth / src.width);
         const canvas = document.createElement('canvas');
         canvas.width = Math.round(src.width * scale);
         canvas.height = Math.round(src.height * scale);
         canvas
             .getContext('2d')!
             .drawImage(src, 0, 0, canvas.width, canvas.height);
+
+        return {
+            dataUrl: canvas.toDataURL('image/jpeg', 0.85),
+            width: canvas.width,
+            height: canvas.height,
+        };
+    }
+
+    private sendScreenshot(requestId: string): void {
+        const image = this.captureImage(1280);
         const euler = new THREE.Euler().setFromQuaternion(
             this.camera.quaternion,
             'YXZ',
@@ -1634,7 +1750,7 @@ export class Game {
         this.bridge.send({
             type: 'screenshot',
             requestId,
-            dataUrl: canvas.toDataURL('image/jpeg', 0.85),
+            dataUrl: image.dataUrl,
             mode: this.mode,
             camera: { x: p.x, y: p.y, z: p.z, yaw: euler.y, pitch: euler.x },
         });

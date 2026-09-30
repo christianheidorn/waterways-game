@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\AgentBridgeController;
 use App\Http\Controllers\Api\AiController;
 use App\Http\Controllers\Api\BiomeApiController;
 use App\Http\Controllers\Api\FoliageAiController;
@@ -19,6 +20,8 @@ Route::prefix('maps/{map}')->name('api.maps.')->group(function () {
     Route::patch('meta', [MapDataController::class, 'updateMeta'])->name('meta.update');
     Route::post('layers/{layer}/biome', [BiomeApiController::class, 'apply'])->name('layers.biome');
     Route::patch('layers/{layer}/ground-cover', [TerrainLayerApiController::class, 'groundCover'])->name('layers.ground-cover');
+    Route::post('agent/poll', [AgentBridgeController::class, 'poll'])->name('agent.poll');
+    Route::post('agent/commands/{command}', [AgentBridgeController::class, 'complete'])->name('agent.complete');
     Route::post('thumbnail', [MapDataController::class, 'storeThumbnail'])->name('thumbnail.store');
 
     Route::post('ai/suggest-materials', [MapAiController::class, 'suggestMaterials'])->name('ai.suggest-materials');

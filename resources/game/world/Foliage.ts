@@ -628,6 +628,11 @@ export class Foliage {
         this.coverScan = true;
     }
 
+    /** Tiles or cells are still being grown / built around the camera (screenshots wait for it). */
+    get settling(): boolean {
+        return this.coverScan || this.queue.length > 0;
+    }
+
     /**
      * Ground cover instances currently grown around the camera (not part of the saved foliage). Tiles
      * grown on the GPU count as last read back (a frame or two behind).

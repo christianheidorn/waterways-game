@@ -176,9 +176,19 @@ class TerrainLayerController extends Controller
      */
     private function validated(Request $request): array
     {
+        return $request->validate(self::rules());
+    }
+
+    /**
+     * Rules of a complete layer (the studio form sends every field).
+     *
+     * @return array<string, mixed>
+     */
+    public static function rules(): array
+    {
         $color = ['required', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'];
 
-        return $request->validate([
+        return [
             'name' => ['required', 'string', 'max:60'],
             'color' => $color,
             'color_secondary' => $color,
@@ -197,7 +207,7 @@ class TerrainLayerController extends Controller
             'auto_max_slope' => ['nullable', 'numeric', 'between:0,90'],
             'auto_priority' => ['required', 'integer', Rule::in(range(0, 10))],
             ...self::groundCoverRules(),
-        ]);
+        ];
     }
 
     /**

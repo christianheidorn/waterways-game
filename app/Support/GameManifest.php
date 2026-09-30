@@ -53,6 +53,8 @@ final class GameManifest
                 'update_foliage_type' => url('/api/foliage-types'),
                 'update_layers' => url("/api/maps/{$map->slug}/layers"),
                 'biomes' => url('/api/biomes'),
+                // Live bridge for AI agents (MCP server): poll for commands, post results to `${agent}/commands/{id}`.
+                'agent' => url("/api/maps/{$map->slug}/agent"),
             ],
         ];
     }

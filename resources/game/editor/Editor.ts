@@ -464,6 +464,12 @@ export class Editor {
         this.listeners.clear();
     }
 
+    /** Player start set from outside the editor (e.g. by an agent). */
+    setSpawn(spawn: { x: number; z: number; yaw: number } | null): void {
+        this.world.spawn = spawn;
+        this.updateSpawnMarker();
+    }
+
     updateSpawnMarker(): void {
         const spawn = this.world.spawn;
         const x = spawn?.x ?? 0;

@@ -481,6 +481,14 @@ How it works (`resources/game/world/`):
   press. Set `localStorage['waterways.muted'] = '1'` to mute.
 - **Ground** (`TerrainMaterial.ts`): global wetness and snow cover. Snow settles on flatter ground first.
 
+## AI agents (MCP server)
+
+Claude (Desktop or Code) or any MCP client can connect to the project and build with it. It can set up maps,
+layers, biomes, foliage, weather and settings, take screenshots from any angle, and work live in the editor
+you have open. Setup, safety (automatic snapshots, local only) and the tool list are in [docs/MCP.md](docs/MCP.md).
+In short: `claude mcp add waterways -- php artisan mcp:start waterways` in the project folder (or add that
+command to Claude Desktop), then open the map in the studio.
+
 ## Requirements
 
 - PHP 8.3+ with `gd`, `pdo_sqlite` and `curl`, plus Composer.

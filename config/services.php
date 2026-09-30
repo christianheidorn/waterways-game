@@ -42,6 +42,12 @@ return [
         )))),
     ],
 
+    // MCP server for AI agents: an HTTP endpoint at /mcp is only registered when a token is set
+    // (the local stdio server, `php artisan mcp:start waterways`, needs none).
+    'mcp' => [
+        'token' => env('WATERWAYS_MCP_TOKEN'),
+    ],
+
     'openrouter' => [
         // Fallback when no key is stored in the studio (Settings → AI).
         'key' => env('OPENROUTER_API_KEY'),

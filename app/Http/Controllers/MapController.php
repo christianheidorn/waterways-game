@@ -37,19 +37,7 @@ class MapController extends Controller
 
     public function store(Request $request): RedirectResponse
     {
-        $data = $this->validateTerrain($request, requireName: true);
-
-        $map = Map::query()->create([
-            ...TerrainShaping::DEFAULTS,
-            ...$data,
-            'slug' => $this->uniqueSlug($data['name']),
-            'seed' => $data['seed'] ?? random_int(1, 999_999),
-            'environment' => EnvironmentDefaults::group()->defaults(),
-            'terrain_status' => TerrainStatus::Queued,
-            'is_default' => ! Map::query()->exists(),
-        ]);
-
-        GenerateMapTerrain::dispatch($map);
+        $map = self::createMap($this->validateTerrain($request, requireName: true));
 
         $this->toast('success', 'Map created — generating terrain…');
 
@@ -84,8 +72,42 @@ class MapController extends Controller
      */
     public function regenerate(Request $request, Map $map): RedirectResponse
     {
-        $data = $this->validateTerrain($request, requireName: false);
+        self::regenerateMap($map, $this->validateTerrain($request, requireName: false));
 
+        $this->toast('info', 'Terrain regeneration queued.');
+
+        return back();
+    }
+
+    /**
+     * Creates a map from validated terrain settings and queues its terrain generation.
+     *
+     * @param  array<string, mixed>  $data  see terrainRules()
+     */
+    public static function createMap(array $data): Map
+    {
+        $map = Map::query()->create([
+            ...TerrainShaping::DEFAULTS,
+            ...$data,
+            'slug' => self::uniqueSlug($data['name']),
+            'seed' => $data['seed'] ?? random_int(1, 999_999),
+            'environment' => EnvironmentDefaults::group()->defaults(),
+            'terrain_status' => TerrainStatus::Queued,
+            'is_default' => ! Map::query()->exists(),
+        ]);
+
+        GenerateMapTerrain::dispatch($map);
+
+        return $map;
+    }
+
+    /**
+     * Re-generates a map's terrain from validated settings: discards sculpting, paint and foliage.
+     *
+     * @param  array<string, mixed>  $data  see terrainRules()
+     */
+    public static function regenerateMap(Map $map, array $data): void
+    {
         $map->update([
             ...$data,
             'seed' => $data['seed'] ?? $map->seed,
@@ -97,10 +119,6 @@ class MapController extends Controller
         ]);
 
         GenerateMapTerrain::dispatch($map);
-
-        $this->toast('info', 'Terrain regeneration queued.');
-
-        return back();
     }
 
     public function makeDefault(Map $map): RedirectResponse
@@ -131,9 +149,17 @@ class MapController extends Controller
      */
     private function validateTerrain(Request $request, bool $requireName): array
     {
-        $realWorld = $request->input('source') === MapSource::RealWorld->value;
+        return $request->validate(self::terrainRules($request->input('source') === MapSource::RealWorld->value, $requireName));
+    }
 
-        return $request->validate([
+    /**
+     * Rules of a map's terrain source (creating or regenerating a map).
+     *
+     * @return array<string, list<mixed>>
+     */
+    public static function terrainRules(bool $realWorld, bool $requireName): array
+    {
+        return [
             'name' => [$requireName ? 'required' : 'sometimes', 'string', 'max:120'],
             'description' => ['nullable', 'string', 'max:2000'],
             'source' => ['required', Rule::enum(MapSource::class)],
@@ -150,7 +176,7 @@ class MapController extends Controller
             'bank_angle' => ['sometimes', 'numeric', 'min:10', 'max:80'],
             'smoothing' => ['sometimes', 'numeric', 'min:0', 'max:1'],
             'seed' => ['nullable', 'integer', 'min:1', 'max:999999'],
-        ]);
+        ];
     }
 
     /**
@@ -163,7 +189,7 @@ class MapController extends Controller
         return $stats === null ? null : (object) $stats;
     }
 
-    private function uniqueSlug(string $name): string
+    public static function uniqueSlug(string $name): string
     {
         $base = Str::slug($name) ?: 'map';
         $slug = $base;

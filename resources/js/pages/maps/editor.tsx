@@ -18,6 +18,7 @@ import {
     Paintbrush,
     Redo2,
     RotateCw,
+    Route,
     Save,
     Settings2,
     Sparkles,
@@ -86,6 +87,7 @@ const TOOL_GROUPS: {
     { value: 'water', label: 'Water', icon: Droplets },
     { value: 'place', label: 'Place', icon: Flag },
     { value: 'request', label: 'Request', icon: MessageSquarePlus },
+    { value: 'roads', label: 'Roads', icon: Route },
 ];
 
 const formatHour = (v: number) => {

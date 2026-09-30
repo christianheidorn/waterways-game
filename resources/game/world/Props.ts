@@ -177,13 +177,14 @@ export class Props implements CollisionProvider {
 
         return {
             version: 1,
-            props: [...this.instances.values()].map((p) => ({
+            props: [...this.instances.values()].map(({ align, ...p }) => ({
                 ...p,
                 x: round(p.x),
                 z: round(p.z),
                 yaw: round(p.yaw),
                 scale: round(p.scale),
                 offset: round(p.offset),
+                ...(align ? { align: true } : {}),
             })),
         };
     }
@@ -210,7 +211,7 @@ export class Props implements CollisionProvider {
     update(
         id: string,
         patch: Partial<
-            Pick<PropInstance, 'x' | 'z' | 'yaw' | 'scale' | 'offset'>
+            Pick<PropInstance, 'x' | 'z' | 'yaw' | 'scale' | 'offset' | 'align'>
         >,
     ): PropInstance | null {
         const p = this.instances.get(id);
@@ -280,6 +281,35 @@ export class Props implements CollisionProvider {
         if (moved) {
             this.changed();
         }
+    }
+
+    /**
+     * The model's footprint in its own frame at a scale (m): x / z ranges of its bounds, from the
+     * loaded model or else the library dimensions.
+     */
+    extents(
+        model: number,
+        scale: number,
+    ): { minX: number; maxX: number; minZ: number; maxZ: number } {
+        const box = this.batches.get(model)?.template.box;
+
+        if (box) {
+            return {
+                minX: box.min.x * scale,
+                maxX: box.max.x * scale,
+                minZ: box.min.z * scale,
+                maxZ: box.max.z * scale,
+            };
+        }
+
+        const m = this.models.get(model);
+        const d = m?.dimensions;
+        const fit =
+            m?.target_height && d && d.y > 0 ? m.target_height / d.y : 1;
+        const hx = ((d?.x ?? 2) / 2) * fit * scale;
+        const hz = ((d?.z ?? 2) / 2) * fit * scale;
+
+        return { minX: -hx, maxX: hx, minZ: -hz, maxZ: hz };
     }
 
     /** Footprint radius (m) of a model at a scale, once loaded. */
@@ -593,6 +623,8 @@ export class Props implements CollisionProvider {
         const matrix = this.matrixOf(p, template)!;
         const y = matrix.elements[13];
         const box = template.box;
+        // Props tilted to the slope keep upright colliders spanning the tilted model's height.
+        const span = p.align ? box.clone().applyMatrix4(matrix) : null;
 
         return {
             info: {
@@ -610,8 +642,8 @@ export class Props implements CollisionProvider {
             sin: Math.sin(p.yaw),
             scale: p.scale,
             radius: templateReach(template) * p.scale,
-            bottom: y + box.min.y * p.scale,
-            top: y + box.max.y * p.scale,
+            bottom: span ? span.min.y : y + box.min.y * p.scale,
+            top: span ? span.max.y : y + box.max.y * p.scale,
             shape,
         };
     }
@@ -680,18 +712,32 @@ export class Props implements CollisionProvider {
         let matrix = this.matrices.get(p.id);
 
         if (!matrix) {
-            const y = this.groundAt(
-                p.x,
-                p.z,
-                template.radius * p.scale,
-                p.offset,
+            const radius = template.radius * p.scale;
+            const rotation = new THREE.Quaternion().setFromAxisAngle(
+                new THREE.Vector3(0, 1, 0),
+                p.yaw,
             );
+            let y: number;
+
+            if (p.align) {
+                // Tilted to the ground's slope (averaged over the footprint), centred on the ground.
+                const hf = this.heights();
+                y =
+                    (hf.contains(p.x, p.z) ? hf.sample(p.x, p.z) : 0) +
+                    p.offset;
+                rotation.premultiply(
+                    new THREE.Quaternion().setFromUnitVectors(
+                        new THREE.Vector3(0, 1, 0),
+                        slopeNormal(hf, p.x, p.z, radius),
+                    ),
+                );
+            } else {
+                y = this.groundAt(p.x, p.z, radius, p.offset);
+            }
+
             matrix = new THREE.Matrix4().compose(
                 new THREE.Vector3(p.x, y, p.z),
-                new THREE.Quaternion().setFromAxisAngle(
-                    new THREE.Vector3(0, 1, 0),
-                    p.yaw,
-                ),
+                rotation,
                 new THREE.Vector3(p.scale, p.scale, p.scale),
             );
             this.matrices.set(p.id, matrix);
@@ -1082,6 +1128,24 @@ function collisionShape(
     }
 
     return shape;
+}
+
+/** Average ground normal over a footprint (a tilted prop leans with the slope, not with bumps). */
+function slopeNormal(
+    hf: Heightfield,
+    x: number,
+    z: number,
+    radius: number,
+): THREE.Vector3 {
+    const e = Math.max(hf.cell, radius * 0.6);
+    const at = (px: number, pz: number) =>
+        hf.contains(px, pz) ? hf.sample(px, pz) : hf.sample(x, z);
+
+    return new THREE.Vector3(
+        at(x - e, z) - at(x + e, z),
+        2 * e,
+        at(x, z - e) - at(x, z + e),
+    ).normalize();
 }
 
 function cellKey(cx: number, cz: number): number {

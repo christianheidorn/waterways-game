@@ -46,6 +46,11 @@ export type AgentContext = {
     undo: () => void;
     redo: () => void;
     autoPaint: () => void;
+    /** Walk mode on / off (optionally dropping the character at a point); reports where it stands. */
+    walk: (
+        on: boolean,
+        at?: { x: number; z: number; yaw?: number },
+    ) => Record<string, unknown>;
     /** A scripted world edit (editor/agent/runWorldEdit); throws with a message for the agent. */
     worldEdit: (payload: Record<string, unknown>) => Record<string, unknown>;
     refresh: (parts: string[]) => Promise<void>;
@@ -418,6 +423,37 @@ export function createAgentHost(ctx: AgentContext): AgentBridgeHost {
                         undo: 'control_editor action "undo" reverts this edit (one step).',
                         unsaved: ctx.unsaved(),
                     };
+                }
+                case 'walk': {
+                    requireEdit('walk mode');
+                    const on = payload.walk !== false;
+                    const x = payload.x;
+                    const z = payload.z;
+                    const heights = ctx.heights();
+
+                    if (
+                        typeof x === 'number' &&
+                        typeof z === 'number' &&
+                        !heights.contains(x, z)
+                    ) {
+                        throw new Error(`(${x}, ${z}) is outside the map.`);
+                    }
+
+                    return ctx.walk(
+                        on,
+                        typeof x === 'number' && typeof z === 'number'
+                            ? {
+                                  x,
+                                  z,
+                                  yaw:
+                                      typeof payload.facing === 'number'
+                                          ? THREE.MathUtils.degToRad(
+                                                payload.facing,
+                                            )
+                                          : undefined,
+                              }
+                            : undefined,
+                    );
                 }
                 case 'auto_paint':
                     requireEdit('auto paint');

@@ -5,6 +5,7 @@ import { EditorPanel } from '../editor/ui/EditorPanel';
 import { ViewModes } from '../editor/ViewModes';
 import { RequestOverlay } from '../editor/RequestOverlay';
 import { Props } from '../world/Props';
+import { Splines } from '../world/Splines';
 import { CollisionWorld } from '../world/collision/Collision';
 import { CollisionDebug } from '../world/collision/CollisionDebug';
 import { FoliageColliders } from '../world/collision/FoliageColliders';
@@ -35,6 +36,7 @@ import type {
     GraphicsSettings,
     AgentRequestSummary,
     PropsFile,
+    SplinesFile,
     BiomeSummary,
     GroundCoverEntry,
     TerrainLayer,
@@ -83,6 +85,7 @@ type World = {
     water: Water;
     foliage: Foliage;
     props: Props;
+    splines: Splines;
     wetness: Wetness;
     /** ESA WorldCover class lookup for real-world maps (0 = unknown). */
     landCoverAt?: (x: number, z: number) => number;
@@ -269,7 +272,29 @@ export class Game {
                 tool_group: this.editor.state.group,
                 paint_layer_slot: this.editor.state.paintLayer,
                 walking: this.walking,
+                roads: this.world.splines.roads.length,
+                rivers: this.world.splines.rivers.length,
             }),
+            walk: (on, at) => {
+                if (on && this.walking && at) {
+                    this.setWalking(false);
+                }
+
+                this.setWalking(on, at);
+
+                return {
+                    walking: this.walking,
+                    ...(this.walking
+                        ? {
+                              position: {
+                                  x: round2(this.player.position.x),
+                                  y: round2(this.player.position.y),
+                                  z: round2(this.player.position.z),
+                              },
+                          }
+                        : {}),
+                };
+            },
             sampleCollision: (payload) =>
                 sampleCollision(
                     this.collision,
@@ -302,6 +327,7 @@ export class Game {
             },
             player: {
                 mode: () => this.mode,
+                walking: () => this.walking,
                 play: () => this.setMode('play'),
                 position: () => this.player.position,
                 yaw: () => this.player.yaw,
@@ -776,6 +802,13 @@ export class Game {
         );
         this.scene.add(props.group);
 
+        const splines = new Splines();
+        splines.load(
+            assets.splines
+                ? await this.api.json<SplinesFile>(assets.splines)
+                : null,
+        );
+
         let landCoverAt: ((x: number, z: number) => number) | undefined;
 
         if (assets.landcover) {
@@ -836,6 +869,7 @@ export class Game {
             water,
             foliage,
             props,
+            splines,
             wetness,
             landCoverAt,
         };
@@ -919,6 +953,7 @@ export class Game {
                 requestSave: () => void this.save(),
                 cycleViewMode: (step) => this.viewModes.cycle(step),
                 toggleWalk: () => this.setWalking(!this.walking),
+                flash: (message) => this.hud.flash(message),
                 isPointerOverUi: () => this.isPointerOverUi(),
             },
             settings.editor,
@@ -1145,7 +1180,10 @@ export class Game {
      * (or below the camera) and walks with collision, the third-person camera following; the editor
      * stays open and Esc returns to the fly camera where it was.
      */
-    private setWalking(walking: boolean): void {
+    private setWalking(
+        walking: boolean,
+        start?: { x: number; z: number; yaw?: number },
+    ): void {
         if (walking === this.walking || (walking && this.mode !== 'edit')) {
             return;
         }
@@ -1158,10 +1196,12 @@ export class Game {
                 quaternion: this.camera.quaternion.clone(),
             };
             const dir = this.camera.getWorldDirection(new THREE.Vector3());
-            const at = this.editor.cursorValid
-                ? this.editor.cursor.clone()
-                : this.cameraGroundPoint().clone();
-            const yaw = Math.atan2(-dir.x, -dir.z);
+            const at = start
+                ? new THREE.Vector3(start.x, 0, start.z)
+                : this.editor.cursorValid
+                  ? this.editor.cursor.clone()
+                  : this.cameraGroundPoint().clone();
+            const yaw = start?.yaw ?? Math.atan2(-dir.x, -dir.z);
             this.player.spawn(at.x, at.z, yaw, this.playerEnv());
             // Dropped onto a rock or a floor rather than inside it.
             const top = this.collision.supportHeight(
@@ -2087,6 +2127,13 @@ export class Game {
                 await this.api.putBinary(
                     endpoints.save_props,
                     JSON.stringify(this.world.props.serialize()),
+                );
+            }
+
+            if (channels.has('splines') && endpoints.save_splines) {
+                await this.api.putBinary(
+                    endpoints.save_splines,
+                    JSON.stringify(this.world.splines.serialize()),
                 );
             }
 

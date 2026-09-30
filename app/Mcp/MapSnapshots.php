@@ -28,7 +28,7 @@ class MapSnapshots
     private const MAP_ATTRIBUTES = ['name', 'description', 'environment', 'spawn_x', 'spawn_z', 'spawn_yaw', 'min_height', 'max_height'];
 
     /** Assets copied (land cover is source data and never edited). */
-    private const ASSETS = ['heightmap', 'splatmap', 'water', 'foliage', 'props'];
+    private const ASSETS = ['heightmap', 'splatmap', 'water', 'foliage', 'props', 'splines'];
 
     public function __construct(private readonly TerrainStorage $storage) {}
 

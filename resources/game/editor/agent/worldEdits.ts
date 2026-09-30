@@ -861,6 +861,8 @@ export type PropPlacement = {
     rotation?: number;
     scale?: number;
     offset?: number;
+    /** Tilt with the terrain slope. */
+    align?: boolean;
 };
 
 export type PropScatterParams = {
@@ -908,6 +910,7 @@ export function placeProps(
                         : (it.rotation * Math.PI) / 180,
                 scale: it.scale ?? 1,
                 offset: it.offset ?? 0,
+                ...(it.align ? { align: true } : {}),
             }).id,
         );
     }
@@ -1025,6 +1028,7 @@ export type PropUpdate = {
     rotation?: number;
     scale?: number;
     offset?: number;
+    align?: boolean;
 };
 
 /** One change applied to every selected prop (update_props). */
@@ -1044,10 +1048,14 @@ export type PropChange = {
     scale_min?: number;
     scale_max?: number;
     seed?: number;
+    /** Tilt with the terrain slope (true) or stand upright (false). */
+    align?: boolean;
+    /** Snap positions to a grid of this size (m). */
+    snap_grid?: number;
 };
 
 type PropPatch = Partial<
-    Pick<PropInstance, 'x' | 'z' | 'yaw' | 'scale' | 'offset'>
+    Pick<PropInstance, 'x' | 'z' | 'yaw' | 'scale' | 'offset' | 'align'>
 >;
 
 /**
@@ -1084,6 +1092,7 @@ export function updateProps(
             if (u.rotation !== undefined) patch.yaw = toRad(u.rotation);
             if (u.scale !== undefined) patch.scale = clampScale(u.scale);
             if (u.offset !== undefined) patch.offset = u.offset;
+            if (u.align !== undefined) patch.align = u.align;
             planned.push({ id: u.id, patch });
         }
     } else {
@@ -1125,14 +1134,18 @@ export function updateProps(
 
             if (c.scale_by !== undefined) scale *= c.scale_by;
 
+            const grid = c.snap_grid ?? 0;
+            const snap = (v: number) =>
+                grid > 0 ? Math.round(v / grid) * grid : v;
             const patch: PropPatch = {
-                x: q.x + (c.move_x ?? 0),
-                z: q.z + (c.move_z ?? 0),
+                x: snap(q.x + (c.move_x ?? 0)),
+                z: snap(q.z + (c.move_z ?? 0)),
                 yaw: ((yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2),
                 scale: clampScale(scale),
             };
 
             if (c.offset !== undefined) patch.offset = c.offset;
+            if (c.align !== undefined) patch.align = c.align;
             planned.push({ id: q.id, patch });
         }
     }

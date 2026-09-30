@@ -14,7 +14,7 @@ use Laravel\Mcp\Server\Attributes\Description;
 use Laravel\Mcp\Server\Attributes\Name;
 
 #[Name('place_props')]
-#[Description('Places props (models from the prop library: huts, bridges, fences, rocks, …; see list_prop_models) on the terrain, live in the open editor (one undo step; saved unless save is false). Either exact `placements` (x, z in metres, rotation in degrees — 0 faces +Z, random when omitted — scale on the library size, offset in metres above/below the ground), or `scatter` `count` props of `models` inside a `shape`, kept apart (spacing from the model size unless given), off slopes steeper than max_slope and out of water. Props follow the terrain height, so sculpting afterwards keeps them grounded. Returns the new prop ids.')]
+#[Description('Places props (models from the prop library: huts, bridges, fences, rocks, …; see list_prop_models) on the terrain, live in the open editor (one undo step; saved unless save is false). Either exact `placements` (x, z in metres, rotation in degrees — 0 faces +Z, random when omitted — scale on the library size, offset in metres above/below the ground), or `scatter` `count` props of `models` inside a `shape`, kept apart (spacing from the model size unless given), off slopes steeper than max_slope and out of water, or a row `along` a path (fence posts, lamps, wall segments: one copy every `spacing` m, default the model\'s length so segments meet, turned along the path). Snapping like the Props tool: `snap` grid (m), edges (end-to-end onto the nearest placed prop, e.g. extending a fence) and align (tilt with the terrain slope; also per placement). Props follow the terrain height, so sculpting afterwards keeps them grounded. Returns the new prop ids.')]
 class PlaceProps extends WaterwaysTool
 {
     use PropModelArguments;
@@ -31,7 +31,22 @@ class PlaceProps extends WaterwaysTool
                 'rotation' => $schema->number()->description('Degrees around the vertical axis (0 faces +Z).'),
                 'scale' => $schema->number()->min(0.05)->max(20),
                 'offset' => $schema->number()->min(-50)->max(50),
+                'align' => $schema->boolean()->description('Tilt with the terrain slope.'),
             ]))->description('Exact placements (up to 500).'),
+            'snap' => $schema->object([
+                'grid' => $schema->number()->min(0)->max(100)->description('Snap positions to a grid of this size (m).'),
+                'edges' => $schema->boolean()->description('Snap end-to-end onto the nearest placed prop (fences, walls), turned like it.'),
+                'align' => $schema->boolean()->description('Tilt every placement with the terrain slope.'),
+            ])->description('placements: snapping.'),
+            'along' => $schema->object([
+                'model' => $schema->string()->description('Prop model id or name.')->required(),
+                'points' => $schema->array()->items($schema->object(['x' => $schema->number()->required(), 'z' => $schema->number()->required()]))->description('The path (2+ points).')->required(),
+                'spacing' => $schema->number()->min(0.2)->max(500)->description('Metres between copies (default: the model\'s length, so segments meet).'),
+                'scale' => $schema->number()->min(0.05)->max(20),
+                'offset' => $schema->number()->min(-50)->max(50),
+                'align' => $schema->boolean()->description('Tilt with the terrain slope.'),
+                'smooth' => $schema->boolean()->description('Follow a smooth curve through the points instead of straight lines.'),
+            ])->description('A row of one model along a path.'),
             'shape' => $this->shapeSchema($schema)->description('scatter: the area to scatter in.'),
             'models' => $schema->array()->items($schema->string())->description('scatter: prop model ids or names to mix.'),
             'count' => $schema->integer()->min(1)->max(2000)->description('scatter: how many props to try to place.'),
@@ -49,6 +64,40 @@ class PlaceProps extends WaterwaysTool
     {
         $input = $request->all();
 
+        if (! empty($input['along'])) {
+            $data = Validator::make($input, [
+                'along' => ['required', 'array'],
+                'along.model' => ['required'],
+                'along.points' => ['required', 'array', 'min:2', 'max:500'],
+                'along.points.*.x' => ['required', 'numeric'],
+                'along.points.*.z' => ['required', 'numeric'],
+                'along.spacing' => ['sometimes', 'numeric', 'between:0.2,500'],
+                'along.scale' => ['sometimes', 'numeric', 'between:0.05,20'],
+                'along.offset' => ['sometimes', 'numeric', 'between:-50,50'],
+                'along.align' => ['sometimes', 'boolean'],
+                'along.smooth' => ['sometimes', 'boolean'],
+            ])->validate();
+            $along = $data['along'];
+            $models = $this->resolvePropModels([$along['model']], 'along.model');
+            $model = $models[(string) $along['model']];
+            $map = $this->map($request);
+
+            return $this->worldEdit($map, $request, 'place_props along', [
+                'kind' => 'props',
+                'action' => 'along',
+                'prop_models' => $this->propModelRefs($models),
+                'along' => array_filter([
+                    'model' => $model->id,
+                    'points' => array_map(fn (array $p) => ['x' => (float) $p['x'], 'z' => (float) $p['z']], $along['points']),
+                    'spacing' => isset($along['spacing']) ? (float) $along['spacing'] : null,
+                    'scale' => isset($along['scale']) ? (float) $along['scale'] : null,
+                    'offset' => isset($along['offset']) ? (float) $along['offset'] : null,
+                    'align' => isset($along['align']) ? (bool) $along['align'] : null,
+                    'smooth' => isset($along['smooth']) ? (bool) $along['smooth'] : null,
+                ], fn ($v) => $v !== null),
+            ], fn () => $this->budgetNotes($map, $request, $models, [$model->id => 1]));
+        }
+
         if (! empty($input['placements'])) {
             $data = Validator::make($input, [
                 'placements' => ['required', 'array', 'max:500'],
@@ -58,6 +107,11 @@ class PlaceProps extends WaterwaysTool
                 'placements.*.rotation' => ['sometimes', 'numeric'],
                 'placements.*.scale' => ['sometimes', 'numeric', 'between:0.05,20'],
                 'placements.*.offset' => ['sometimes', 'numeric', 'between:-50,50'],
+                'placements.*.align' => ['sometimes', 'boolean'],
+                'snap' => ['sometimes', 'array'],
+                'snap.grid' => ['sometimes', 'numeric', 'between:0,100'],
+                'snap.edges' => ['sometimes', 'boolean'],
+                'snap.align' => ['sometimes', 'boolean'],
             ])->validate();
             $models = $this->resolvePropModels(array_column($data['placements'], 'model'), 'placements');
             $placements = array_map(fn (array $p) => array_filter([
@@ -67,7 +121,13 @@ class PlaceProps extends WaterwaysTool
                 'rotation' => isset($p['rotation']) ? (float) $p['rotation'] : null,
                 'scale' => isset($p['scale']) ? (float) $p['scale'] : null,
                 'offset' => isset($p['offset']) ? (float) $p['offset'] : null,
+                'align' => isset($p['align']) ? (bool) $p['align'] : null,
             ], fn ($v) => $v !== null), $data['placements']);
+            $snap = array_filter([
+                'grid' => isset($data['snap']['grid']) ? (float) $data['snap']['grid'] : null,
+                'edges' => isset($data['snap']['edges']) ? (bool) $data['snap']['edges'] : null,
+                'align' => isset($data['snap']['align']) ? (bool) $data['snap']['align'] : null,
+            ], fn ($v) => $v !== null);
 
             $map = $this->map($request);
 
@@ -75,6 +135,7 @@ class PlaceProps extends WaterwaysTool
                 'kind' => 'props',
                 'action' => 'place',
                 'placements' => $placements,
+                ...($snap !== [] ? ['snap' => $snap] : []),
                 'prop_models' => $this->propModelRefs($models),
             ], fn () => $this->budgetNotes($map, $request, $models, array_count_values(array_column($placements, 'model'))));
         }

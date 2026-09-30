@@ -17,7 +17,8 @@ export type EditorToolGroup =
     | 'foliage'
     | 'water'
     | 'place'
-    | 'request';
+    | 'request'
+    | 'roads';
 
 export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 

@@ -1,10 +1,27 @@
 import type { Editor } from '../Editor';
-import type { PropModelRef } from '../../shared/types';
+import type {
+    PropModelRef,
+    RiverSpline,
+    RoadSpline,
+    SplinePoint,
+} from '../../shared/types';
+import { polylineLength, sampleSpline } from '../../world/Splines';
+import { placementsAlong, snapToEdges, snapToGrid } from '../propSnap';
+import {
+    createRiver,
+    createRoad,
+    deleteSpline,
+    updateRiver,
+    updateRoad,
+} from '../splines/splineOps';
+import type { RiverInput, RoadInput } from '../splines/splineOps';
+import { STAMP_SHAPES } from '../stamps';
+import type { StampParams } from '../stamps';
 import type { GridRect } from '../../world/Heightfield';
+import type { Props } from '../../world/Props';
 import { ShapeMask } from './shapes';
 import type { ShapeSpec } from './shapes';
 import {
-    carveRiver,
     clearFoliage,
     EditError,
     eraseWater,
@@ -108,21 +125,43 @@ export function runWorldEdit(
                 );
             }
 
-            const m = requireMask();
+            if (action === 'update_river' || action === 'delete_river') {
+                const id = typeof payload.id === 'string' ? payload.id : '';
+
+                if (!world.splines.river(id)) {
+                    throw new EditError(
+                        `There is no river "${id}". edit_water action list_rivers lists them.`,
+                    );
+                }
+
+                if (action === 'delete_river') {
+                    return deleteSpline(editor, id);
+                }
+
+                const done = updateRiver(
+                    editor,
+                    id,
+                    riverInput(payload.params, shape),
+                );
+
+                return { ...done.result, river: describeRiver(done.river) };
+            }
 
             if (action === 'river') {
-                const depth = Math.max(
-                    0.3,
-                    Number((payload.params as { depth?: number }).depth ?? 2),
+                if (!shape || shape.type !== 'path') {
+                    throw new EditError('A river needs a path shape.');
+                }
+
+                // A stored, editable river spline (re-carved when edited).
+                const done = createRiver(
+                    editor,
+                    riverInput(payload.params, shape),
                 );
 
-                return editor.scriptedEdit(
-                    'Agent: river',
-                    m.rect,
-                    ['height', 'water'],
-                    () => carveRiver(hf, world.waterGrid, m, depth),
-                );
+                return { ...done.result, river: describeRiver(done.river) };
             }
+
+            const m = requireMask();
 
             return editor.scriptedEdit(
                 'Agent: erase water',
@@ -184,6 +223,50 @@ export function runWorldEdit(
                 }),
             );
         }
+        case 'road': {
+            const action = payload.action;
+
+            const input = (payload.road ?? {}) as RoadInput;
+
+            if (action === 'create') {
+                const done = createRoad(editor, input);
+
+                return { ...done.result, road: describeRoad(done.road) };
+            }
+
+            const id = typeof payload.id === 'string' ? payload.id : '';
+
+            if (!world.splines.road(id)) {
+                throw new EditError(
+                    `There is no road "${id}". edit_road action list lists them.`,
+                );
+            }
+
+            if (action === 'delete') {
+                return deleteSpline(editor, id);
+            }
+
+            const done = updateRoad(editor, id, input);
+
+            return { ...done.result, road: describeRoad(done.road) };
+        }
+        case 'stamp': {
+            const params = payload.params as StampParams;
+
+            if (!STAMP_SHAPES.includes(params.shape)) {
+                throw new EditError(
+                    `Unknown stamp shape ${String(params.shape)}.`,
+                );
+            }
+
+            if (!hf.contains(params.x, params.z)) {
+                throw new EditError(
+                    `(${params.x}, ${params.z}) is outside the map.`,
+                );
+            }
+
+            return editor.applyStamp(params);
+        }
         case 'props': {
             const action = payload.action;
 
@@ -193,16 +276,68 @@ export function runWorldEdit(
             }
 
             if (action === 'place') {
+                const snap = (payload.snap ?? {}) as PropSnap;
+                const placements = (payload.placements as PropPlacement[]).map(
+                    (p) => snapPlacement(world.props, p, snap),
+                );
+
                 return editor.scriptedEdit(
                     'Agent: place props',
                     whole,
                     ['props'],
-                    () =>
-                        placeProps(
+                    () => placeProps(world.props, hf, placements),
+                );
+            }
+
+            if (action === 'along') {
+                const along = payload.along as {
+                    model: number;
+                    points: SplinePoint[];
+                    spacing?: number | null;
+                    scale?: number;
+                    align?: boolean;
+                    smooth?: boolean;
+                    offset?: number;
+                };
+                const scale = along.scale ?? 1;
+
+                if (!world.props.hasModel(along.model)) {
+                    throw new EditError(
+                        `There is no ready prop model with id ${along.model}. Use list_prop_models.`,
+                    );
+                }
+
+                const points = along.smooth
+                    ? sampleSpline(along.points, 1)
+                    : along.points;
+                const spots = placementsAlong(
+                    world.props,
+                    along.model,
+                    scale,
+                    points,
+                    along.spacing ?? null,
+                );
+
+                return editor.scriptedEdit(
+                    'Agent: place props along a path',
+                    whole,
+                    ['props'],
+                    () => ({
+                        ...placeProps(
                             world.props,
                             hf,
-                            payload.placements as PropPlacement[],
+                            spots.map((spot) => ({
+                                model: along.model,
+                                x: spot.x,
+                                z: spot.z,
+                                rotation: (spot.yaw * 180) / Math.PI,
+                                scale,
+                                offset: along.offset ?? 0,
+                                align: along.align,
+                            })),
                         ),
+                        path_length_m: Math.round(polylineLength(points)),
+                    }),
                 );
             }
 
@@ -269,5 +404,92 @@ function grow(rect: GridRect, by: number, res: number): GridRect {
         z0: Math.max(0, rect.z0 - by),
         x1: Math.min(res - 1, rect.x1 + by),
         z1: Math.min(res - 1, rect.z1 + by),
+    };
+}
+
+/** Snapping options for placed props (place_props). */
+type PropSnap = { grid?: number; edges?: boolean; align?: boolean };
+
+/** A placement moved onto the grid / end-to-end onto a neighbour, and tilted when asked. */
+function snapPlacement(
+    props: Props,
+    p: PropPlacement,
+    snap: PropSnap,
+): PropPlacement {
+    let x = snapToGrid(p.x, snap.grid ?? 0);
+    let z = snapToGrid(p.z, snap.grid ?? 0);
+    let rotation = p.rotation;
+
+    if (snap.edges) {
+        const edge = snapToEdges(props, p.model, p.scale ?? 1, x, z);
+
+        if (edge) {
+            x = edge.x;
+            z = edge.z;
+            rotation = (edge.yaw * 180) / Math.PI;
+        }
+    }
+
+    return {
+        ...p,
+        x,
+        z,
+        rotation,
+        align: p.align ?? snap.align,
+    };
+}
+
+function riverInput(params: unknown, shape: ShapeSpec | undefined): RiverInput {
+    const p = (params ?? {}) as {
+        depth?: number;
+        width?: number;
+        bank?: number;
+        name?: string;
+    };
+    const input: RiverInput = {};
+
+    if (shape?.type === 'path') {
+        input.points = shape.points;
+        input.width = shape.width;
+
+        if (shape.falloff !== undefined) {
+            input.bank = shape.falloff;
+        }
+    }
+
+    if (p.width !== undefined) input.width = p.width;
+    if (p.depth !== undefined) input.depth = p.depth;
+    if (p.bank !== undefined) input.bank = p.bank;
+    if (p.name !== undefined) input.name = p.name;
+
+    return input;
+}
+
+/** A road as agents see it (without its footprint). */
+export function describeRoad(r: RoadSpline): Record<string, unknown> {
+    return {
+        id: r.id,
+        name: r.name,
+        profile: r.profile,
+        width: r.width,
+        shoulder: r.shoulder,
+        bank: r.bank,
+        smoothing: r.smoothing,
+        layer: r.layer,
+        clear_foliage: r.clear_foliage,
+        length_m: Math.round(polylineLength(sampleSpline(r.points, 2))),
+        points: r.points,
+    };
+}
+
+export function describeRiver(r: RiverSpline): Record<string, unknown> {
+    return {
+        id: r.id,
+        name: r.name,
+        width: r.width,
+        depth: r.depth,
+        bank: r.bank,
+        length_m: Math.round(polylineLength(sampleSpline(r.points, 2))),
+        points: r.points,
     };
 }

@@ -16,12 +16,7 @@
  * (after an edit) is diffed against the last one: only tiles near cells whose geometry or lighting
  * changed are recomputed. A new light direction recomputes everything.
  */
-import {
-    PROBE_HEIGHTS,
-    PROBE_LAYERS,
-    TILE,
-    toHalf,
-} from './bounceShared';
+import { PROBE_HEIGHTS, PROBE_LAYERS, TILE, toHalf } from './bounceShared';
 import type {
     BounceRequest,
     BounceResponse,
@@ -327,10 +322,7 @@ function march(
     while (t < maxDist) {
         const step = Math.max(c0 * 0.5, t * 0.22);
 
-        while (
-            level < lastLevel &&
-            step >= levels[level + 1].cell * 0.75
-        ) {
+        while (level < lastLevel && step >= levels[level + 1].cell * 0.75) {
             level++;
         }
 
@@ -503,7 +495,8 @@ function relight(): void {
             const k3 = k * 3;
             const wx = -half + (x + 0.5) * cell;
             const wz = -half + (z + 0.5) * cell;
-            const p = Math.min(m - 1, Math.floor(z / ratio)) * m +
+            const p =
+                Math.min(m - 1, Math.floor(z / ratio)) * m +
                 Math.min(m - 1, Math.floor(x / ratio));
             // Surface normal: terrain slope where the ground is the surface, up on water and props.
             let nx = 0;
@@ -603,7 +596,6 @@ function computeProbeBase(): void {
             probeBase[z * res + x] = v;
         }
     }
-
 }
 
 /** Marks the tiles near cells whose geometry or radiance changed. */
@@ -661,9 +653,15 @@ function markChanges(prev: BounceScene, prevLevel: Level): void {
             }
 
             const t0x = Math.max(0, Math.floor((x - reach) / TILE));
-            const t1x = Math.min(tilesPerSide - 1, Math.floor((x + reach) / TILE));
+            const t1x = Math.min(
+                tilesPerSide - 1,
+                Math.floor((x + reach) / TILE),
+            );
             const t0z = Math.max(0, Math.floor((z - reach) / TILE));
-            const t1z = Math.min(tilesPerSide - 1, Math.floor((z + reach) / TILE));
+            const t1z = Math.min(
+                tilesPerSide - 1,
+                Math.floor((z + reach) / TILE),
+            );
 
             for (let tz = t0z; tz <= t1z; tz++) {
                 for (let tx = t0x; tx <= t1x; tx++) {
@@ -848,7 +846,11 @@ async function run(): Promise<void> {
         flush(batch);
 
         if (scene && !paused && nextTile() < 0) {
-            post({ op: 'done', ms: Math.round(passWork), probes: res * res * PROBE_LAYERS });
+            post({
+                op: 'done',
+                ms: Math.round(passWork),
+                probes: res * res * PROBE_LAYERS,
+            });
             passWork = 0;
             passStart = 0;
         }

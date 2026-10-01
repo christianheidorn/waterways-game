@@ -93,7 +93,7 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
     | --------------- | ---------------------------------------------------------------------------------------------------------------------- |
     | Lit             | The final rendering (default)                                                                                          |
     | Lighting only   | Terrain and foliage with a neutral grey albedo: judge sun, sky light, shadows and AO without the materials             |
-    | Bounce light    | Only the bounce light (every other light off, ×3) on grey albedo: where the probes put indirect light and sky shade   |
+    | Bounce light    | Only the bounce light (every other light off, ×3) on grey albedo: where the probes put indirect light and sky shade    |
     | Layers          | Each terrain layer in its own colour (legend with the layer names), blended by paint weight so transitions show        |
     | Slope           | Steepness: green (flat) → yellow (30°) → red (45°) → purple (60°+); handy with the foliage slope rules                 |
     | Height          | Hypsometric bands with contour lines; the interval follows the map's height range (1, 2 or 5 × 10ⁿ m, bold every 5th)  |

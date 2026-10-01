@@ -383,7 +383,8 @@ export class BounceLight {
         }
 
         if (
-            Math.abs(focus.x - this.focus.x) + Math.abs(focus.z - this.focus.y) >
+            Math.abs(focus.x - this.focus.x) +
+                Math.abs(focus.z - this.focus.y) >
             16
         ) {
             this.focus.set(focus.x, focus.z);
@@ -420,9 +421,7 @@ export class BounceLight {
     }
 
     stats(): BounceStats {
-        const spacing = this.res
-            ? this.sources.heights.size / this.res
-            : 0;
+        const spacing = this.res ? this.sources.heights.size / this.res : 0;
 
         return {
             quality: this.quality,
@@ -453,7 +452,10 @@ export class BounceLight {
         this.installed = true;
         const ctx = this.renderer.contextNode;
         const value = ctx.value as Record<string, unknown>;
-        value.getAO = (aoNode: Node<'float'> | null, builder: THREE.NodeBuilder) =>
+        value.getAO = (
+            aoNode: Node<'float'> | null,
+            builder: THREE.NodeBuilder,
+        ) =>
             this.applies(builder)
                 ? aoNode
                     ? aoNode.mul(this.occlusion(builder))
@@ -620,7 +622,10 @@ export class BounceLight {
                                     block * res +
                                     tile.x0) *
                                 4;
-                            atlas.set(src.subarray(from, from + tile.w * 4), to);
+                            atlas.set(
+                                src.subarray(from, from + tile.w * 4),
+                                to,
+                            );
                         }
                     }
                 }
@@ -746,7 +751,8 @@ export class BounceLight {
                         );
                         const snow =
                             THREE.MathUtils.clamp(
-                                (snowCover * 1.4 - (1 - snowCover) * 0.3) / 0.25,
+                                (snowCover * 1.4 - (1 - snowCover) * 0.3) /
+                                    0.25,
                                 0,
                                 1,
                             ) * flat;
@@ -798,8 +804,20 @@ export class BounceLight {
 
                 cells = [
                     [
-                        Math.min(n - 1, Math.max(0, Math.floor(((x0 + x1) / 2 + half) / cell))),
-                        Math.min(n - 1, Math.max(0, Math.floor(((z0 + z1) / 2 + half) / cell))),
+                        Math.min(
+                            n - 1,
+                            Math.max(
+                                0,
+                                Math.floor(((x0 + x1) / 2 + half) / cell),
+                            ),
+                        ),
+                        Math.min(
+                            n - 1,
+                            Math.max(
+                                0,
+                                Math.floor(((z0 + z1) / 2 + half) / cell),
+                            ),
+                        ),
                     ],
                 ];
             }
@@ -825,9 +843,7 @@ export class BounceLight {
                 continue;
             }
 
-            color
-                .set(type.color)
-                .multiply(tint.set(type.tint ?? '#ffffff'));
+            color.set(type.color).multiply(tint.set(type.tint ?? '#ffffff'));
             const reach =
                 Math.max(
                     bounds.max.x - bounds.min.x,
@@ -845,7 +861,16 @@ export class BounceLight {
 
                 if (kind.solid) {
                     const rr = r * 0.8;
-                    solid(x - rr, z - rr, x + rr, z + rr, top, color.r, color.g, color.b);
+                    solid(
+                        x - rr,
+                        z - rr,
+                        x + rr,
+                        z + rr,
+                        top,
+                        color.r,
+                        color.g,
+                        color.b,
+                    );
                     continue;
                 }
 
@@ -882,18 +907,25 @@ export class BounceLight {
                                 const sum = prev + l;
                                 canopyBottom[k] =
                                     prev > 0
-                                        ? (canopyBottom[k] * prev + bottom * l) / sum
+                                        ? (canopyBottom[k] * prev +
+                                              bottom * l) /
+                                          sum
                                         : bottom;
                                 canopyTop[k] =
                                     prev > 0
                                         ? (canopyTop[k] * prev + top * l) / sum
                                         : top;
                                 canopyAlbedo[k * 3] =
-                                    (canopyAlbedo[k * 3] * prev + color.r * l) / sum;
+                                    (canopyAlbedo[k * 3] * prev + color.r * l) /
+                                    sum;
                                 canopyAlbedo[k * 3 + 1] =
-                                    (canopyAlbedo[k * 3 + 1] * prev + color.g * l) / sum;
+                                    (canopyAlbedo[k * 3 + 1] * prev +
+                                        color.g * l) /
+                                    sum;
                                 canopyAlbedo[k * 3 + 2] =
-                                    (canopyAlbedo[k * 3 + 2] * prev + color.b * l) / sum;
+                                    (canopyAlbedo[k * 3 + 2] * prev +
+                                        color.b * l) /
+                                    sum;
                                 lai[k] = sum;
                             }
                         }

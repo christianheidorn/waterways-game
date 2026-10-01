@@ -33,7 +33,8 @@ export const VIEW_MODES: ViewModeInfo[] = [
     {
         id: 'bounce',
         label: 'Bounce light only',
-        description: 'Only the indirect light bounced off the ground, trees and props',
+        description:
+            'Only the indirect light bounced off the ground, trees and props',
     },
     {
         id: 'layers',
@@ -217,7 +218,7 @@ export class ViewModes {
                     entries: [],
                     note: this.targets.bounceActive()
                         ? 'Indirect diffuse light only, ×3, grey albedo on terrain and foliage'
-                        : 'Bounce light is off (graphics quality or the map\'s bounce strength)',
+                        : "Bounce light is off (graphics quality or the map's bounce strength)",
                 };
             case 'wireframe':
                 return {

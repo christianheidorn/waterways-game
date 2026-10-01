@@ -215,7 +215,8 @@ export class RippleSim {
                 const w = i > 0 ? h[c - 1] : 0;
                 const s = j < n - 1 ? h[c + n] : 0;
                 const no = j > 0 ? h[c - n] : 0;
-                const v = m * (2 * hc - prev[c] + k * (e + w + s + no - 4 * hc));
+                const v =
+                    m * (2 * hc - prev[c] + k * (e + w + s + no - 4 * hc));
                 next[c] = v;
                 const speed = Math.abs(v - hc) / RIPPLE_DT;
                 foam[c] = Math.max(
@@ -277,10 +278,8 @@ export class RippleSim {
         out.height =
             (h00 * (1 - tx) + h10 * tx) * (1 - tz) +
             (h01 * (1 - tx) + h11 * tx) * tz;
-        out.slopeX =
-            ((h10 - h00) * (1 - tz) + (h11 - h01) * tz) / this.cell;
-        out.slopeZ =
-            ((h01 - h00) * (1 - tx) + (h11 - h10) * tx) / this.cell;
+        out.slopeX = ((h10 - h00) * (1 - tz) + (h11 - h01) * tz) / this.cell;
+        out.slopeZ = ((h01 - h00) * (1 - tx) + (h11 - h10) * tx) / this.cell;
     }
 
     /** Sum of squared heights (tests: the field's energy). */

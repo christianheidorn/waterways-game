@@ -177,12 +177,18 @@ export class WeatherAudio {
             : 500 + Math.random() * 450;
         band.frequency.setValueAtTime(f0, start);
         // The slosh drops in pitch as the water settles.
-        band.frequency.exponentialRampToValueAtTime(f0 * 0.45, start + duration);
+        band.frequency.exponentialRampToValueAtTime(
+            f0 * 0.45,
+            start + duration,
+        );
         band.Q.value = splash ? 0.6 : 1.4;
         const g = ctx.createGain();
         const peak = volume * (splash ? 0.5 : 0.22);
         g.gain.setValueAtTime(0.0001, start);
-        g.gain.exponentialRampToValueAtTime(peak, start + (splash ? 0.012 : 0.04));
+        g.gain.exponentialRampToValueAtTime(
+            peak,
+            start + (splash ? 0.012 : 0.04),
+        );
         g.gain.exponentialRampToValueAtTime(0.0001, start + duration);
         src.connect(band).connect(g).connect(this.master);
         src.start(start, Math.random() * 1.5);

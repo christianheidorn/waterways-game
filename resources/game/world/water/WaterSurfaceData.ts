@@ -8,9 +8,11 @@ const isWet = (v: number) => v > NO_WATER + 1;
  * The water grid resampled at the water mesh resolution (every `step`-th sample), as CPU arrays and GPU
  * textures shared by every water mesh (map chunks, the camera-centred fine mesh, the ocean ring):
  *
- * - levelTexture (RG32F): surface level per sample (extrapolated under the shore from the lowest wet
- *   neighbour, so the surface tucks under the land) and the cell mask (1 where the cell whose lower corner
- *   is this sample is drawn: some corner wet, no level jump bigger than the wall limit);
+ * - gridTexture (RGBA32F, size × 2·size, nearest; the water shaders are at WebGPU's 16 sampled textures,
+ *   so it is shared): rows size..2·size−1 hold the surface level per sample (extrapolated under the shore
+ *   from the lowest wet neighbour, so the surface tucks under the land) and the cell mask (1 where the cell
+ *   whose lower corner is this sample is drawn: some corner wet, no level jump bigger than the wall limit);
+ *   rows 0..size−1 belong to the surf's shore field (Surf);
  * - dataTexture (RGBA16F): water depth (m), flow (x, z) and the water body row (see WaterBodies).
  *
  * Shading reads depth / flow / body per pixel from here, so the fine mesh needs no per-vertex data.
@@ -25,9 +27,10 @@ export class WaterSurfaceData {
     readonly flow: Float32Array;
     readonly body: Uint8Array;
     readonly wallLimit: number;
-    readonly levelTexture: THREE.DataTexture;
+    /** Level / mask (upper half) and the shore field (lower half, Surf). */
+    readonly gridTexture: THREE.DataTexture;
+    readonly gridPixels: Float32Array;
     readonly dataTexture: THREE.DataTexture;
-    private readonly levelPixels: Float32Array;
     private readonly dataPixels: Uint16Array;
 
     constructor(
@@ -44,20 +47,20 @@ export class WaterSurfaceData {
         this.depth = new Float32Array(n * n);
         this.flow = new Float32Array(n * n * 2);
         this.body = new Uint8Array(n * n);
-        this.levelPixels = new Float32Array(n * n * 2);
+        this.gridPixels = new Float32Array(n * n * 2 * 4);
         this.dataPixels = new Uint16Array(n * n * 4);
 
-        this.levelTexture = new THREE.DataTexture(
-            this.levelPixels,
+        this.gridTexture = new THREE.DataTexture(
+            this.gridPixels,
             n,
-            n,
-            THREE.RGFormat,
+            n * 2,
+            THREE.RGBAFormat,
             THREE.FloatType,
         );
-        this.levelTexture.minFilter = this.levelTexture.magFilter =
+        this.gridTexture.minFilter = this.gridTexture.magFilter =
             THREE.NearestFilter;
-        this.levelTexture.generateMipmaps = false;
-        this.levelTexture.name = 'Water level';
+        this.gridTexture.generateMipmaps = false;
+        this.gridTexture.name = 'Water level + shore field';
         this.dataTexture = new THREE.DataTexture(
             this.dataPixels,
             n,
@@ -302,8 +305,9 @@ export class WaterSurfaceData {
         for (let j = j0; j <= j1; j++) {
             for (let i = i0; i <= i1; i++) {
                 const k = j * n + i;
-                this.levelPixels[k * 2] = this.level[k];
-                this.levelPixels[k * 2 + 1] = this.mask[k];
+                const o = (n * n + k) * 4;
+                this.gridPixels[o] = this.level[k];
+                this.gridPixels[o + 1] = this.mask[k];
                 this.dataPixels[k * 4] = half(Math.min(60000, this.depth[k]));
                 this.dataPixels[k * 4 + 1] = half(this.flow[k * 2]);
                 this.dataPixels[k * 4 + 2] = half(this.flow[k * 2 + 1]);
@@ -311,12 +315,12 @@ export class WaterSurfaceData {
             }
         }
 
-        this.levelTexture.needsUpdate = true;
+        this.gridTexture.needsUpdate = true;
         this.dataTexture.needsUpdate = true;
     }
 
     dispose(): void {
-        this.levelTexture.dispose();
+        this.gridTexture.dispose();
         this.dataTexture.dispose();
     }
 }

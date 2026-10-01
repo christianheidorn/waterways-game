@@ -139,7 +139,10 @@ describe('ripple simulation', () => {
         const b = rippleOrigin(10.3, cell, 256);
         expect(a).toBe(b);
         expect(
-            Math.abs((a + 20) / (cell * RIPPLE_SNAP) - Math.round((a + 20) / (cell * RIPPLE_SNAP))),
+            Math.abs(
+                (a + 20) / (cell * RIPPLE_SNAP) -
+                    Math.round((a + 20) / (cell * RIPPLE_SNAP)),
+            ),
         ).toBeLessThan(1e-9);
         expect(rippleMask(null)).toBe(0);
         expect(rippleMask(0)).toBe(0);

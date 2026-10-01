@@ -284,6 +284,7 @@ export type WaterMaterialOptions = {
     shared: WaterSharedNodes;
     /** Tileable ripple normal map (RGB) + foam noise (A). */
     waveTexture: THREE.Texture;
+    /** WaterSurfaceData.gridTexture: level / mask in rows dataSize..2·dataSize−1. */
     levelTexture: THREE.Texture;
     dataTexture: THREE.Texture;
     bodyTable: THREE.Texture;
@@ -347,7 +348,10 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
         const at = (dx: number, dz: number) =>
             textureLoad(
                 o.levelTexture,
-                ivec2(int(i.x).add(int(dx)), int(i.y).add(int(dz))),
+                ivec2(
+                    int(i.x).add(int(dx)),
+                    int(i.y).add(int(dz)).add(int(u.dataSize)),
+                ),
             ).x;
 
         return mix(
@@ -359,7 +363,10 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     const cellMask = (xz: Node<'vec2'>) => {
         const g = clamp(floor(gridOf(xz)), 0, u.dataSize.sub(2));
 
-        return textureLoad(o.levelTexture, ivec2(int(g.x), int(g.y))).y;
+        return textureLoad(
+            o.levelTexture,
+            ivec2(int(g.x), int(g.y).add(int(u.dataSize))),
+        ).y;
     };
 
     // ---- vertex

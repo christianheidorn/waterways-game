@@ -268,7 +268,7 @@ export class Water {
             u: this.u,
             shared: this.shared,
             waveTexture: this.waveTexture,
-            levelTexture: this.data.levelTexture,
+            levelTexture: this.data.gridTexture,
             dataTexture: this.data.dataTexture,
             bodyTable: this.bodies.table,
             fft: this.waves.fft,

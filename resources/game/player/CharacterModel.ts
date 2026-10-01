@@ -590,10 +590,10 @@ export class CharacterModel {
         applyWetness(
             material,
             {
-            color: colors.element(index) as unknown as THREE.Node<'color'>,
-            roughness: roughness.element(
-                index,
-            ) as unknown as THREE.Node<'float'>,
+                color: colors.element(index) as unknown as THREE.Node<'color'>,
+                roughness: roughness.element(
+                    index,
+                ) as unknown as THREE.Node<'float'>,
             },
             true,
         );

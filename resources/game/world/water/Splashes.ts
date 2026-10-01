@@ -53,8 +53,7 @@ export class Splashes {
     readonly light = uniform(new THREE.Color(1, 1, 1));
     enabled = true;
     /** A droplet fell back into the water at (x, z). */
-    onDropLanded: ((x: number, z: number, size: number) => void) | null =
-        null;
+    onDropLanded: ((x: number, z: number, size: number) => void) | null = null;
     private readonly particles: Particle[] = [];
     private readonly posData = new Float32Array(MAX_PARTICLES * 4);
     private readonly velData = new Float32Array(MAX_PARTICLES * 4);

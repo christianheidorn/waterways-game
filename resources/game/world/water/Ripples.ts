@@ -38,7 +38,7 @@ import {
     RippleSim,
 } from './rippleSim';
 import type { RippleQuality, RippleSource } from './rippleSim';
-import type { WaterLayerContext, WaterSurfaceLayer } from './waterMaterial';
+import type { WaterSurfaceLayer } from './waterMaterial';
 
 type Float = Node<'float'>;
 type Vec4 = Node<'vec4'>;
@@ -98,10 +98,7 @@ export class Ripples {
     /** 0 while off (no texture), else the environment's ripple strength. */
     private readonly strength = uniform(0);
     private readonly sourceA = uniformArray(
-        Array.from(
-            { length: RIPPLE_MAX_SOURCES },
-            () => new THREE.Vector4(),
-        ),
+        Array.from({ length: RIPPLE_MAX_SOURCES }, () => new THREE.Vector4()),
         'vec4',
     );
     private readonly sourceFoam = uniformArray(
@@ -178,9 +175,7 @@ export class Ripples {
             }
         }
 
-        if (
-            Math.abs(source.amount) > Math.abs(this.sources[weakest].amount)
-        ) {
+        if (Math.abs(source.amount) > Math.abs(this.sources[weakest].amount)) {
             this.sources[weakest] = { ...source };
         }
     }
@@ -427,8 +422,7 @@ export class Ripples {
         steps: number,
     ): void {
         const field = this.field!;
-        const shifted =
-            this.pendingShift.x !== 0 || this.pendingShift.z !== 0;
+        const shifted = this.pendingShift.x !== 0 || this.pendingShift.z !== 0;
 
         if (!shifted && !this.sources.length && steps === 0) {
             return;
@@ -501,11 +495,7 @@ export class Ripples {
 
             return { i, j };
         };
-        const read = (
-            buf: Buffer,
-            i: Node<'int'>,
-            j: Node<'int'>,
-        ): Vec4 => {
+        const read = (buf: Buffer, i: Node<'int'>, j: Node<'int'>): Vec4 => {
             const inside = i
                 .greaterThanEqual(0)
                 .and(i.lessThan(size))
@@ -568,7 +558,10 @@ export class Ripples {
                     .add(read(src, i, j.sub(1)).x);
                 const m = mask.element(instanceIndex);
                 const v = m.mul(
-                    h.mul(2).sub(c.y).add(sum.sub(h.mul(4)).mul(k)),
+                    h
+                        .mul(2)
+                        .sub(c.y)
+                        .add(sum.sub(h.mul(4)).mul(k)),
                 );
                 const speed = abs(v.sub(h)).div(RIPPLE_DT);
                 const foam = max(

@@ -168,17 +168,9 @@ export class Surf {
         this.field = new ShoreField(data, surface, terrain, mask);
         const n = data.size;
         this.strength = new Float32Array(n * n);
-        this.pixelsB = new Float32Array(n * n * 4);
-        this.textureB = new THREE.DataTexture(
-            this.pixelsB,
-            n,
-            n,
-            THREE.RGBAFormat,
-            THREE.FloatType,
-        );
-        this.textureB.minFilter = this.textureB.magFilter = THREE.NearestFilter;
-        this.textureB.generateMipmaps = false;
-        this.textureB.name = 'Shore field';
+        // The lower half of the water data's grid texture (shared: the shaders are at their texture limit).
+        this.pixelsB = data.gridPixels.subarray(0, n * n * 4);
+        this.textureB = data.gridTexture;
         this.u.mapHalf.value = surface.half;
         this.u.size.value = n;
         this.u.spacing.value = data.spacing;
@@ -812,6 +804,5 @@ export class Surf {
     }
 
     dispose(): void {
-        this.textureB.dispose();
     }
 }

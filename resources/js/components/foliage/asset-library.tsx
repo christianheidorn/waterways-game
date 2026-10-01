@@ -177,7 +177,10 @@ function statusText(
         case 'failed':
             return asset.status_message ?? 'Failed';
         default:
-            return null;
+            // Ready, but the bake had to work around something (see the asset dialog).
+            return asset.meta.warnings?.length
+                ? `Optimised with warnings: ${asset.meta.warnings[0]}`
+                : null;
     }
 }
 
@@ -238,6 +241,12 @@ function AssetCard({
                 )}
                 {asset.status === 'failed' && (
                     <div className="absolute inset-x-0 bottom-0 flex items-start gap-1.5 bg-red-600/90 p-2 text-[11px] text-white">
+                        <TriangleAlert className="mt-px size-3 shrink-0" />
+                        <span className="line-clamp-2">{status}</span>
+                    </div>
+                )}
+                {asset.status === 'ready' && !bake && status && (
+                    <div className="absolute inset-x-0 bottom-0 flex items-start gap-1.5 bg-amber-500/90 p-2 text-[11px] text-black">
                         <TriangleAlert className="mt-px size-3 shrink-0" />
                         <span className="line-clamp-2">{status}</span>
                     </div>
@@ -421,6 +430,20 @@ function AssetDetail({
                             : ''}
                     </Fact>
                 </dl>
+            )}
+
+            {ready && (asset.meta.warnings?.length ?? 0) > 0 && (
+                <div
+                    role="alert"
+                    className="flex gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                >
+                    <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+                    <ul className="grid gap-1">
+                        {asset.meta.warnings!.map((warning) => (
+                            <li key={warning}>{warning}</li>
+                        ))}
+                    </ul>
+                </div>
             )}
 
             {asset.source === 'ai' && asset.source_file_url && (

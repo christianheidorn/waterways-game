@@ -77,6 +77,7 @@ class GetAssetStatus extends WaterwaysTool
     public static function foliageSummary(FoliageAsset $asset): array
     {
         $game = $asset->toGameArray();
+        $warnings = $asset->status === 'ready' ? ($asset->meta['warnings'] ?? []) : [];
 
         return [
             'type' => 'foliage_asset',
@@ -89,6 +90,9 @@ class GetAssetStatus extends WaterwaysTool
             'target_height_m' => $asset->target_height,
             'height_m' => $game['height'],
             'triangles_per_lod' => $game['triangles'],
+            // Problems the bake worked around, e.g. an impostor left out because a view was an
+            // opaque box (the background was not cut out); the last mesh LOD is drawn instead.
+            ...($warnings !== [] ? ['bake_warnings' => array_values($warnings)] : []),
             'model_url' => $game['model_url'],
             'thumbnail_url' => $game['thumbnail_url'],
             'used_by_foliage_types' => $asset->types()->pluck('id')->all(),

@@ -5,6 +5,7 @@ namespace Tests\Feature\Foliage;
 use App\Enums\FoliageKind;
 use App\Jobs\GenerateFoliageAsset;
 use App\Jobs\GenerateMeshyAsset;
+use App\Mcp\Tools\GetAssetStatus;
 use App\Models\FoliageAsset;
 use App\Models\FoliageType;
 use App\Models\Map;
@@ -123,11 +124,16 @@ class FoliageAssetTest extends TestCase
         $this->post("/api/foliage/assets/{$asset->id}/bake", [
             'model' => UploadedFile::fake()->createWithContent('model.glb', $this->glb()),
             'thumbnail' => UploadedFile::fake()->image('thumb.png', 64, 64),
-            'meta' => json_encode(['height' => 1.234, 'width' => 900, 'triangles' => [8000, 2000, 6, 'x'], 'lod_distances' => [0, 0.25, 7], 'evil' => '<script>']),
+            'meta' => json_encode([
+                'height' => 1.234, 'width' => 900, 'triangles' => [8000, 2000, 6, 'x'], 'lod_distances' => [0, 0.25, 7], 'evil' => '<script>',
+                'warnings' => ['impostor left out: 3 of 64 views opaque (worst 100 %): the background was not cut out', 42, ' '],
+            ]),
         ], ['Accept' => 'application/json'])->assertOk()->assertJsonPath('status', 'ready');
 
         $asset->refresh();
         $this->assertSame('ready', $asset->status);
+        $this->assertSame(['impostor left out: 3 of 64 views opaque (worst 100 %): the background was not cut out'], $asset->meta['warnings']);
+        $this->assertSame($asset->meta['warnings'], GetAssetStatus::foliageSummary($asset)['bake_warnings']);
         $this->assertSame(1.234, $asset->meta['height']);
         $this->assertEquals(200, $asset->meta['width']);
         $this->assertSame([8000, 2000, 6], $asset->meta['triangles']);

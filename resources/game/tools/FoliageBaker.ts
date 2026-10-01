@@ -22,7 +22,6 @@ import { LOD_BUDGETS, lodIndexOf } from '../world/FoliageLod';
 import { basePivot, bleedEdgeColor, extractCardMatte } from './cardMatte';
 import type { RawImage } from './cardMatte';
 import { describeCoverage, measureCoverage } from '../util/alphaCoverage';
-import type { CoverageReport } from '../util/alphaCoverage';
 
 export type BakeSource =
     /** .gltf (external .bin / textures resolved relative to url) or .glb */
@@ -55,6 +54,8 @@ export type BakeMeta = {
     lod_distances: number[];
     /** Far LOD: 'octahedral' impostor (current bakes); absent for rocks, cards and older bakes. */
     impostor?: 'octahedral';
+    /** Problems the bake worked around (e.g. an impostor left out after failing its alpha check). */
+    warnings?: string[];
 };
 
 export type BakeResult = {
@@ -153,6 +154,8 @@ class BakeContext {
     readonly geometries = new Set<THREE.BufferGeometry>();
     readonly materials = new Set<THREE.Material>();
     readonly textures = new Set<THREE.Texture>();
+    /** Problems found while baking (reported with the bake, see BakeMeta.warnings). */
+    readonly warnings: string[] = [];
     /** Textures exported through our own PNG encoder (keeps colour under transparent pixels). */
     readonly rawTextures = new Map<THREE.Texture, RawImage>();
     private renderer: THREE.WebGLRenderer | null = null;
@@ -435,11 +438,23 @@ async function bakeModel(
             }
         }
 
+        let hasImpostor = false;
+
         if (impostor) {
             report('Rendering impostor', 0);
-            lodGroups.push(
-                renderOctahedralImpostor(lod0, ctx, `LOD${lodGroups.length}`),
+            const far = renderOctahedralImpostor(
+                lod0,
+                ctx,
+                `LOD${lodGroups.length}`,
             );
+
+            // An impostor that failed its coverage check is left out: the last mesh LOD is drawn
+            // out to the cull distance instead (never a black box).
+            if (far) {
+                lodGroups.push(far);
+                hasImpostor = true;
+            }
+
             report('Rendering impostor', 1);
             await tick();
         }
@@ -458,7 +473,8 @@ async function bakeModel(
             source_triangles: sourceTriangles,
             texture_size: 0,
             lod_distances: lodDistances.slice(0, lodGroups.length),
-            ...(impostor ? { impostor: 'octahedral' as const } : {}),
+            ...(hasImpostor ? { impostor: 'octahedral' as const } : {}),
+            ...(ctx.warnings.length ? { warnings: ctx.warnings.slice() } : {}),
         };
 
         report('Exporting GLB', 0);
@@ -1708,7 +1724,8 @@ uniform sampler2D map;
 uniform float hasMap;
 uniform vec3 diffuse;
 uniform float alphaTest;
-uniform float normals;
+// 0 = albedo, 1 = normal + depth, 2 = coverage mask (white).
+uniform float mode;
 
 void main() {
     vec4 texel = hasMap > 0.5 ? texture2D(map, vUv) : vec4(1.0);
@@ -1718,9 +1735,11 @@ void main() {
     }
 
     // Leaves keep their geometry normal on back faces (as in game).
-    gl_FragColor = normals > 0.5
-        ? vec4(normalize(vNormal) * 0.5 + 0.5, vDepth)
-        : vec4(texel.rgb * diffuse * vColor, 1.0);
+    gl_FragColor = mode > 1.5
+        ? vec4(1.0)
+        : mode > 0.5
+          ? vec4(normalize(vNormal) * 0.5 + 0.5, vDepth)
+          : vec4(texel.rgb * diffuse * vColor, 1.0);
 }
 `;
 
@@ -1736,7 +1755,7 @@ function renderOctahedralImpostor(
     model: THREE.Object3D,
     ctx: BakeContext,
     name: string,
-): THREE.Group {
+): THREE.Group | null {
     const box = new THREE.Box3().setFromObject(model);
     const center = box.getCenter(new THREE.Vector3());
     let radius = 0;
@@ -1770,18 +1789,21 @@ function renderOctahedralImpostor(
         colorSpace: THREE.SRGBColorSpace,
     });
     const normalTarget = new THREE.WebGLRenderTarget(size * ss, size * ss);
+    // Coverage from a white-on-black mask in the colour channels: it doesn't depend on the read-back
+    // keeping alpha (premultiplied / RGB-only paths on some GPUs and browsers).
+    const maskTarget = new THREE.WebGLRenderTarget(size * ss, size * ss);
     const uniforms = {
         viewDir: { value: new THREE.Vector3() },
         center: { value: center },
         radius: { value: radius },
     };
-    const made = new Map<THREE.Material, [THREE.Material, THREE.Material]>();
-    const pair = (source: THREE.Material): [THREE.Material, THREE.Material] => {
+    const made = new Map<THREE.Material, THREE.Material[]>();
+    const pair = (source: THREE.Material): THREE.Material[] => {
         let materials = made.get(source);
 
         if (!materials) {
             const m = source as THREE.MeshStandardMaterial;
-            const make = (normals: boolean) => {
+            const make = (mode: number) => {
                 const material = new THREE.ShaderMaterial({
                     vertexShader: OCTA_VERTEX,
                     fragmentShader: OCTA_FRAGMENT,
@@ -1797,14 +1819,14 @@ function renderOctahedralImpostor(
                             ).clone(),
                         },
                         alphaTest: { value: m.alphaTest || 0.5 },
-                        normals: { value: normals ? 1 : 0 },
+                        mode: { value: mode },
                     },
                 });
                 ctx.materials.add(material);
 
                 return material;
             };
-            materials = [make(false), make(true)];
+            materials = [make(0), make(1), make(2)];
             made.set(source, materials);
         }
 
@@ -1813,6 +1835,7 @@ function renderOctahedralImpostor(
     const scene = new THREE.Scene();
     const albedoMeshes: THREE.Mesh[] = [];
     const normalMeshes: THREE.Mesh[] = [];
+    const maskMeshes: THREE.Mesh[] = [];
     model.traverse((obj) => {
         const mesh = obj as THREE.Mesh;
 
@@ -1824,7 +1847,11 @@ function renderOctahedralImpostor(
             ? mesh.material
             : [mesh.material];
 
-        for (const [k, list] of [albedoMeshes, normalMeshes].entries()) {
+        for (const [k, list] of [
+            albedoMeshes,
+            normalMeshes,
+            maskMeshes,
+        ].entries()) {
             const clone = mesh.clone();
             const materials = sources.map((s) => pair(s)[k]);
             clone.material = Array.isArray(mesh.material)
@@ -1892,10 +1919,30 @@ function renderOctahedralImpostor(
     };
     const albedoPixels = read(target, albedoMeshes);
     const normalPixels = read(normalTarget, normalMeshes);
+    const maskPixels = read(maskTarget, maskMeshes);
     renderer.setRenderTarget(null);
     renderer.autoClear = previousAutoClear;
     target.dispose();
     normalTarget.dispose();
+    maskTarget.dispose();
+
+    // The albedo's own alpha should match the mask; where it doesn't (alpha read back as 1 around
+    // the model), this platform lost alpha somewhere between the target and the read-back.
+    let maskEmpty = 0;
+    let alphaLost = 0;
+
+    for (let i = 0; i < maskPixels.length; i += 4) {
+        if (maskPixels[i] < 8) {
+            maskEmpty++;
+            alphaLost += albedoPixels[i + 3] > 128 ? 1 : 0;
+        }
+    }
+
+    if (maskEmpty > 0 && alphaLost > maskEmpty * 0.5) {
+        ctx.warnings.push(
+            'impostor capture: the read-back lost alpha on this GPU / browser (coverage taken from a mask pass)',
+        );
+    }
 
     // Downsample (coverage-weighted box filter) and flip to top-down rows.
     const albedo = new Uint8ClampedArray(size * size * 4);
@@ -1912,7 +1959,7 @@ function renderOctahedralImpostor(
                 for (let sx = 0; sx < ss; sx++) {
                     const glRow = (size - 1 - y) * ss + (ss - 1 - sy);
                     const o = (glRow * srcW + x * ss + sx) * 4;
-                    const w = albedoPixels[o + 3];
+                    const w = maskPixels[o];
 
                     if (w === 0) {
                         continue;
@@ -1947,6 +1994,17 @@ function renderOctahedralImpostor(
             albedo[o + 3] = alpha;
             normal[o + 3] = alpha;
         }
+    }
+
+    // Every view must be a cut-out (a silhouette inside the bounding sphere), never an opaque box.
+    const coverage = measureCoverage(albedo, size, size, 'octahedral', n, n);
+
+    if (!coverage.ok) {
+        ctx.warnings.push(
+            `impostor left out: ${describeCoverage(coverage)}; the last mesh LOD is drawn to the cull distance instead`,
+        );
+
+        return null;
     }
 
     const albedoRaw: RawImage = { data: albedo, width: size, height: size };

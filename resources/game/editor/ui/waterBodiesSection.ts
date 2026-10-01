@@ -236,9 +236,59 @@ function bodySettings(
         onInput: (v) => update({ clarity: v }),
     });
     clarity.el.style.display = s.clarity === null ? 'none' : '';
-    const surf = toggle('Surf on its shores', s.surf, (v) =>
-        update({ surf: v }),
+    const surfHeight = slider({
+        label: 'Surf height',
+        min: 0,
+        max: 4,
+        step: 0.05,
+        value: s.surf_height,
+        unit: ' m',
+        onInput: (v) => update({ surf_height: v }),
+    });
+    const surfPeriod = slider({
+        label: 'Surf period',
+        min: 1.5,
+        max: 20,
+        step: 0.1,
+        value: s.surf_period,
+        unit: ' s',
+        onInput: (v) => update({ surf_period: v }),
+    });
+    let direction = s.surf_direction ?? 0;
+    const surfDirection = slider({
+        label: 'Surf towards',
+        min: 0,
+        max: 359,
+        step: 1,
+        value: direction,
+        unit: '°',
+        onInput: (v) => {
+            direction = v;
+            update({ surf_direction: v });
+        },
+    });
+    const surfAuto = toggle(
+        'Surf direction from the wind',
+        s.surf_direction === null,
+        (v) => {
+            update({ surf_direction: v ? null : direction });
+            surfDirection.el.style.display = v ? 'none' : '';
+        },
     );
+    surfDirection.el.style.display = s.surf_direction === null ? 'none' : '';
+    const surfOptions = h(
+        'div',
+        {},
+        surfHeight.el,
+        surfPeriod.el,
+        surfAuto.el,
+        surfDirection.el,
+    );
+    surfOptions.style.display = s.surf ? '' : 'none';
+    const surf = toggle('Surf on its gentle shores', s.surf, (v) => {
+        update({ surf: v });
+        surfOptions.style.display = v ? '' : 'none';
+    });
 
     refreshers.push(() => {
         info.textContent = describe();
@@ -275,11 +325,20 @@ function bodySettings(
             ),
             clarityOn.el,
             clarity.el,
-            surf.el,
             h(
                 'p',
                 { class: 'ww-muted' },
                 'Wind waves grow with the wind (World › weather) and the fetch; a sheltered or small body stays calmer.',
+            ),
+        ),
+        section(
+            'Surf',
+            surf.el,
+            surfOptions,
+            h(
+                'p',
+                { class: 'ww-muted' },
+                'Waves shoal and break on gentle shores (beaches are found by slope); lake surf grows with the wind. Paint it on or off along a shore with Water › Surf.',
             ),
         ),
     );

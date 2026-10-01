@@ -18,7 +18,7 @@ use RuntimeException;
  */
 class MapDataController extends Controller
 {
-    private const ASSETS = ['heightmap', 'water', 'splatmap', 'foliage', 'landcover', 'props', 'splines', 'water_bodies'];
+    private const ASSETS = ['heightmap', 'water', 'splatmap', 'foliage', 'landcover', 'props', 'splines', 'water_bodies', 'surf'];
 
     public function __construct(private readonly TerrainStorage $storage) {}
 

@@ -56,6 +56,9 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
     - Wind waves from a fetch-limited spectrum: a GPU FFT on WebGPU (choppy crests, whitecaps), a sum of the
       strongest waves on WebGL 2; a fine mesh around the camera shows them up close. Crests glow in the sun,
       catspaws follow the gusts, glints stay stable. See [Water bodies and waves](#water-bodies-and-waves).
+    - Beaches: surf rolls in parallel to the coast, grows and breaks on gentle shores, its swash runs up the
+      sand and drains back, leaving it wet and glossy; audible nearby. Per-body surf height, period and
+      direction; a Surf brush (MCP `paint_surf`) paints it on or off along a shore. See [Beaches](#beaches).
 - **Atmosphere & weather.** Physical sky with lit clouds whose shadows drift over the land, stars and a moon;
   valley (height) fog with sunbeams; rain, snow, lightning with thunder, gusts that sweep across fields and
   canopies, and wet or snowy ground (see [Weather & sky](#weather--sky)). The sun
@@ -677,9 +680,40 @@ land on the same frame.
 - **CPU sampling** (`Water.sampleSurface(x, z)`): still level, wave height, normal, velocity (orbital + river
   current), depth and the body, from the same dominant components and body weights (exact for the WebGL 2
   surface, the long waves of the FFT surface). For swimming, buoyancy and splashes.
-- **Extension points**: `Water.addSurfaceLayer({ displacement, slope, foam, sample })` adds TSL displacement /
-  slope / foam sources with their CPU counterpart (beach surf, interaction ripples, wakes); body settings
-  (`surf`) and the depth / body / flow data textures are available to them through the layer context.
+- **Extension points**: `Water.addSurfaceLayer({ displacement, slope, foam, shoreFoam, sample })` adds TSL
+  displacement / slope / foam sources with their CPU counterpart (beach surf, interaction ripples, wakes), and can
+  thin out the built-in shore foam where it brings its own; body settings (`surf`) and the depth / body / flow
+  data textures are available to them through the layer context. Layer displacement is not faded in the shallows
+  (wind waves are).
+
+## Beaches
+
+- **Shore distance field** (`world/water/shoreField.ts`): on the water data grid, seeds where the still level
+  meets the ground between a wet and a dry sample (sub-sample), spread by vector propagation (two raster sweeps
+  each way) up to 150 m on both sides: signed distance (+ water, − land), the direction waves travel there
+  (towards the shore, on up the beach), and the nearest shore's still level, beach slope (across the shoreline and
+  out over the surf zone, averaged over ~±12 m) and body. Recomputed in a window around every water / terrain /
+  surf paint edit; on the GPU an RGBA16F texture (distance, direction, strength, bilinear) and an RGBA32F one
+  (level, slope, body row).
+- **Surf strength**: body `surf` × a beach factor from the slope (full below 0.1, none above 0.32), or the
+  painted strength (`surf.u8`, gentler on steep shores); per body a 256×1 table holds height, period and
+  direction (with the wind when not set: shores facing away get 20 %).
+- **Waves** (`surfModel.ts` on the CPU, `Surf.ts` in TSL — a water surface layer): phase t/T + τ(d)/T with the
+  shallow-water travel time τ(d) = 2√(d / (g·m)) on a beach of slope m (capped by the deep-water speed), so
+  crests follow the coast, slow down and close up; height by Green's law until H > 0.8 h, then a sawtooth bore of
+  height 0.8 h; unbroken crests sharpen (cos^p); wave groups and an alongshore variation. Foam on breaking crests
+  and the bores' fronts, a lace left behind them (animated caustic-network noise), a little in the surf zone.
+- **Swash and wet sand** (terrain material hook `setShoreEffects`): the run-up R = H₀·(0.75ξ + 0.25)
+  (Iribarren number ξ) above the still level, fast uprush then a slower backwash each period; the film is dark,
+  smooth and mirror-like with a foam edge and bubbles; the sand it uncovers stays glossy for ~0.4 T and darker
+  below the usual run-up.
+- **Editor / MCP**: Water › Surf brush (On at a strength / Off / Auto, Shift = off, undoable, saved in
+  `surf.u8`), surf height / period / direction in Water › Bodies; MCP `paint_surf`, `edit_water_body`
+  `surf_*` settings.
+- **Audio** (`WeatherAudio.setSurf`): a low wash by the strength, height and distance of surf on the shores
+  within ~120 m of the camera, and a brighter crash while the nearest waves break.
+- **CPU**: `Water.sampleSurface` includes the surf (height, slope, orbital velocity); `water.surf.activity(x, z)`
+  and `swashAt(x, z)` for gameplay.
 
 ## Bounce light
 
@@ -851,6 +885,7 @@ resources/node/            optimize-glb.mjs: meshopt + KTX2 compression of libra
 | `water.f32`     | Float32 LE water-surface heights. `-100000` means dry.                       |
 | `splat.u8`      | 8 bytes per sample: layer weights for two RGBA splat textures.               |
 | `foliage.json`  | `{ version, instances: { typeId: [x, y, z, yaw, scale, tiltX, tiltZ, …] } }` |
+| `surf.u8`       | 1 byte per sample: painted surf (0 = automatic, 1-255 = strength 0-1).       |
 
 Supported resolutions are 257, 513 and 1025 samples per side. For a 4 km map at 1025 that is about 4 m per
 sample.

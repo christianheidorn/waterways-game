@@ -145,6 +145,7 @@ headless Chrome-family browser on this machine that shows the map's editor (the 
 | `paint_terrain`                                                     | Live: paint or erase a layer (slot or name) in a shape, optionally only on matching slope / height, with natural `breakup`. Painted layers grow their ground cover, so this plants biomes                                                                                                                                                                                                                                                                              |
 | `edit_water`                                                        | Live: `lake` floods a basin to a level (or `fill_to_rim`); if it would spill, it reports how high the basin holds and where it overflows. `river` carves a channel along a path, downhill from its first point. `erase` removes water                                                                                                                                                                                                                                  |
 | `edit_water_body`                                                   | Live: water bodies (lake / pond / river / sea, from the water, stable ids): `list` / `get` (by `id` or `point`) / `update` per-body settings: wind exposure, fetch, wave height, choppiness, colours, clarity, surf. Reads use the saved file when no editor is open                                                                                                                                                                                                   |
+| `paint_surf`                                                        | Live: surf along shores painted inside a shape: `on` (at a `strength`), `off`, or `auto` (back to the body setting on gentle shores); reports the shoreline in the shape with surf. Saved per map (`surf.u8`)                                                                                                                                                                                                                                                          |
 | `edit_foliage`                                                      | Live: `scatter` types in a shape (their rules, density, groves) or `clear` placed foliage (e.g. for clearings or roads)                                                                                                                                                                                                                                                                                                                                                |
 | `list_requests`, `get_request`, `update_request`                    | Build requests made in the editor (see below): the note, the outline in world coordinates with its bounds, the user's screenshot and reference images, a map crop with the outline. `update_request` sets the status (`in_progress`, `needs_input`, `done`), leaves a message and attaches a result screenshot                                                                                                                                                         |
 | `place_props`, `remove_props`, `list_props`                         | Live: place props from the prop library at exact positions (rotation, scale, height offset) or scatter them in a shape (spacing, slope, water); remove by id or shape; list what is placed (no editor needed)                                                                                                                                                                                                                                                          |
@@ -218,6 +219,7 @@ deliberately do not get, with the reason. New UI ships with its MCP tool in the 
 | Water (4)           | Lake, River, Erase, water level, carve depth                                                                                                                                                                   | `edit_water`                                                                                                                     |
 | Water (4)           | River: draw a course (click points, Enter), select a river, drag / add (Shift+click) / remove (Ctrl+click) points, width, depth, banks, Delete                                                                 | `edit_water` `river`, `list_rivers`, `update_river`, `delete_river`                                                              |
 | Water (4)           | Bodies: click a body (or pick it in the list), name, kind, wind exposure, fetch (auto / m), wave height, choppiness, own colours, clarity, surf                                                                | `edit_water_body` `list` / `get` / `update`                                                                                      |
+| Water (4)           | Surf: paint surf On (strength) / Off / Auto along shores (Shift paints it off); Bodies: surf height, period, direction (or with the wind)                                                                      | `paint_surf`; `edit_water_body` `update` (`surf_*`)                                                                              |
 | Place (5)           | Player start (click, facing the camera direction)                                                                                                                                                              | `update_map` `spawn` (`yaw`, `facing` or `look_at`)                                                                              |
 | Place (5)           | Props: Place (model, rotation, random rotation, size), Shift+click remove                                                                                                                                      | `place_props`, `remove_props`                                                                                                    |
 | Place (5)           | Props: Select & edit (drag, R / Shift+R, rotation, size, height above ground), Duplicate (Ctrl+D), Delete                                                                                                      | `update_props`; `place_props` with the same values; `remove_props`                                                               |
@@ -515,7 +517,10 @@ with the water).
 | `choppiness`                   | 1                       | 0-2        | Horizontal sharpness of crests (0 = rolling sines)                                          |
 | `shallow_color` / `deep_color` | null                    | `#rrggbb`  | Own water colours (null = the environment's)                                                |
 | `clarity`                      | null                    | 0.3-40 m   | Own clarity (null = the environment's)                                                      |
-| `surf`                         | false (sea: true)       |            | Surf on the body's shores (used by the beaches phase)                                       |
+| `surf`                         | false (sea: true)       |            | Surf on the body's gentle shores (beaches, found by slope; `paint_surf` overrides locally)  |
+| `surf_height`                  | 0.35 m (sea: 0.9 m)     | 0-4 m      | Surf wave height offshore; lakes scale it with the wind × exposure, the sea's swell less so |
+| `surf_period`                  | 3.5 s (sea: 8 s)        | 1.5-20 s   | Wave period: lake chop ~2-4 s, ocean swell 8-14 s (longer = longer, faster crests)          |
+| `surf_direction`               | null                    | 0-360°     | Degrees the surf travels towards (0 = north, 90 = east); null = with the wind               |
 
 `get_map` lists the saved bodies (counts per kind, the largest). `list` / `get` in an open editor also report the
 current wind, each body's fetch along it and its significant wave height.
@@ -541,6 +546,25 @@ Environment fields (`update_environment`; the studio's Environment page, Waves s
 | `wave_scale` / `wave_strength` / `wave_speed` | 8 / 0.4 / 1 |       | Size and steepness of the small ripple texture; speed of all waves                         |
 
 Graphics `water_waves` (Shading group; `fft` from Medium up, `simple` on Low).
+
+**Beaches (surf).** A shore distance field (distance and direction to the nearest shoreline on both sides of it,
+the shore's still level and beach slope) drives wave trains that travel up it, so crests bend parallel to the
+coast, slow down and close up in the shallows, grow (Green's law) and break where higher than 0.8 × the depth;
+the broken bore runs on with its foam, then the swash runs up the sand and drains back, leaving it glossy and
+darker for a while. Surf is on where a body has `surf` on and the shore is gentle (slope below ~1:10, fading out
+by ~1:3), or where it is painted. `paint_surf` (the editor's Water › Surf brush) paints it inside a shape:
+
+| Argument   | Default | What it does                                                                                |
+| ---------- | ------- | ------------------------------------------------------------------------------------------- |
+| `shape`    |         | Where (paint over the shoreline: a path along it with ~10-30 m width works well)            |
+| `mode`     | `on`    | `on`: surf at `strength` (even if the body has surf off); `off`: none; `auto`: body / slope |
+| `strength` | 1       | 0.05-1 (mode `on`); on steep shores a gentler version                                       |
+| `save`     | true    | Save the map after the edit                                                                 |
+
+The result reports the painted samples, the shoreline inside the shape and how much of it now has surf. Painted
+surf is saved per map in `surf.u8` (asset `surf`: one byte per sample, 0 = automatic, 1-255 = strength 0-1).
+For a beach: shape a gentle ramp into the water (`sculpt_terrain`, ~1:10-1:30), paint sand, then turn on the
+body's surf (`edit_water_body`) or paint it. Nearby surf is audible (a wash that swells as the waves break).
 
 ## Bounce light
 

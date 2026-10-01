@@ -493,6 +493,8 @@ export type MapAssets = {
     splines?: string | null;
     /** Water body ids and settings (WaterBodiesFile JSON). */
     water_bodies?: string | null;
+    /** Painted surf strength per sample (Uint8, resolution²: 0 automatic, 1-255 = 0-1). */
+    surf?: string | null;
 };
 
 /** A placeable model of the prop library (App\\Models\\PropModel::toGameArray). */
@@ -556,6 +558,7 @@ export type GameManifest = {
         save_props?: string;
         save_splines?: string;
         save_water_bodies?: string;
+        save_surf?: string;
         save_meta: string;
         save_thumbnail: string;
         /** PATCH a foliage type's settings from the in-game editor: `${update_foliage_type}/{id}`. */

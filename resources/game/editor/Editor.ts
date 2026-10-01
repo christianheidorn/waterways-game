@@ -18,6 +18,7 @@ import type { SplatMap } from '../world/SplatMap';
 import type { Terrain } from '../world/Terrain';
 import type { TerrainMaterial } from '../world/TerrainMaterial';
 import type { Water } from '../world/Water';
+import { encodePainted } from '../world/water/shoreField';
 import type { Splines } from '../world/Splines';
 import { placementsAlong, snapToEdges, snapToGrid } from './propSnap';
 import { SplineTool } from './splines/SplineTool';
@@ -65,7 +66,9 @@ export type SculptTool =
     | 'terrace'
     | 'stamp';
 export type FoliageTool = 'paint' | 'erase' | 'single';
-export type WaterTool = 'lake' | 'river' | 'erase' | 'bodies';
+export type WaterTool = 'lake' | 'river' | 'erase' | 'bodies' | 'surf';
+/** Surf brush: paint surf on (at a strength), off, or back to automatic (body setting + beach slope). */
+export type SurfPaintMode = 'on' | 'off' | 'auto';
 export type DirtyChannel =
     | 'heightmap'
     | 'splatmap'
@@ -74,6 +77,7 @@ export type DirtyChannel =
     | 'props'
     | 'splines'
     | 'water_bodies'
+    | 'surf'
     | 'meta';
 
 export type EditorWorld = {
@@ -142,6 +146,8 @@ export class EditorState {
     waterPickOnStroke = true;
     waterDepth = 3;
     waterCarve = true;
+    surfMode: SurfPaintMode = 'on';
+    surfStrength = 1;
     showGrid = false;
     /** Request tool: outline being drawn (world metres) and the draft note. */
     requestPoints: { x: number; z: number }[] = [];
@@ -286,6 +292,18 @@ export class Editor {
             (rect) => {
                 this.queueWaterRebuild(rect);
                 callbacks.markDirty('water');
+            },
+        );
+        this.history.registerGrid(
+            'surf',
+            {
+                resolution: world.heights.resolution,
+                data: world.water.surf.mask,
+                channels: 1,
+            },
+            (rect) => {
+                world.water.surfPainted(rect);
+                callbacks.markDirty('surf');
             },
         );
         this.history.registerCustom('foliage', {
@@ -684,6 +702,7 @@ export class Editor {
             | 'height'
             | 'splat'
             | 'water'
+            | 'surf'
             | 'foliage'
             | 'props'
             | 'splines'
@@ -721,6 +740,11 @@ export class Editor {
         if (channels.includes('water')) {
             this.queueWaterRebuild(rect);
             this.callbacks.markDirty('water');
+        }
+
+        if (channels.includes('surf')) {
+            this.world.water.surfPainted(rect);
+            this.callbacks.markDirty('surf');
         }
 
         if (channels.includes('foliage')) {
@@ -1004,7 +1028,15 @@ export class Editor {
                 break;
             case 'water':
                 color.set(
-                    invert || s.waterTool === 'erase' ? '#ff5a5a' : '#3fd8ff',
+                    invert ||
+                        s.waterTool === 'erase' ||
+                        (s.waterTool === 'surf' && s.surfMode === 'off')
+                        ? '#ff5a5a'
+                        : s.waterTool === 'surf'
+                          ? s.surfMode === 'auto'
+                              ? '#d8d8d8'
+                              : '#f4e7b0'
+                          : '#3fd8ff',
                 );
                 break;
         }
@@ -1124,7 +1156,7 @@ export class Editor {
         if (
             this.input.ctrl &&
             ((s.group === 'sculpt' && s.sculptTool === 'flatten') ||
-                s.group === 'water')
+                (s.group === 'water' && s.waterTool !== 'surf'))
         ) {
             // Ctrl+click samples the target height.
             if (s.group === 'water') {
@@ -1418,6 +1450,11 @@ export class Editor {
                 break;
             }
             case 'water':
+                if (s.waterTool === 'surf') {
+                    this.paintSurf(x, z, b, invert ? 'off' : s.surfMode);
+                    break;
+                }
+
                 this.paintWater(x, z, b, invert || s.waterTool === 'erase');
                 break;
             default:
@@ -1458,6 +1495,49 @@ export class Editor {
 
         splat.syncRect(rect);
         this.callbacks.markDirty('splatmap');
+    }
+
+    /** Surf brush: paints surf on / off (or back to automatic) where the brush covers the shore. */
+    private paintSurf(
+        x: number,
+        z: number,
+        b: BrushSettings,
+        mode: SurfPaintMode,
+    ): void {
+        const hf = this.world.heights;
+        const rect = hf.rectForCircle(x, z, b.radius);
+        this.history.touch('surf', rect);
+        const value = encodePainted(
+            mode === 'auto'
+                ? null
+                : mode === 'off'
+                  ? 0
+                  : this.state.surfStrength,
+        );
+        const mask = this.world.water.surf.mask;
+        let changed = false;
+
+        for (let row = rect.z0; row <= rect.z1; row++) {
+            for (let col = rect.x0; col <= rect.x1; col++) {
+                const d = Math.hypot(hf.colToX(col) - x, hf.rowToZ(row) - z);
+
+                if (brushWeight(d, b) < 0.5) {
+                    continue;
+                }
+
+                const i = row * hf.resolution + col;
+
+                if (mask[i] !== value) {
+                    mask[i] = value;
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed) {
+            this.world.water.surfPainted(rect);
+            this.callbacks.markDirty('surf');
+        }
     }
 
     private paintWater(

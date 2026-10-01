@@ -40,8 +40,14 @@ export type WaterBodySettings = {
     shallow_color: string | null;
     deep_color: string | null;
     clarity: number | null;
-    /** Surf on the shores of this body (beaches, phase 11). */
+    /** Surf on the gentle shores of this body (beaches; painted surf overrides it locally). */
     surf: boolean;
+    /** Surf wave height offshore (m; lakes scale it with the wind, the sea's swell less so). */
+    surf_height: number;
+    /** Surf wave period (s): long ocean swell ~8-14 s, wind waves on a lake ~2-4 s. */
+    surf_period: number;
+    /** Degrees the surf travels towards (0 = north, 90 = east); null = with the wind. */
+    surf_direction: number | null;
 };
 
 export const DEFAULT_BODY_SETTINGS: Readonly<WaterBodySettings> = {
@@ -55,6 +61,9 @@ export const DEFAULT_BODY_SETTINGS: Readonly<WaterBodySettings> = {
     deep_color: null,
     clarity: null,
     surf: false,
+    surf_height: 0.35,
+    surf_period: 3.5,
+    surf_direction: null,
 };
 
 /** Default settings per kind for bodies seen for the first time. */
@@ -64,6 +73,7 @@ export function defaultSettingsFor(kind: WaterBodyKind): WaterBodySettings {
         // Rivers: the flow carries the look, wind waves stay small; ponds are sheltered.
         wind_exposure: kind === 'river' ? 0.5 : kind === 'pond' ? 0.7 : 1,
         surf: kind === 'sea',
+        ...(kind === 'sea' ? { surf_height: 0.9, surf_period: 8 } : {}),
     };
 }
 
@@ -426,6 +436,15 @@ export function sanitizeSettings(
                   ? num(input.clarity, 0.3, 40, 5)
                   : base.clarity,
         surf: typeof input.surf === 'boolean' ? input.surf : base.surf,
+        surf_height: num(input.surf_height, 0, 4, base.surf_height),
+        surf_period: num(input.surf_period, 1.5, 20, base.surf_period),
+        surf_direction:
+            input.surf_direction === null
+                ? null
+                : typeof input.surf_direction === 'number' &&
+                    Number.isFinite(input.surf_direction)
+                  ? ((input.surf_direction % 360) + 360) % 360
+                  : base.surf_direction,
     };
 }
 

@@ -21,6 +21,7 @@ import {
     Rows3,
     Stamp as StampIcon,
     Sparkles,
+    Shell,
     Spline,
     TreePine,
     Waves,
@@ -51,6 +52,7 @@ import type { Editor, FoliageTool, SculptTool, WaterTool } from '../Editor';
 import { FoliageThumbnails } from '../FoliageThumbnails';
 import { WorldPanel } from './WorldPanel';
 import { waterBodiesKey, waterBodiesSection } from './waterBodiesSection';
+import { surfSection } from './surfSection';
 import type { WorldHost } from './WorldPanel';
 import {
     propAlongSection,
@@ -180,6 +182,12 @@ const WATER_TOOLS: ToolDef<WaterTool>[] = [
         label: 'River',
         icon: Waves,
         hint: 'Draw a river from its source: click points, Enter carves it. Click a river to edit it',
+    },
+    {
+        value: 'surf',
+        label: 'Surf',
+        icon: Shell,
+        hint: 'Paint surf along shores (on / off / automatic) · Shift paints it off',
     },
     {
         value: 'erase',
@@ -438,6 +446,12 @@ export class EditorPanel {
                     this.body.append(
                         waterBodiesSection(this.editor, this.refreshers),
                     );
+                    break;
+                }
+
+                if (s.waterTool === 'surf') {
+                    this.body.append(this.brushSection(false, false));
+                    this.body.append(surfSection(this.editor));
                     break;
                 }
 

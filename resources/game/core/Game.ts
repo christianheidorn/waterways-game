@@ -898,6 +898,17 @@ export class Game {
             }
         };
         splines.onChange = () => water.setRivers(splines.rivers);
+        // Painted surf (surf.u8) and the surf's swash / wet sand on the terrain.
+        water.surf.loadMask(
+            assets.surf
+                ? new Uint8Array(
+                      await this.api
+                          .binary(assets.surf)
+                          .catch(() => new ArrayBuffer(0)),
+                  )
+                : null,
+        );
+        material.setShoreEffects(water.surf.terrainHook);
         this.scene.add(water.group);
 
         this.progress(0.9, 'Growing foliage');
@@ -1548,6 +1559,17 @@ export class Game {
             env?.water_shallow_color,
         );
         this.weather?.update(dt, this.camera);
+
+        if (this.weather) {
+            // Surf on nearby beaches, heard from the camera (a little quieter high above).
+            const p = this.camera.position;
+            const surf = this.world.water.surf.activity(p.x, p.z);
+            const above = Math.max(0, p.y - (waterLevel ?? p.y));
+            this.weather.audio.setSurf(
+                surf.level / (1 + above / 40),
+                surf.crash,
+            );
+        }
 
         this.renderFrame(dt);
         this.updateDynamicResolution(dt);
@@ -2460,6 +2482,13 @@ export class Game {
                 await this.api.putBinary(
                     endpoints.save_water,
                     this.world.waterGrid.data,
+                );
+            }
+
+            if (channels.has('surf') && endpoints.save_surf) {
+                await this.api.putBinary(
+                    endpoints.save_surf,
+                    this.world.water.surf.mask,
                 );
             }
 

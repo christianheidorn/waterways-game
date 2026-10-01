@@ -147,6 +147,8 @@ export type WaterSurfaceLayer = {
     slope?: (ctx: WaterLayerContext) => Node<'vec2'>;
     /** Foam coverage (0-1), combined with the rest by max. */
     foam?: (ctx: WaterLayerContext) => Node<'float'>;
+    /** Multiplier (0-1) of the built-in shore foam, where the layer brings its own (e.g. surf). */
+    shoreFoam?: (ctx: WaterLayerContext) => Node<'float'>;
     /** CPU: add this layer's height / slope / velocity at a world position. */
     sample?: (
         x: number,
@@ -495,15 +497,20 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
             });
         }
 
+        // Wind waves calm down in the shallows; layers (surf) bring their own shallow-water behaviour.
+        const out = d.mul(vFade).toVar();
+
         for (const layer of o.layers) {
             if (layer.displacement) {
-                d.addAssign(
-                    layer.displacement(ctxFor(baseXZ, vData.x, vRow, vMisc)),
+                out.addAssign(
+                    layer
+                        .displacement(ctxFor(baseXZ, vData.x, vRow, vMisc))
+                        .mul(edgeCalm),
                 );
             }
         }
 
-        return d.mul(vFade);
+        return out;
     })();
     /** Sum of waves: analytic slopes (x, z) and Jacobian diagonal (x, z); FFT: only the swell's slope. */
     const slopeJac = Fn(() => {
@@ -753,12 +760,20 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     }
 
     // Whitecaps: where the surface folds (Jacobian < ~0.5) foam breaks out and lingers.
-    const capCover = smoothstep(0.35, -0.35, minJacobian).mul(u.whitecaps);
+    // Only the strongest folds break; the bubble noise laces the patch (a solid sheet looks painted).
+    // (The FFT's persistent Jacobian lingers below the instantaneous one the sum of waves has.)
+    const capCover = (
+        fft
+            ? smoothstep(0.05, -0.6, minJacobian)
+            : smoothstep(0.6, -0.05, minJacobian)
+    ).mul(u.whitecaps);
     const whitecap = smoothstep(
-        0.25,
-        0.75,
-        capCover.mul(bubbles.mul(0.9).add(0.55)),
-    ).mul(smoothstep(60, 400, viewDist).oneMinus().mul(0.7).add(0.3));
+        0.35,
+        0.95,
+        capCover.mul(bubbles.mul(1.2).add(0.3)),
+    )
+        .mul(0.85)
+        .mul(smoothstep(60, 400, viewDist).oneMinus().mul(0.7).add(0.3));
 
     let layerFoam: Node<'float'> = float(0);
     let layerSlope: Node<'vec2'> = vec2(0);
@@ -773,8 +788,17 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
         }
     }
 
+    let shoreFoamScale: Node<'float'> = float(1);
+
+    for (const layer of o.layers) {
+        if (layer.shoreFoam) {
+            shoreFoamScale = shoreFoamScale.mul(layer.shoreFoam(ctx));
+        }
+    }
+
     const foam = clamp(
         shoreFoam
+            .mul(shoreFoamScale)
             .add(rapids)
             .add(streaks)
             .mul(u.foamIntensity)
@@ -904,9 +928,15 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     })();
     const normal = worldNormal.transformDirection(cameraViewMatrix);
     material.normalNode = normal;
+    // Screen-space distortion from the waves: the normal's deviation from flat water (in view space).
+    // (The whole view normal would add a constant shift — at grazing angles its y is ~1 — which pulled
+    // the reflection's sky haze below the far shore into a pale band along the waterline.)
+    const flatNormal = vec3(0, 1, 0).transformDirection(cameraViewMatrix);
+    const tilt = normal.sub(flatNormal);
+    const distortion = vec2(tilt.x, tilt.y.negate());
 
     // ---- refraction & absorption
-    const offset = vec2(normal.x, normal.y.negate()).mul(
+    const offset = distortion.mul(
         u.refraction.mul(0.08).mul(smoothstep(0, 2.5, thickness)),
     );
     const bentUv = clamp(screenUV.add(offset), 0.001, 0.999);
@@ -969,11 +999,7 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     const reflUv = clamp(
         reflClip.xy
             .div(reflClip.w)
-            .add(
-                vec2(normal.x, normal.y.negate()).mul(
-                    u.refraction.mul(0.03).add(0.03),
-                ),
-            ),
+            .add(distortion.mul(u.refraction.mul(0.03).add(0.03))),
         0.001,
         0.999,
     );

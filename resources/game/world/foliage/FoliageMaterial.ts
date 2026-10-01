@@ -95,6 +95,12 @@ type FloatUniform = THREE.UniformNode<'float', number>;
 export type GroundColorSource = (xz: Node<'vec2'>) => Node<'vec3'>;
 
 /**
+ * The water at a world position (x, z), vertex-stage safe: depth (m, 0 where dry) and the river flow
+ * (x, z; 0-1 ≈ 1.5 m/s), see Water.dataNode. Submerged plants sway with it.
+ */
+export type WaterDataSource = (xz: Node<'vec2'>) => Node<'vec3'>;
+
+/**
  * How far a kind's roots take the ground colour: `strength` at the base (0-1), fading out by
  * `height` (instance space, i.e. metres at scale 1).
  */
@@ -119,6 +125,8 @@ export type FoliageGlobals = {
     sunDir: THREE.UniformNode<'vec3', THREE.Vector3>;
     /** Terrain colour for the roots; null without a terrain (e.g. the foliage preview). */
     groundColor: GroundColorSource | null;
+    /** The water around submerged plants (sway with the current and the waves); null without water. */
+    waterData: WaterDataSource | null;
     /** 1 replaces the albedo with a neutral grey (the editor's lighting-only view). */
     lightingOnly: FloatUniform;
     /** Travelling gusts: x = strength (0 = steady wind), y = 1 / patch size (1/m). */
@@ -146,8 +154,10 @@ export type FoliageTypeUniforms = {
 
 export function createFoliageGlobals(
     groundColor: GroundColorSource | null = null,
+    waterData: WaterDataSource | null = null,
 ): FoliageGlobals {
     return {
+        waterData,
         time: uniform(0),
         prevTime: uniform(0),
         wind: uniform(0.4),
@@ -359,6 +369,36 @@ function foliagePosition(
         };
         const p = swayed(g.time).toVar();
         const pPrev = swayed(g.prevTime).toVar();
+
+        // Water plants (reeds, grass and flowers standing in water): lean downstream with the current
+        // and rock to and fro with the waves; the part under water moves, the roots stay put.
+        if (g.waterData && stiffness > 0.5) {
+            const water = g.waterData(instPos.xz).toVar();
+            const submerged = smoothstep(0.03, 0.35, water.x).toVar();
+
+            If(submerged.greaterThan(0), () => {
+                const flowW = vec2(water.y, water.z);
+                const flowLocal = r0.xyz
+                    .mul(flowW.x)
+                    .add(r2.xyz.mul(flowW.y)).xz;
+                const waveLocal = windLocal.xz;
+                const h = positionGeometry.y.max(0);
+                // Only up to the water surface (instance space ≈ metres at scale 1).
+                const under = h.min(water.x.max(0.05));
+                const aquatic = (time: Node<'float'>) => {
+                    const rock = sin(time.mul(1.15).add(phase.mul(2.3)));
+                    const flutter = sin(time.mul(2.6).add(phase.mul(5.1)));
+                    const off = flowLocal
+                        .mul(0.3)
+                        .add(flowLocal.mul(flutter.mul(0.08)))
+                        .add(waveLocal.mul(rock.mul(g.wind.mul(0.06).add(0.03))));
+
+                    return vec3(off.x, 0, off.y).mul(under.mul(submerged));
+                };
+                p.addAssign(aquatic(g.time));
+                pPrev.addAssign(aquatic(g.prevTime));
+            });
+        }
 
         if (interact > 0) {
             // Bent away from the character: tips move furthest, roots stay put (the push is

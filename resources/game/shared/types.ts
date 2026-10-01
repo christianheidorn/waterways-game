@@ -527,6 +527,22 @@ export type PropModelRef = {
     materials?: number | null;
     /** How placed copies block the player and camera (default auto). */
     collision?: PropCollision;
+    /** Floating on water (null / absent: sits on the ground or the bed). */
+    buoyancy?: PropBuoyancy | null;
+};
+
+/**
+ * How a prop model floats (App\Models\PropModel buoyancy): copies placed in water bob and tilt on the
+ * waves and push ripples. `density` is the share of its height under water (0.05 floats high like a
+ * leaf, 0.9 barely above the surface like a waterlogged log). `drift`: `none` bobs in place (the anchor
+ * holds it), `return` drifts with currents, wind and pushes while playing and is back at its saved
+ * spot afterwards, `stay` drifts and stays where it ended up until the map is reloaded. Saved positions
+ * are always the authored anchor.
+ */
+export type PropBuoyancy = {
+    mode: 'float';
+    density: number;
+    drift: 'none' | 'return' | 'stay';
 };
 
 /** One placed prop. The height follows the terrain (plus `offset`), so sculpting keeps it grounded. */
@@ -575,6 +591,8 @@ export type GameManifest = {
         save_thumbnail: string;
         /** PATCH a foliage type's settings from the in-game editor: `${update_foliage_type}/{id}`. */
         update_foliage_type?: string;
+        /** PATCH a prop model's collision / buoyancy from the in-game editor: `${update_prop_model}/{id}`. */
+        update_prop_model?: string;
         /** PATCH a terrain layer's ground cover: `${update_layers}/{id}/ground-cover`. */
         update_layers?: string;
         /** POST a new biome from a layer ({layer_id, name}); apply: `${update_layers}/{id}/biome`. */

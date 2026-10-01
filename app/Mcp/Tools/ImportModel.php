@@ -48,6 +48,7 @@ class ImportModel extends WaterwaysTool
             'target_height' => $schema->number()->min(0.02)->max(150)->description('Real-world height in metres; the game scales the model to it (default: the model\'s own size).'),
             'tags' => $schema->array()->items($schema->string())->description('Props: search tags.'),
             'collision' => $schema->string()->enum(PropModel::COLLISIONS)->description('Props: how placed copies block the player: auto (boxes fitted to the model, doorways stay open; default), box, mesh (exact triangles, for walk-in buildings) or none. Change later with update_prop_model.'),
+            'buoyancy' => UpdatePropModel::buoyancySchema($schema),
             'create_type' => $schema->boolean()->description('Foliage: also create a foliage type that uses the asset (default false).'),
             'bake' => $schema->boolean()->description('Foliage: bake right away in an open editor (default true).'),
         ];
@@ -89,6 +90,9 @@ class ImportModel extends WaterwaysTool
             throw new ToolError('Unknown collision "'.$collision.'". Use one of: '.implode(', ', PropModel::COLLISIONS).'.');
         }
 
+        $buoyancy = $request->get('buoyancy') !== null
+            ? UpdatePropModel::buoyancyFromArgument($request->get('buoyancy'))
+            : null;
         $height = $this->height($request);
         $dimensions = GltfInspector::dimensions($model->document);
         $stats = GltfInspector::stats($model->document);
@@ -100,6 +104,7 @@ class ImportModel extends WaterwaysTool
             'status' => 'processing',
             'target_height' => $height,
             'collision' => $collision,
+            'buoyancy' => $buoyancy,
             'dimensions' => $dimensions,
             'tags' => array_values(array_filter(array_map('strval', (array) $request->get('tags', [])))) ?: null,
         ]);

@@ -12,6 +12,7 @@ use App\Http\Controllers\Api\MapAiController;
 use App\Http\Controllers\Api\MapDataController;
 use App\Http\Controllers\Api\MapSnapshotApiController;
 use App\Http\Controllers\Api\MaterialApiController;
+use App\Http\Controllers\Api\PropModelApiController;
 use App\Http\Controllers\Api\TerrainLayerApiController;
 use Illuminate\Support\Facades\Route;
 
@@ -61,3 +62,4 @@ Route::post('foliage/assets/{asset}/bake', [FoliageAssetApiController::class, 'b
 Route::post('foliage/assets/{asset}/bake-failed', [FoliageAssetApiController::class, 'bakeFailed'])->name('api.foliage.assets.bake-failed');
 Route::post('foliage/ai/plan', [FoliageAiController::class, 'plan'])->name('api.foliage.ai.plan');
 Route::patch('foliage-types/{foliageType}', [FoliageTypeApiController::class, 'update'])->name('api.foliage-types.update');
+Route::patch('prop-models/{propModel}', [PropModelApiController::class, 'update'])->name('api.prop-models.update');

@@ -1,4 +1,5 @@
 import * as THREE from 'three/webgpu';
+import { abs, float, max, select, texture, vec3 } from 'three/tsl';
 import { gridWaterLevel } from './foliage/placement';
 import { NO_WATER } from '../shared/types';
 import type { EnvironmentSettings, RiverSpline } from '../shared/types';
@@ -466,6 +467,14 @@ export class Water {
         this.waves.setWind(windStrength, windX, windZ);
     }
 
+    /**
+     * The wind over the water as a velocity (m/s, the direction it blows towards): floating props drift
+     * with a share of it. Wind strength 1 is a fresh breeze of about 8 m/s.
+     */
+    windVelocity(): THREE.Vector2 {
+        return this.u.windDir.value.clone().multiplyScalar(this.u.wind.value * 8);
+    }
+
     /** Travelling gusts (the foliage's gust field): strength, 1 / patch size and the field's downwind offset. */
     setGusts(gust: THREE.Vector2, offset: THREE.Vector2): void {
         this.u.gust.value.copy(gust);
@@ -672,6 +681,20 @@ export class Water {
         if (color) {
             this.u.underColor.value.copy(color);
         }
+    }
+
+    /**
+     * The water data at a world position as a vertex-stage-safe node: depth (m, 0 where dry or off the
+     * map) and the river flow (x, z). Foliage reads it so submerged plants sway with the current.
+     */
+    dataNode(xz: THREE.Node<'vec2'>): THREE.Node<'vec3'> {
+        const u = this.u;
+        const grid = xz.add(u.mapHalf).div(u.dataSpacing);
+        const d = texture(this.data.dataTexture, grid.add(0.5).div(u.dataSize))
+            .level(float(0));
+        const inside = max(abs(xz.x), abs(xz.y)).lessThan(u.mapHalf);
+
+        return select(inside, vec3(d.x.max(0), d.y, d.z), vec3(0)) as THREE.Node<'vec3'>;
     }
 
     /** Water surface height at a world position (still level, no waves), or null when dry. */

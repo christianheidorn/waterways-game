@@ -229,6 +229,11 @@ export class EditorPanel {
             softenMap: () => void;
             scatter: (ids: number[]) => void;
             clearFoliage: (ids: number[]) => void;
+            /** Change a prop model's buoyancy live (saved to the studio library). */
+            updatePropModel: (
+                id: number,
+                patch: Pick<PropModelRef, 'buoyancy'>,
+            ) => void;
             /** Change a foliage type's settings live (saved to the studio library). */
             updateFoliageType: (
                 id: number,
@@ -984,8 +989,11 @@ export class EditorPanel {
             }
         });
 
+        const floating = model ? this.floatingSection(model) : null;
+
         return section(
             model?.name ?? 'Prop',
+            ...(floating ? [floating] : []),
             yaw.el,
             h(
                 'div',
@@ -1011,6 +1019,62 @@ export class EditorPanel {
                 'Drag to move · R / Shift+R turns by 15° · Delete removes · Ctrl+D duplicates · Esc deselects · Ctrl+Z undoes',
             ),
         );
+    }
+
+    /**
+     * Floating on water (the prop model's buoyancy, for every copy): density = share of the height under
+     * water, drift = what happens while playing.
+     */
+    private floatingSection(model: PropModelRef): HTMLElement {
+        const b = model.buoyancy ?? null;
+        const set = (next: PropModelRef['buoyancy']) => {
+            this.actions.updatePropModel(model.id, { buoyancy: next });
+            this.renderedKey = '';
+            this.editor.notify();
+        };
+        const current = () =>
+            b ?? { mode: 'float' as const, density: 0.5, drift: 'none' as const };
+        const floats = toggle(
+            'Floats on water (all copies of this model)',
+            !!b,
+            (v) => set(v ? current() : null),
+        );
+        const parts: HTMLElement[] = [floats.el];
+
+        if (b) {
+            const density = slider({
+                label: 'Under water',
+                min: 0.05,
+                max: 0.95,
+                step: 0.05,
+                value: b.density,
+                format: (v) => `${Math.round(v * 100)} %`,
+                onInput: (v) =>
+                    this.actions.updatePropModel(model.id, {
+                        buoyancy: { ...current(), density: v },
+                    }),
+            });
+            const drift = segmented(
+                [
+                    { value: 'none', label: 'Bobs in place' },
+                    { value: 'return', label: 'Drifts, returns' },
+                    { value: 'stay', label: 'Drifts, stays' },
+                ],
+                b.drift,
+                (v) => set({ ...current(), drift: v }),
+            );
+            parts.push(
+                density.el,
+                drift.el,
+                h(
+                    'p',
+                    { class: 'ww-muted' },
+                    'Copies in water bob and tilt on the waves and can be pushed by the character. Drifting happens while playing; the saved position stays the anchor.',
+                ),
+            );
+        }
+
+        return h('div', { class: 'ww-subsection' }, ...parts);
     }
 
     /** Request tool: outline an area and ask an AI agent (connected over MCP) to build something there. */

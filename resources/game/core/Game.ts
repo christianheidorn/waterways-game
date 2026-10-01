@@ -45,6 +45,7 @@ import type {
     SplinesFile,
     BiomeSummary,
     GroundCoverEntry,
+    PropModelRef,
     TerrainLayer,
 } from '../shared/types';
 import {
@@ -80,6 +81,7 @@ import {
 } from '../world/WaterReflection';
 import { Weather } from '../world/Weather';
 import { WaterInteraction } from '../world/water/WaterInteraction';
+import { Floaters } from '../world/water/Floaters';
 import { Wetness } from '../world/Wetness';
 import { Api } from './Api';
 import { Bridge } from './Bridge';
@@ -169,6 +171,8 @@ export class Game {
     private player!: Player;
     /** Wading, splashes, ripples from the character and props, wet clothes (phase 12). */
     private waterInteraction!: WaterInteraction;
+    /** Floating props bobbing on the waves (phase 13). */
+    private floaters!: Floaters;
     private playerCamera!: ThirdPersonCamera;
     private editor!: Editor;
     private panel!: EditorPanel;
@@ -927,7 +931,10 @@ export class Game {
 
         this.progress(0.9, 'Growing foliage');
         // Grass etc. blend into the terrain colour at their roots.
-        const foliage = new Foliage((xz) => material.groundColor(xz));
+        const foliage = new Foliage(
+            (xz) => material.groundColor(xz),
+            (xz) => water.dataNode(xz),
+        );
         // WebGPU: GPU-driven culling + indirect draws (culled in renderFrame).
         foliage.setRenderer(this.renderer);
         foliage.setTypes(m.foliage_types);
@@ -1046,6 +1053,11 @@ export class Game {
         );
         this.scene.add(this.player.object);
         this.waterInteraction = new WaterInteraction(this.world.water);
+        this.floaters = new Floaters(
+            this.world.props,
+            this.world.water,
+            () => this.world.heights,
+        );
         this.scene.add(this.waterInteraction.splashes.mesh);
         this.waterInteraction.onSound = (kind, volume) =>
             this.weather?.audio.waterSound(kind, volume);
@@ -1180,6 +1192,7 @@ export class Game {
             },
             clearFoliage: (ids) => this.editor.clearFoliage(ids),
             updateFoliageType: (id, patch) => this.updateFoliageType(id, patch),
+            updatePropModel: (id, patch) => this.updatePropModel(id, patch),
             updateGroundCover: (id, entries) =>
                 this.updateGroundCover(id, entries),
             biomes: () => this.manifest.biomes ?? [],
@@ -1306,6 +1319,7 @@ export class Game {
 
         const previous = this.mode;
         this.mode = mode;
+        this.floaters?.setPlaying(mode === 'play');
 
         if (mode === 'play') {
             if (previous === 'edit' || initial) {
@@ -1605,6 +1619,18 @@ export class Game {
                       swimming: this.player.swimming,
                       yaw: this.player.yaw,
                       headUnder: this.player.headUnder,
+                  }
+                : null,
+        );
+        this.floaters.update(
+            dt,
+            character ? this.player.position : this.camera.position,
+            character
+                ? {
+                      position: this.player.position,
+                      velocity: this.player.velocity,
+                      radius: this.player.capsule().radius,
+                      height: this.player.height,
                   }
                 : null,
         );
@@ -2308,6 +2334,55 @@ export class Game {
             () => void this.flushFoliagePatches(),
             700,
         );
+    }
+
+    private readonly propModelPatches = new Map<
+        number,
+        Pick<PropModelRef, 'buoyancy'>
+    >();
+    private propModelSaveTimer = 0;
+
+    /** In-editor prop model settings (buoyancy): applied live, saved to the studio library after a pause. */
+    private updatePropModel(
+        id: number,
+        patch: Pick<PropModelRef, 'buoyancy'>,
+    ): void {
+        const models = (this.manifest.prop_models ?? []).map((m) =>
+            m.id === id ? { ...m, ...patch } : m,
+        );
+        this.manifest.prop_models = models;
+        this.world.props.setModels(models);
+        this.propModelPatches.set(id, {
+            ...this.propModelPatches.get(id),
+            ...patch,
+        });
+        window.clearTimeout(this.propModelSaveTimer);
+        this.propModelSaveTimer = window.setTimeout(
+            () => void this.flushPropModelPatches(),
+            700,
+        );
+    }
+
+    private async flushPropModelPatches(): Promise<void> {
+        const base = this.manifest.endpoints.update_prop_model;
+        const patches = [...this.propModelPatches];
+        this.propModelPatches.clear();
+
+        if (!base) {
+            return;
+        }
+
+        for (const [id, patch] of patches) {
+            try {
+                await this.api.patchJson(`${base}/${id}`, {
+                    buoyancy: patch.buoyancy ?? null,
+                });
+            } catch (error) {
+                this.hud.flash(
+                    `Could not save the prop model: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            }
+        }
     }
 
     private readonly coverPatches = new Map<number, GroundCoverEntry[]>();

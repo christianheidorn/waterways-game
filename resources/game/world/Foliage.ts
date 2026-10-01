@@ -40,6 +40,7 @@ import type {
     FoliageGlobals,
     FoliageTypeUniforms,
     GroundColorSource,
+    WaterDataSource,
     LodRole,
     RootTint,
 } from './foliage/FoliageMaterial';
@@ -515,9 +516,15 @@ export class Foliage {
     private temporalDither = false;
     private ditherIndex = 0;
 
-    /** `groundColor`: terrain colour the roots of grass etc. blend into (none: they keep their own). */
-    constructor(groundColor: GroundColorSource | null = null) {
-        this.globals = createFoliageGlobals(groundColor);
+    /**
+     * `groundColor`: terrain colour the roots of grass etc. blend into (none: they keep their own);
+     * `waterData`: the water around submerged plants (they sway with the current and the waves).
+     */
+    constructor(
+        groundColor: GroundColorSource | null = null,
+        waterData: WaterDataSource | null = null,
+    ) {
+        this.globals = createFoliageGlobals(groundColor, waterData);
         this.group.name = 'Foliage';
         // Static: an auto-updated group would recompute every cell mesh's world matrix each frame.
         this.group.matrixAutoUpdate = false;

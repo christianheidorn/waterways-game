@@ -24,6 +24,7 @@ use Illuminate\Support\Facades\Storage;
  * @property string|null $thumbnail_path
  * @property float|null $target_height
  * @property string $collision auto, box, mesh or none
+ * @property array{mode: string, density: float, drift: string}|null $buoyancy floating on water (null: none)
  * @property array{x: float, y: float, z: float}|null $dimensions
  * @property int|null $triangles
  * @property int|null $meshes
@@ -31,7 +32,7 @@ use Illuminate\Support\Facades\Storage;
  * @property list<string>|null $tags
  * @property string|null $prompt
  */
-#[Fillable(['name', 'category', 'source', 'status', 'status_message', 'model_path', 'thumbnail_path', 'target_height', 'collision', 'dimensions', 'triangles', 'meshes', 'materials', 'tags', 'prompt'])]
+#[Fillable(['name', 'category', 'source', 'status', 'status_message', 'model_path', 'thumbnail_path', 'target_height', 'collision', 'buoyancy', 'dimensions', 'triangles', 'meshes', 'materials', 'tags', 'prompt'])]
 class PropModel extends Model
 {
     /** @use HasFactory<PropModelFactory> */
@@ -45,6 +46,12 @@ class PropModel extends Model
     /** How placed copies collide: boxes fitted to the model, one box, the exact triangles, or not at all. */
     public const COLLISIONS = ['auto', 'box', 'mesh', 'none'];
 
+    /** Buoyancy: none (stands on the ground / bed) or float (bobs on the waves). */
+    public const BUOYANCY_MODES = ['none', 'float'];
+
+    /** Floating copies: bob in place, drift while playing and come back, or drift and stay. */
+    public const BUOYANCY_DRIFTS = ['none', 'return', 'stay'];
+
     protected function casts(): array
     {
         return [
@@ -54,6 +61,7 @@ class PropModel extends Model
             'meshes' => 'integer',
             'materials' => 'integer',
             'tags' => 'array',
+            'buoyancy' => 'array',
         ];
     }
 
@@ -114,6 +122,39 @@ class PropModel extends Model
             'meshes' => $this->meshes,
             'materials' => $this->materials,
             'collision' => $this->collision ?? 'auto',
+            'buoyancy' => self::normalizeBuoyancy($this->buoyancy),
+        ];
+    }
+
+    /**
+     * A buoyancy setting with defaults filled in and values clamped, or null for none. Accepts the
+     * stored array, a tool argument (mode / density / drift, any subset, merged over `$current`) or a
+     * bare mode string.
+     *
+     * @param  array<string, mixed>|null  $current
+     * @return array{mode: string, density: float, drift: string}|null
+     */
+    public static function normalizeBuoyancy(mixed $value, ?array $current = null): ?array
+    {
+        if (is_string($value)) {
+            $value = ['mode' => $value];
+        }
+
+        if (! is_array($value)) {
+            return null;
+        }
+
+        $merged = [...($current ?? []), ...$value];
+        if (($merged['mode'] ?? 'float') !== 'float') {
+            return null;
+        }
+
+        $drift = $merged['drift'] ?? 'none';
+
+        return [
+            'mode' => 'float',
+            'density' => round(min(0.95, max(0.05, (float) ($merged['density'] ?? 0.5))), 3),
+            'drift' => in_array($drift, self::BUOYANCY_DRIFTS, true) ? $drift : 'none',
         ];
     }
 }

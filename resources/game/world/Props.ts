@@ -127,6 +127,16 @@ export class Props implements CollisionProvider {
     private instances = new Map<string, PropInstance>();
     /** World matrix per instance (null until its model is loaded). */
     private matrices = new Map<string, THREE.Matrix4>();
+    /**
+     * Live poses that replace the saved placement while set (floating props bobbing and drifting, see
+     * water/Floaters): never saved, the instance keeps its authored anchor.
+     */
+    private poses = new Map<
+        string,
+        { matrix: THREE.Matrix4; x: number; z: number; yaw: number }
+    >();
+    /** Where each posed instance was last filed in the collision grid. */
+    private posedIndex = new Map<string, { x: number; z: number }>();
     private readonly loader = createGltfLoader();
     private dirty = true;
     private readonly lastView = new THREE.Vector3(Infinity, 0, 0);
@@ -206,6 +216,8 @@ export class Props implements CollisionProvider {
             (file?.props ?? []).map((p) => [p.id, { ...p }]),
         );
         this.matrices.clear();
+        this.poses.clear();
+        this.posedIndex.clear();
         this.collisionGrid.clear();
         this.collisionCells.clear();
 
@@ -290,6 +302,8 @@ export class Props implements CollisionProvider {
         for (const id of ids) {
             if (this.instances.delete(id)) {
                 this.matrices.delete(id);
+                this.poses.delete(id);
+                this.posedIndex.delete(id);
                 this.unindex(id);
                 removed++;
             }
@@ -501,6 +515,78 @@ export class Props implements CollisionProvider {
                 }
             }
         });
+    }
+
+    /**
+     * A live pose for a placed prop (world matrix of its model frame, with the position and heading it
+     * implies), or null to go back to its saved placement. Rendering, picking and collision follow it;
+     * saving does not (see `poses`).
+     */
+    setPose(
+        id: string,
+        pose: {
+            matrix: THREE.Matrix4;
+            x: number;
+            z: number;
+            yaw: number;
+        } | null,
+    ): void {
+        const p = this.instances.get(id);
+
+        if (!p) {
+            return;
+        }
+
+        if (!pose) {
+            if (this.poses.delete(id)) {
+                this.posedIndex.delete(id);
+                this.index(p);
+                this.dirty = true;
+            }
+
+            return;
+        }
+
+        const current = this.poses.get(id);
+
+        if (current) {
+            current.matrix.copy(pose.matrix);
+            current.x = pose.x;
+            current.z = pose.z;
+            current.yaw = pose.yaw;
+        } else {
+            this.poses.set(id, {
+                matrix: pose.matrix.clone(),
+                x: pose.x,
+                z: pose.z,
+                yaw: pose.yaw,
+            });
+        }
+
+        // Re-filed in the collision grid once it drifted a few metres.
+        const filed = this.posedIndex.get(id);
+
+        if (!filed || Math.hypot(filed.x - pose.x, filed.z - pose.z) > 2) {
+            this.posedIndex.set(id, { x: pose.x, z: pose.z });
+            this.index(p);
+        }
+
+        this.dirty = true;
+    }
+
+    /** The live pose of a prop (null: at its saved placement). */
+    poseOf(id: string): { x: number; z: number; yaw: number } | null {
+        return this.poses.get(id) ?? null;
+    }
+
+    /** The model's bounds at scale 1 (its own frame, base centre at the origin), null while it loads. */
+    modelBounds(model: number): THREE.Box3 | null {
+        return this.batches.get(model)?.template.box ?? null;
+    }
+
+    /** The library entry of a model. */
+    modelRef(model: number): PropModelRef | null {
+        return this.models.get(model) ?? null;
     }
 
     /** Ground height under a prop at (x, z) with a footprint radius, plus its offset. */
@@ -846,6 +932,10 @@ export class Props implements CollisionProvider {
         const shape = collisionShape(template, mode);
         const matrix = this.matrixOf(p, template)!;
         const y = matrix.elements[13];
+        const pose = this.poses.get(p.id);
+        const px = pose ? pose.x : p.x;
+        const pz = pose ? pose.z : p.z;
+        const yaw = pose ? pose.yaw : p.yaw;
         const box = template.box;
         // Props tilted to the slope keep upright colliders spanning the tilted model's height.
         const span = p.align ? box.clone().applyMatrix4(matrix) : null;
@@ -859,11 +949,11 @@ export class Props implements CollisionProvider {
                 propModelId: p.model,
                 propId: p.id,
             },
-            x: p.x,
+            x: px,
             y,
-            z: p.z,
-            cos: Math.cos(p.yaw),
-            sin: Math.sin(p.yaw),
+            z: pz,
+            cos: Math.cos(yaw),
+            sin: Math.sin(yaw),
             scale: p.scale,
             radius: templateReach(template) * p.scale,
             bottom: span ? span.min.y : y + box.min.y * p.scale,
@@ -876,19 +966,25 @@ export class Props implements CollisionProvider {
     private index(p: PropInstance): void {
         this.unindex(p.id);
         const batch = this.batches.get(p.model);
-        const r = batch
-            ? templateReach(batch.template) * p.scale
-            : this.modelRadius(p.model, p.scale) * 1.5 + 1;
+        // Drifting props: around where they are now (a margin covers the drift until re-filed).
+        const pose = this.poses.get(p.id);
+        const x = pose ? pose.x : p.x;
+        const z = pose ? pose.z : p.z;
+        const r =
+            (batch
+                ? templateReach(batch.template) * p.scale
+                : this.modelRadius(p.model, p.scale) * 1.5 + 1) +
+            (pose ? 2 : 0);
         const cells: number[] = [];
 
         for (
-            let cz = Math.floor((p.z - r) / COLLISION_CELL);
-            cz <= Math.floor((p.z + r) / COLLISION_CELL);
+            let cz = Math.floor((z - r) / COLLISION_CELL);
+            cz <= Math.floor((z + r) / COLLISION_CELL);
             cz++
         ) {
             for (
-                let cx = Math.floor((p.x - r) / COLLISION_CELL);
-                cx <= Math.floor((p.x + r) / COLLISION_CELL);
+                let cx = Math.floor((x - r) / COLLISION_CELL);
+                cx <= Math.floor((x + r) / COLLISION_CELL);
                 cx++
             ) {
                 const key = cellKey(cx, cz);
@@ -933,6 +1029,12 @@ export class Props implements CollisionProvider {
         p: PropInstance,
         template: Template,
     ): THREE.Matrix4 | null {
+        const pose = this.poses.get(p.id);
+
+        if (pose) {
+            return pose.matrix;
+        }
+
         let matrix = this.matrices.get(p.id);
 
         if (!matrix) {

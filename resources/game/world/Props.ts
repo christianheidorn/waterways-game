@@ -557,6 +557,39 @@ export class Props implements CollisionProvider {
     }
 
     /**
+     * Around the water reflection's render: models with several LODs leave out their farthest one
+     * (small, distant props are lost in the reduced-resolution, rippled reflection anyway).
+     */
+    setReflectionPass(reflection: boolean): void {
+        if (!reflection) {
+            for (const mesh of this.reflectionHidden) {
+                mesh.visible = true;
+            }
+
+            this.reflectionHidden.length = 0;
+
+            return;
+        }
+
+        for (const batch of this.batches.values()) {
+            const last = batch.meshes.length - 1;
+
+            if (last < 1) {
+                continue;
+            }
+
+            for (const mesh of batch.meshes[last]) {
+                if (mesh.visible) {
+                    mesh.visible = false;
+                    this.reflectionHidden.push(mesh);
+                }
+            }
+        }
+    }
+
+    private readonly reflectionHidden: THREE.InstancedMesh[] = [];
+
+    /**
      * Per frame: assigns each instance its LOD for the camera's distance, culls it against the view
      * frustum and uploads the instance matrices. Off-screen instances stay when their shadow can fall
      * into view (`options.shadowCaster`: inside the shadow maps' reach, which the cached far cascade

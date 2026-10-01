@@ -67,7 +67,13 @@ import { SplatMap } from '../world/SplatMap';
 import { Terrain } from '../world/Terrain';
 import { TerrainMaterial } from '../world/TerrainMaterial';
 import { Water } from '../world/Water';
-import { WaterReflection } from '../world/WaterReflection';
+import {
+    REFLECTION_FADE,
+    REFLECTION_OFF,
+    REFLECTION_ON,
+    WaterReflection,
+    waterCoverage,
+} from '../world/WaterReflection';
 import { Weather } from '../world/Weather';
 import { Wetness } from '../world/Wetness';
 import { Api } from './Api';
@@ -136,6 +142,14 @@ export class Game {
     private reflection = new WaterReflection();
     private reflectionLevelTimer = 0;
     private reflectionLevel: number | null = null;
+    /** Share of the screen the reflected water level covers (sampled with the level). */
+    private reflectionCoverage = 1;
+    /** The reflection is worth rendering (enough water on screen, with hysteresis). */
+    private reflectionWanted = true;
+    /** Blend of the planar reflection over the environment reflection (fades as it turns on / off). */
+    private reflectionWeight = 1;
+    /** The reflection pass is skipped this frame (little or far water: environment reflection only). */
+    private reflectionSkipped = false;
     private scene = new THREE.Scene();
     private camera = new THREE.PerspectiveCamera(60, 1, 0.1, 20000);
     private input!: Input;
@@ -453,6 +467,7 @@ export class Game {
                     editor_worker: !!this.editorWorker?.available,
                     device_pixel_ratio: round2(window.devicePixelRatio),
                     quality_preset: g.quality_preset,
+                    water_reflection: this.reflectionStats(),
                     // Irradiance probes: grid, rays, worker time of the last update.
                     bounce_light: this.bounce?.stats() ?? null,
                 };
@@ -1498,9 +1513,10 @@ export class Game {
         this.world.props.updateView(this.camera, {
             shadowCaster: sunShadows.casterTest(),
             shadowRevision: sunShadows.casterRevision,
-            reflectionLevel: this.reflection.enabled
-                ? this.reflectionLevel
-                : null,
+            reflectionLevel:
+                this.reflection.enabled && !this.reflectionSkipped
+                    ? this.reflectionLevel
+                    : null,
         });
 
         const waterLevel = this.world.water.levelAt(
@@ -1735,9 +1751,7 @@ export class Game {
         return this.postFx.readFocusDistance();
     }
 
-    // Small foliage (grass, flowers, reeds) is left out of the water reflection; cached per type list.
-    private smallFoliageTypes: FoliageType[] | null = null;
-    private smallFoliagePrefixes: string[] = [];
+    /** Objects hidden while the water reflection renders (precipitation). */
     private readonly reflectionHidden: THREE.Object3D[] = [];
 
     /**
@@ -1764,9 +1778,35 @@ export class Game {
             const level = water.dominantLevel(focus, this.camera);
             // Keep the previous plane when nothing is found so the reflection doesn't flicker.
             this.reflectionLevel = level ?? this.reflectionLevel;
+
+            if (this.reflectionLevel !== null) {
+                // Little water on screen (or only far away): the environment reflection is enough.
+                this.reflectionCoverage = waterCoverage(
+                    this.camera,
+                    this.reflectionLevel,
+                    (x, z) => water.levelAt(x, z),
+                );
+                this.reflectionWanted =
+                    this.reflectionCoverage >=
+                    (this.reflectionWanted ? REFLECTION_OFF : REFLECTION_ON);
+            }
         }
 
         if (this.reflectionLevel === null) {
+            this.reflectionSkipped = true;
+
+            return null;
+        }
+
+        // Fades between the planar and the environment reflection instead of popping.
+        const step = dt / REFLECTION_FADE;
+        this.reflectionWeight = this.reflectionWanted
+            ? Math.min(1, this.reflectionWeight + step)
+            : Math.max(0, this.reflectionWeight - step);
+        this.reflectionSkipped =
+            !this.reflectionWanted && this.reflectionWeight <= 0;
+
+        if (this.reflectionSkipped) {
             return null;
         }
 
@@ -1785,55 +1825,40 @@ export class Game {
     private renderReflection(): void {
         const water = this.world.water;
 
-        if (!this.reflection.enabled || this.reflectionLevel === null) {
+        if (
+            !this.reflection.enabled ||
+            this.reflectionLevel === null ||
+            this.reflectionSkipped
+        ) {
             water.setReflection(null);
 
             return;
         }
 
-        if (this.smallFoliageTypes !== this.manifest.foliage_types) {
-            this.smallFoliageTypes = this.manifest.foliage_types;
-            this.smallFoliagePrefixes = this.manifest.foliage_types
-                .filter(
-                    (t) =>
-                        t.kind === 'grass' ||
-                        t.kind === 'flower' ||
-                        t.kind === 'reed',
-                )
-                .map((t) => `Foliage_${t.name}_`);
-        }
-
-        const small = this.smallFoliagePrefixes;
         const hidden = this.reflectionHidden;
         hidden.length = 0;
         const precipitation = this.weather?.precipitation.group;
         const foliage = this.world.foliage;
+        const props = this.world.props;
         this.reflection.render(
             this.renderer,
             this.scene,
             () => {
                 water.group.visible = false;
-                foliage.beginReflection();
+                // Ground cover and small foliage are left out, so are the props' farthest LODs.
+                foliage.beginReflection(this.reflection.camera);
+                props.setReflectionPass(true);
 
                 // Rain / snow streaks are invisible in a rippled reflection but cost a full particle draw.
                 if (precipitation?.visible) {
                     precipitation.visible = false;
                     hidden.push(precipitation);
                 }
-
-                for (const child of foliage.group.children) {
-                    if (
-                        child.visible &&
-                        small.some((prefix) => child.name.startsWith(prefix))
-                    ) {
-                        child.visible = false;
-                        hidden.push(child);
-                    }
-                }
             },
             () => {
                 water.group.visible = true;
                 foliage.endReflection();
+                props.setReflectionPass(false);
 
                 for (const child of hidden) {
                     child.visible = true;
@@ -1846,9 +1871,25 @@ export class Game {
                       texture: this.reflection.target.texture,
                       matrix: this.reflection.textureMatrix,
                       level: this.reflection.level,
+                      weight: this.reflectionWeight,
                   }
                 : null,
         );
+    }
+
+    /** Planar water reflection state for the performance profile. */
+    private reflectionStats(): Record<string, unknown> | null {
+        if (!this.reflection.enabled) {
+            return null;
+        }
+
+        return {
+            rendering: !this.reflectionSkipped && this.reflectionLevel !== null,
+            size: `${this.reflection.target.width}×${this.reflection.target.height}`,
+            every_nth_frame: this.reflection.interval,
+            screen_coverage: round2(this.reflectionCoverage),
+            weight: round2(this.reflectionWeight),
+        };
     }
 
     private resizeWaterTarget(): void {
@@ -1859,7 +1900,8 @@ export class Game {
         this.reflection.setSize(
             size.x,
             size.y,
-            quality === 'high' ? 0.6 : quality === 'medium' ? 0.4 : 0,
+            // Half resolution at most: the reflection is rippled and blurred by the water anyway.
+            quality === 'high' ? 0.5 : quality === 'medium' ? 0.4 : 0,
         );
         // Medium redraws the reflection every other frame; the water projects it through the matrix
         // of the frame it was drawn in, so it stays in place while the camera moves.

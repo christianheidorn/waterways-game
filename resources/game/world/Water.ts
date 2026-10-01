@@ -330,9 +330,11 @@ export class Water {
             texture: THREE.Texture;
             matrix: THREE.Matrix4;
             level: number;
+            /** Blend over the environment reflection (fading in / out); default 1. */
+            weight?: number;
         } | null,
     ): void {
-        this.u.hasReflection.value = reflection ? 1 : 0;
+        this.u.hasReflection.value = reflection ? (reflection.weight ?? 1) : 0;
 
         if (reflection) {
             this.reflectionNode.value = reflection.texture;

@@ -70,6 +70,7 @@ import type { InstanceView } from './foliage/InstanceBatch';
 import { INSTANCE_FLOATS, writeInstance } from './foliage/instances';
 import type { Heightfield } from './Heightfield';
 import type { ShadowCascade } from './SunShadows';
+import { SHADOW_LAYER } from './layers';
 
 /**
  * Runtime cell size per kind (m). Small, dense foliage uses small cells so frustum culling, LOD and
@@ -2381,8 +2382,12 @@ export class Foliage {
         this.applyHidden();
 
         if (wasHidden && !placed && !cover) {
-            // Layer 0 is the only one foliage uses: restore it on everything (also meshes made meanwhile).
-            this.group.traverse((o) => o.layers.enable(0));
+            // Restore the view and shadow layers on everything (also meshes made meanwhile); cullMerged
+            // takes off-screen casters out of the view again on the next update.
+            this.group.traverse((o) => {
+                o.layers.enable(0);
+                o.layers.enable(SHADOW_LAYER);
+            });
             this.needsEval = true;
         }
     }
@@ -2416,10 +2421,15 @@ export class Foliage {
             }
 
             for (const mesh of meshes) {
+                if (!mesh) {
+                    continue;
+                }
+
                 if (hide) {
-                    mesh?.layers.disable(0);
+                    mesh.layers.disableAll();
                 } else {
-                    mesh?.layers.enable(0);
+                    mesh.layers.enable(0);
+                    mesh.layers.enable(SHADOW_LAYER);
                 }
             }
         }
@@ -2588,23 +2598,67 @@ export class Foliage {
 
     /**
      * Around the water reflection's render: the GPU path swaps its draws for the ones culled against
-     * the reflection camera (see cull()). The CPU path needs nothing: three frustum-culls its cells
-     * per camera.
+     * the reflection camera (see cull()); the CPU path shows the merged batches the main view's culling
+     * hid that the reflection camera sees (three frustum-culls the cells per camera). Ground cover and
+     * small kinds (grass, flowers, reeds) are left out on both paths: invisible in the rippled
+     * reflection, and the densest instances there are.
      */
-    beginReflection(): void {
-        this.setReflectionPass(true);
+    beginReflection(camera: THREE.Camera | null = null): void {
+        this.setReflectionPass(true, camera);
+        const hidden = this.reflectionHidden;
+        hidden.length = 0;
+
+        for (const renderer of this.renderers.values()) {
+            if (!reflectionExcluded(renderer)) {
+                continue;
+            }
+
+            if (renderer.gpu) {
+                // No reflection lists (see gpuConfig): its main draws are already hidden.
+                continue;
+            }
+
+            const hide = (mesh: THREE.Mesh | null) => {
+                if (mesh?.visible) {
+                    mesh.visible = false;
+                    hidden.push(mesh);
+                }
+            };
+
+            for (const cell of renderer.cells.values()) {
+                hide(cell.mesh);
+                hide(cell.near);
+            }
+
+            for (const chunk of renderer.chunks.values()) {
+                hide(chunk.mesh);
+            }
+
+            for (const merged of renderer.merged.values()) {
+                hide(merged.mesh);
+            }
+        }
     }
 
     endReflection(): void {
+        for (const mesh of this.reflectionHidden) {
+            mesh.visible = true;
+        }
+
+        this.reflectionHidden.length = 0;
         this.setReflectionPass(false);
     }
 
+    /** CPU-path meshes hidden for the reflection pass (shown again by endReflection). */
+    private readonly reflectionHidden: THREE.Mesh[] = [];
+
     /**
      * CPU path: merged batches span 256 m or more, and three culls them with the bounding sphere of
-     * that whole square, so batches next to the camera drew even when looking at the sky. Batches
-     * that cast no shadow are culled here against their (much tighter) instance box instead; shadow
-     * casters stay to three, whose shadow pass culls against the light (their shadows may fall into
-     * view from outside it). The water reflection sees them all again (setReflectionPass).
+     * that whole square, so batches next to the camera drew even when looking at the sky. They are
+     * culled here against their (much tighter) instance box instead. Off-screen shadow casters leave
+     * the view's layer but keep SHADOW_LAYER: only the sun's shadow passes draw them (culled against
+     * the light there, as their shadows may fall into view from outside it). The water reflection
+     * shows the ones its own camera sees again (setReflectionPass).
      */
     private cullMerged(camera: THREE.Camera): void {
         camera.updateMatrixWorld();
@@ -2614,16 +2668,34 @@ export class Foliage {
         );
         _frustum.setFromProjectionMatrix(_projScreen);
         this.frustumHidden.length = 0;
+        this.shadowOnly.length = 0;
 
         for (const renderer of this.renderers.values()) {
+            if (this.isHidden(renderer)) {
+                continue; // applyHidden() keeps them off every layer.
+            }
+
             for (const { mesh, batch } of renderer.merged.values()) {
+                const inView = _frustum.intersectsBox(batch.box);
+
                 if (mesh.castShadow) {
+                    mesh.visible = true;
+                    mesh.layers.enable(SHADOW_LAYER);
+
+                    if (inView) {
+                        mesh.layers.enable(0);
+                    } else {
+                        mesh.layers.disable(0);
+                        this.shadowOnly.push(mesh);
+                    }
+
                     continue;
                 }
 
-                mesh.visible = _frustum.intersectsBox(batch.box);
+                mesh.layers.enable(0);
+                mesh.visible = inView;
 
-                if (!mesh.visible) {
+                if (!inView) {
                     this.frustumHidden.push(mesh);
                 }
             }
@@ -2632,10 +2704,51 @@ export class Foliage {
 
     /** Merged batches hidden by cullMerged this frame. */
     private readonly frustumHidden: THREE.Mesh[] = [];
+    /** Off-screen merged shadow casters (on SHADOW_LAYER only) this frame. */
+    private readonly shadowOnly: THREE.Mesh[] = [];
+    /** Merged batches shown for the reflection pass. */
+    private readonly reflectionShown: THREE.Mesh[] = [];
 
-    private setReflectionPass(reflection: boolean): void {
-        for (const mesh of this.frustumHidden) {
-            mesh.visible = reflection;
+    private setReflectionPass(
+        reflection: boolean,
+        camera: THREE.Camera | null = null,
+    ): void {
+        if (reflection) {
+            const shown = this.reflectionShown;
+            shown.length = 0;
+
+            if (camera) {
+                camera.updateMatrixWorld();
+                _projScreen.multiplyMatrices(
+                    camera.projectionMatrix,
+                    camera.matrixWorldInverse,
+                );
+                _frustum.setFromProjectionMatrix(
+                    _projScreen,
+                    camera.coordinateSystem,
+                    (camera as { reversedDepth?: boolean }).reversedDepth,
+                );
+            }
+
+            for (const mesh of [...this.frustumHidden, ...this.shadowOnly]) {
+                const box = batchOf(mesh).box;
+
+                if (!camera || _frustum.intersectsBox(box)) {
+                    mesh.visible = true;
+                    mesh.layers.enable(0);
+                    shown.push(mesh);
+                }
+            }
+        } else {
+            for (const mesh of this.reflectionShown) {
+                if (this.shadowOnly.includes(mesh)) {
+                    mesh.layers.disable(0);
+                } else {
+                    mesh.visible = false;
+                }
+            }
+
+            this.reflectionShown.length = 0;
         }
 
         if (!this.gpuFrame) {
@@ -2777,7 +2890,7 @@ export class Foliage {
                 : renderer.cellSize * 0.5,
             center: sphere.center,
             radius: sphere.radius,
-            reflect: !SMALL_KINDS.has(renderer.type.kind),
+            reflect: !reflectionExcluded(renderer),
             interact: interactionStrength(renderer.type.kind),
         };
     }
@@ -4668,6 +4781,11 @@ function rectDistance(
 /** Packs cell grid coordinates into one number (cells span ±32k cells). */
 function gridIndex(cx: number, cz: number): number {
     return (cx + 32768) * 65536 + (cz + 32768);
+}
+
+/** Left out of the water reflection: ground cover and small kinds (see Foliage.beginReflection). */
+function reflectionExcluded(renderer: TypeRenderer): boolean {
+    return !!renderer.cover || SMALL_KINDS.has(renderer.type.kind);
 }
 
 function isChunk(cell: Cell): cell is Chunk {

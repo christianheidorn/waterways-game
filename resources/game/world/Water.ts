@@ -47,6 +47,7 @@ import { NO_WATER } from '../shared/types';
 import type { EnvironmentSettings } from '../shared/types';
 import { mulberry32 } from '../util/noise';
 import type { GridRect, Heightfield } from './Heightfield';
+import { rainRipples } from './waterPatterns';
 
 const CHUNK_CELLS = 64;
 
@@ -762,39 +763,6 @@ class PlanarEnvironmentNode extends THREE.EnvironmentNode {
         return undefined;
     }
 }
-
-/** Per-drop hash (Dave Hoskins' hash22). */
-const rippleHash = (p: Node<'vec2'>): Node<'vec2'> => {
-    const q = fract(
-        vec3(p.x, p.y, p.x).mul(vec3(0.1031, 0.103, 0.0973)),
-    ).toVar();
-    q.addAssign(dot(q, q.yzx.add(33.33)));
-
-    return fract(vec2(q.x, q.x).add(q.yz).mul(q.zy));
-};
-
-/** Expanding rings from rain drops: one drop per cell and layer; returns the slope (d height / d xz). */
-const rainRipples = (p: Node<'vec2'>, t: Node<'float'>): Node<'vec2'> => {
-    let slope: Node<'vec2'> = vec2(0);
-
-    for (let layer = 0; layer < 3; layer++) {
-        const q = p.mul(2.3 + layer * 0.7).add(layer * 17.31);
-        const cell = floor(q);
-        const f = fract(q);
-        const h = rippleHash(cell.add(layer * 3.7));
-        const phase = fract(t.mul(1.1 + layer * 0.2).add(h.x.mul(7)));
-        const d = f.sub(h.mul(0.4).add(0.3));
-        const dist = length(d);
-        const x = dist.sub(phase.mul(0.42));
-        const fade = phase.oneMinus();
-        const ring = sin(x.mul(45))
-            .mul(exp(x.mul(x).mul(-500)))
-            .mul(fade.mul(fade));
-        slope = slope.add(d.div(max(dist, 1e-3)).mul(ring));
-    }
-
-    return slope;
-};
 
 /** The water material and its planar reflection texture node (for swapping in the reflection). */
 function createWaterMaterial(

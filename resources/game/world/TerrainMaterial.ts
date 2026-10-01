@@ -41,6 +41,8 @@ import { SimplexNoise } from '../util/noise';
 import type { SplatMap } from './SplatMap';
 import { TerrainDebugView } from './TerrainDebugView';
 import { TERRAIN_SLOTS, TerrainTextures } from './TerrainTextures';
+import { causticPattern, rainRipples } from './waterPatterns';
+import { WATER_DEPTH_RANGE } from './Wetness';
 
 export type BrushOverlay = {
     x: number;
@@ -92,6 +94,7 @@ function createUniforms(
     textures: TerrainTextures,
     noise: THREE.Texture,
     wet: THREE.Texture,
+    trail: THREE.Texture,
 ) {
     const colorA = Array.from({ length: 8 }, () => new THREE.Color());
     const colorB = Array.from({ length: 8 }, () => new THREE.Color());
@@ -135,6 +138,19 @@ function createUniforms(
         // Global weather (Weather.ts): rain wetness and snow cover, 0-1.
         uWeatherWet: uniform(0),
         uSnowCover: uniform(0),
+        // Puddle fill (0-1, Weather: fills in rain, dries afterwards) and the current rain (ripples).
+        uPuddle: uniform(0),
+        uRain: uniform(0),
+        // Seconds (animations) and the direction towards the sun / moon (caustic projection).
+        uTime: uniform(0),
+        uSunDir: uniform(new THREE.Vector3(0, 1, 0)),
+        // Caustics: x intensity, y cell size (m), z depth reached (m), w enabled (graphics).
+        uCaustics: uniform(new THREE.Vector4(0.8, 2.5, 4, 1)),
+        // Footprints in snow (SnowTrail): print depth texture, its window (x / z centre, y size,
+        // w active) and the print depth setting (0 = off).
+        uTrail: fixedTexture(trail),
+        uTrailInfo: uniform(new THREE.Vector4(0, 0, 51.2, 0)),
+        uTrailDepth: uniform(0),
         /** CPU-side values behind the uniform arrays (edited in place by setLayers). */
         layers: { colorA, colorB, params, mat, mat2, tint, ground },
     };
@@ -163,6 +179,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
     private layers: TerrainLayer[] = [];
     private readonly noise: THREE.DataTexture;
     private readonly blankWet: THREE.DataTexture;
+    private readonly blankTrail: THREE.DataTexture;
     /** Albedo of the splat surface (see setupDiffuseColor). */
     private surfaceColor!: THREE.Node<'vec4'>;
 
@@ -177,13 +194,26 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
 
         this.textures = this.createTextures(textureSize);
         this.noise = createNoiseTexture();
+        // Placeholders until the real textures are connected; their formats and filters match
+        // (the shader's sampling mode is chosen from the first texture a node sees).
         this.blankWet = new THREE.DataTexture(
-            new Uint8Array([0]),
+            new Uint8Array(4),
+            1,
+            1,
+            THREE.RGBAFormat,
+        );
+        this.blankWet.minFilter = this.blankWet.magFilter = THREE.LinearFilter;
+        this.blankWet.needsUpdate = true;
+        this.blankTrail = new THREE.DataTexture(
+            new Uint8Array(1),
             1,
             1,
             THREE.RedFormat,
         );
-        this.blankWet.needsUpdate = true;
+        this.blankTrail.minFilter = this.blankTrail.magFilter =
+            THREE.LinearFilter;
+        this.blankTrail.wrapS = this.blankTrail.wrapT = THREE.RepeatWrapping;
+        this.blankTrail.needsUpdate = true;
 
         this.uniforms = createUniforms(
             splat,
@@ -192,6 +222,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
             this.textures,
             this.noise,
             this.blankWet,
+            this.blankTrail,
         );
         this.debug = new TerrainDebugView(size);
         this.buildNodes();
@@ -334,9 +365,50 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
         this.uniforms.uSnowCover.value = snow;
     }
 
-    /** Wetness mask (R8, same grid as the splat map): 1 = soaked ground next to water. */
+    /**
+     * Ground state texture (Wetness: RGBA8 on the splat grid): R wetness next to water, G water depth,
+     * B puddle potential.
+     */
     setWetness(texture: THREE.Texture): void {
         this.uniforms.uWet.value = texture;
+    }
+
+    /** Puddle fill (0-1) and the rain falling on them (0-1, ripples). */
+    setPuddles(fill: number, rain: number): void {
+        this.uniforms.uPuddle.value = fill;
+        this.uniforms.uRain.value = rain;
+    }
+
+    /** Animation time (s) and the direction towards the sun or moon. */
+    setFrame(time: number, lightDirection: THREE.Vector3): void {
+        this.uniforms.uTime.value = time;
+        this.uniforms.uSunDir.value.copy(lightDirection).normalize();
+    }
+
+    /** Caustics on shallow beds (environment) and the graphics switch. */
+    setCaustics(
+        intensity: number,
+        scale: number,
+        depth: number,
+        enabled: boolean,
+    ): void {
+        this.uniforms.uCaustics.value.set(
+            intensity,
+            scale,
+            depth,
+            enabled && intensity > 0 ? 1 : 0,
+        );
+    }
+
+    /** Footprints in snow: the trail texture and its window (shared vector, updated by SnowTrail). */
+    setTrail(texture: THREE.Texture, info: THREE.Vector4): void {
+        this.uniforms.uTrail.value = texture;
+        this.uniforms.uTrailInfo.value = info;
+    }
+
+    /** Print depth (0 = no footprints). */
+    setTrailDepth(depth: number): void {
+        this.uniforms.uTrailDepth.value = depth;
     }
 
     setBrush(brush: BrushOverlay): void {
@@ -361,6 +433,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
     override dispose(): void {
         this.noise.dispose();
         this.blankWet.dispose();
+        this.blankTrail.dispose();
         this.textures.dispose();
         this.debug.dispose();
         super.dispose();
@@ -404,6 +477,22 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
         ground[slot].multiplyScalar(0.97);
     }
 
+    /** Puddle coverage of the shaded pixel (0-1), written by the surface evaluation. */
+    private readonly puddleProperty = property('float', 'terrainPuddle');
+
+    /** Puddles reflect the sky like the water does: the environment radiance is raised over them. */
+    override setupEnvironment(
+        builder: THREE.NodeBuilder,
+    ): THREE.EnvironmentNode | null {
+        const env = super.setupEnvironment(builder);
+
+        if (!env) {
+            return env;
+        }
+
+        return new PuddleEnvironmentNode(env.envNode, this.puddleProperty);
+    }
+
     /**
      * The surface colour is set up here rather than as `colorNode`: three's shadow pass multiplies
      * the depth output by `colorNode.a`, which would run the whole splat shading (hundreds of texture
@@ -425,6 +514,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
         const surfaceRoughness = property('float', 'terrainRoughness');
         const surfaceAO = property('float', 'terrainAO');
         const surfaceBump = property('float', 'terrainBump');
+        const surfacePuddle = this.puddleProperty;
 
         this.surfaceColor = Fn(() => {
             const s = terrainSurface(u);
@@ -432,6 +522,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
             surfaceRoughness.assign(s.roughness);
             surfaceAO.assign(s.ao);
             surfaceBump.assign(s.bump);
+            surfacePuddle.assign(s.puddle);
 
             return vec4(this.debug.albedo(s.albedo), 1);
         })();
@@ -503,6 +594,25 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
             cell: u.uCell,
             density: fixedTexture(this.debug.density.texture),
         });
+    }
+}
+
+/** Environment lighting whose specular radiance is raised where puddles mirror the sky. */
+class PuddleEnvironmentNode extends THREE.EnvironmentNode {
+    constructor(
+        envNode: THREE.Node | null,
+        private readonly puddle: Float,
+    ) {
+        super(envNode);
+    }
+
+    override setup(builder: THREE.NodeBuilder): undefined {
+        super.setup(builder);
+        const radiance = (builder.context as { radiance: Vec3 }).radiance;
+        // The terrain's environment intensity (0.45) suits rough ground; still water reflects it all.
+        radiance.mulAssign(mix(1, 2.4, this.puddle));
+
+        return undefined;
     }
 }
 
@@ -887,33 +997,78 @@ function terrainSurface(u: TerrainUniforms) {
     });
 
     // Wet ground along water: darker, glossier, smoother.
-    const wet = u.uWet.sample(splatUv).x.toVar();
+    const ground = u.uWet.sample(splatUv).toVar();
+    const wet = ground.x.toVar();
     albedo.mulAssign(mix(1, 0.55, wet));
     rough.assign(mix(rough, 0.12, wet.mul(0.85)));
     nrm.assign(normalize(mix(nrm, N, wet.mul(0.5))));
 
-    // Weather: rain-soaked ground (porous darkening, glossy) with puddles in flat hollows.
+    // Caustics: the waves focus sunlight into a moving network of bright filaments on shallow beds,
+    // projected along the light direction through the water above.
+    If(u.uCaustics.w.greaterThan(0.5).and(ground.y.greaterThan(0.001)), () => {
+        const c = u.uCaustics;
+        const depth = ground.y.mul(WATER_DEPTH_RANGE).toVar();
+        const sun = u.uSunDir;
+        const shift = sun.xz.div(max(sun.y, 0.3)).mul(depth);
+        const p = wp.add(shift).div(max(c.y, 0.1));
+        const pattern = causticPattern(p, u.uTime.mul(0.45));
+        const reach = smoothstep(0.02, 0.35, depth).mul(
+            float(1).sub(smoothstep(c.z.mul(0.3), c.z, depth)),
+        );
+        const visible = smoothstep(0.02, 0.25, sun.y).mul(
+            float(1).sub(smoothstep(45, 160, dist)),
+        );
+        albedo.mulAssign(
+            pattern.mul(c.x).mul(reach).mul(visible).mul(2.2).add(1),
+        );
+    });
+
+    // Weather: rain-soaked ground (porous darkening, glossy).
     If(u.uWeatherWet.greaterThan(0.001), () => {
         const gw = u.uWeatherWet;
-        const flatness = smoothstep(0.93, 0.99, N.y);
-        const hollow = float(1)
+        albedo.mulAssign(mix(1, 0.62, gw.mul(float(1).sub(wet.mul(0.5)))));
+        rough.assign(mix(rough, rough.mul(0.6), gw));
+        nrm.assign(normalize(mix(nrm, N, gw.mul(0.25))));
+    });
+
+    // Puddles: rain collects in hollows (the ground's puddle potential, from the terrain's shape,
+    // with some noise for natural outlines) and rises with the fill level; still water mirrors the
+    // sky (see PuddleEnvironmentNode) and ripples while it rains.
+    const puddle = float(0).toVar();
+
+    If(u.uPuddle.greaterThan(0.001), () => {
+        const flatness = smoothstep(0.95, 0.995, N.y);
+        const shape = float(1)
             .sub(macro2.z)
             .mul(0.55)
             .add(float(1).sub(macro.y).mul(0.45));
-        const puddle = smoothstep(
-            float(0.76).sub(gw.mul(0.14)),
-            float(0.82).sub(gw.mul(0.14)),
-            hollow,
-        )
-            .mul(flatness)
-            .mul(smoothstep(0.3, 0.8, gw))
+        const score = ground.z
             .mul(0.85)
+            .add(shape.sub(0.5).mul(0.5))
+            .add(tileNoise.sub(0.5).mul(0.08))
             .toVar();
-        albedo.mulAssign(mix(1, 0.62, gw.mul(float(1).sub(wet.mul(0.5)))));
-        rough.assign(mix(rough, rough.mul(0.6), gw));
-        albedo.mulAssign(mix(1, 0.75, puddle));
-        rough.assign(mix(rough, 0.14, puddle));
-        nrm.assign(normalize(mix(nrm, N, max(gw.mul(0.25), puddle))));
+        const level = float(1).sub(u.uPuddle.mul(0.78)).toVar();
+        puddle.assign(
+            smoothstep(level, level.add(0.04), score).mul(flatness),
+        );
+        // A darker, soaked rim around the water.
+        const rim = smoothstep(level.sub(0.12), level, score)
+            .mul(flatness)
+            .mul(puddle.oneMinus());
+        albedo.mulAssign(mix(1, 0.68, rim));
+        rough.assign(mix(rough, 0.22, rim));
+        albedo.mulAssign(mix(1, 0.3, puddle));
+        rough.assign(mix(rough, 0.02, puddle));
+        const surface = vec3(N).toVar();
+
+        If(u.uRain.greaterThan(0.001), () => {
+            const slope = rainRipples(wp, u.uTime).mul(
+                u.uRain.mul(0.45).mul(float(1).sub(smoothstep(12, 45, dist))),
+            );
+            surface.assign(normalize(vec3(slope.x.negate(), 1, slope.y.negate())));
+        });
+
+        nrm.assign(normalize(mix(nrm, surface, puddle)));
     });
 
     // Snow settles on flatter ground first; thinner near water.
@@ -941,6 +1096,38 @@ function terrainSurface(u: TerrainUniforms) {
         rough.assign(mix(rough, 0.55, snow));
         nrm.assign(normalize(mix(nrm, N, snow.mul(0.7))));
         ao.assign(mix(ao, 1, snow.mul(0.6)));
+        puddle.mulAssign(snow.oneMinus());
+
+        // Footprints: pressed (darker, bluish, shadowed) hollows in the snow around the character.
+        const ti = u.uTrailInfo;
+
+        If(ti.w.greaterThan(0.5).and(u.uTrailDepth.greaterThan(0.001)), () => {
+            const rel = wp.sub(vec2(ti.x, ti.z));
+            const inside = float(1).sub(
+                smoothstep(
+                    ti.y.mul(0.42),
+                    ti.y.mul(0.48),
+                    max(abs(rel.x), abs(rel.y)),
+                ),
+            );
+            const uvT = wp.div(ti.y).toVar();
+            const texel = 1 / 1024;
+            const trail = (o: Vec2) =>
+                u.uTrail.sample(uvT.add(o)).level(float(0)).x;
+            const d0 = trail(vec2(0, 0));
+            const dx = trail(vec2(texel, 0)).sub(trail(vec2(-texel, 0)));
+            const dz = trail(vec2(0, texel)).sub(trail(vec2(0, -texel)));
+            const amount = inside.mul(snow).mul(u.uTrailDepth).toVar();
+            const press = d0.mul(amount).toVar();
+            albedo.assign(
+                mix(albedo, albedo.mul(vec3(0.7, 0.77, 0.88)), press.mul(0.9)),
+            );
+            ao.assign(mix(ao, ao.mul(0.7), press));
+            rough.assign(mix(rough, 0.4, press));
+            nrm.assign(
+                normalize(nrm.add(vec3(dx, 0, dz).mul(amount.mul(1.6)))),
+            );
+        });
     });
 
     return {
@@ -949,6 +1136,7 @@ function terrainSurface(u: TerrainUniforms) {
         roughness: clamp(rough, 0.03, 1),
         ao,
         bump: bumpH,
+        puddle,
     };
 }
 

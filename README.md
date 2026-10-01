@@ -52,8 +52,9 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
   valley (height) fog with sunbeams; rain, snow, lightning with thunder, gusts that sweep across fields and
   canopies, and wet or snowy ground (see [Weather & sky](#weather--sky)). The sun
   position is driven by time of day. Lighting comes from the
-  sky (IBL), with fog and a shadow that follows the camera or player. Post-processing covers MSAA, bloom, GTAO
-  and ACES tone mapping.
+  sky (IBL), with fog and a shadow that follows the camera or player, plus bounce light from an irradiance
+  probe grid (see [Bounce light](#bounce-light)). Post-processing covers MSAA, bloom, GTAO and ACES tone
+  mapping.
 - **Foliage.** Instanced and bucketed into 128 m cells, with LODs that cross-fade (dithered), wind sway with
   travelling gusts, grass that bends around the character, a grass distance fade and density scaling.
 - **Player.** Third-person explorer with procedural walk, run, jump and swim animation (or your own GLB). Moves
@@ -92,6 +93,7 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
     | --------------- | ---------------------------------------------------------------------------------------------------------------------- |
     | Lit             | The final rendering (default)                                                                                          |
     | Lighting only   | Terrain and foliage with a neutral grey albedo: judge sun, sky light, shadows and AO without the materials             |
+    | Bounce light    | Only the bounce light (every other light off, ×3) on grey albedo: where the probes put indirect light and sky shade   |
     | Layers          | Each terrain layer in its own colour (legend with the layer names), blended by paint weight so transitions show        |
     | Slope           | Steepness: green (flat) → yellow (30°) → red (45°) → purple (60°+); handy with the foliage slope rules                 |
     | Height          | Hypsometric bands with contour lines; the interval follows the map's height range (1, 2 or 5 × 10ⁿ m, bold every 5th)  |
@@ -370,8 +372,9 @@ leave these values alone:
 | Cinematic | 30 km      | ultra (700 m)   | TAA  | GTAO high   | 2K / 16×             | 1 / 2× / 350 m                   | 1.25 (supersampled) / 3×  |
 
 Low also switches off the LOD cross-fades, grass bending around the character (Foliage group), the cloud
-shadows (Shadows group), caustics (Shading group) and footprints in snow (Effects group); Medium and up have
-all of them.
+shadows (Shadows group), caustics and bounce light (Shading group) and footprints in snow (Effects group);
+Medium and up have all of them. Bounce light quality (`bounce_light_quality`) is Low on Medium, Medium on High
+and High on Epic and Cinematic (see [Bounce light](#bounce-light)).
 
 **Retina / HiDPI resolution cap.** `max_pixel_ratio` caps the device pixel ratio of the output (the
 canvas); the browser upsamples the canvas to the screen. A MacBook's 2× Retina screen at native resolution
@@ -596,6 +599,51 @@ How it works (`resources/game/world/`):
   the river's width (fastest mid-stream; the end with the lower water is downstream), so flat stretches flow
   too; elsewhere the downhill surface gradient does. The normals and foam streaks (smeared along the current)
   are flow-mapped along it.
+
+## Bounce light
+
+Sunlight and skylight bounce off the ground, trees and props before they reach whatever is in their shade:
+valleys pick up the warm or green light of their slopes, the undersides of things glow with the colour of
+the ground, and forests get darker underneath (`resources/game/world/bounce/`).
+
+- **Probes.** A heightfield-following grid of irradiance probes covers the whole map: `res`² columns with
+  four probes each, 1, 5, 13 and 30 m above the ground (or water surface). Each probe stores the bounce
+  irradiance for a unit of sun and a unit of sky light (rgb each), the direction most of it comes from (an
+  L1 term shared by both), and the sky visibility (the cosine-weighted share of the upper hemisphere that
+  reaches the sky). Weather, cloud and colour changes therefore cost nothing: only the light direction and
+  edits need new probes.
+- **Computed in a web worker** (`bounceWorker.ts`) from a coarse copy of the world twice as fine as the
+  probes: terrain height and albedo (the paint's average layer colours, darkened by rain, whitened by snow),
+  water (a dark surface), props and rocks (their bounding boxes, as solid blocks), and tree and bush
+  canopies (leaf area spread under each crown: density, crown bottom and top, leaf colour). The worker
+  lights it (sun visibility marched towards the sun through terrain, props and canopies; sky visibility
+  from 12 rays per cell), then marches 16 / 24 / 32 rays per probe through a mip pyramid of it (coarser
+  cells as the steps grow, out to 600 m). Rays that hit the ground take its radiance; rays inside a canopy
+  take the light of its leaves (darker deeper in the crown) and lose transmittance (Beer–Lambert).
+- **Never stalls a frame.** The main thread gathers the world copy a few rows per frame (2.5 ms at 60
+  fps) and hands it over without copying; the worker posts probes back in tiles, nearest to the camera
+  first, and the texture is re-uploaded at most every 0.35 s while it works. Terrain, paint, water, foliage,
+  prop and layer edits gather the world again 0.4 s after the last one; only probes within ~56 m of cells
+  whose geometry or light changed are recomputed. A sun or moon direction change of more than 1.5° (time
+  of day) recomputes them all.
+- **Shading.** Through the renderer's lighting context (`getGI` / `getAO`), every lit material of the
+  game's scene gets it — terrain, foliage, props, water and the character. The bounce irradiance comes from
+  the two probe layers around the shaded height (E(n) = E × max(0, 1 + n·d)); the sky visibility multiplies
+  the sky light (hemisphere light, environment diffuse and reflections) and the foliage's light through its
+  leaves. While it is on, the ambient light's uniform ground colour (and the ground in the sky reflections)
+  drops to 15 %: the probes bring the real ground's light instead.
+- **Settings.** Environment `bounce_light` (0-2, default 1; 0 switches both the bounce and the sky occlusion
+  off). Graphics `bounce_light_quality`: Off, Low (128² probe columns, 16 rays), Medium (192², 24) or High
+  (256², 32) over the map, whatever its size — 16 m, 10.7 m and 8 m probe spacing on a 2 km map.
+- **Debug view.** The editor's _Bounce light only_ view mode (and `view_mode: "bounce"` in MCP) switches
+  every other light off and shows the bounce on grey albedo, three times brighter.
+
+Limits: the probes are coarse (8-16 m apart, more on bigger maps), so single trees and props barely register
+— it is forests, slopes and large buildings that show; occluders are averaged into the grid (a ridge thinner
+than a probe cell can leak light, overhangs and the inside of buildings are not represented); props count as
+their bounding boxes with a neutral albedo; ground cover (grass) only through the terrain colour; one bounce,
+no specular bounce and no light from water reflections; cloud shadows and the local lights of lightning
+don't reach the probes; and the probes change in steps when an update lands (no cross-fade).
 
 ## AI agents (MCP server)
 

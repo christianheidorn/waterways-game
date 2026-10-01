@@ -904,9 +904,15 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     })();
     const normal = worldNormal.transformDirection(cameraViewMatrix);
     material.normalNode = normal;
+    // Screen-space distortion from the waves: the normal's deviation from flat water (in view space).
+    // (The whole view normal would add a constant shift — at grazing angles its y is ~1 — which pulled
+    // the reflection's sky haze below the far shore into a pale band along the waterline.)
+    const flatNormal = vec3(0, 1, 0).transformDirection(cameraViewMatrix);
+    const tilt = normal.sub(flatNormal);
+    const distortion = vec2(tilt.x, tilt.y.negate());
 
     // ---- refraction & absorption
-    const offset = vec2(normal.x, normal.y.negate()).mul(
+    const offset = distortion.mul(
         u.refraction.mul(0.08).mul(smoothstep(0, 2.5, thickness)),
     );
     const bentUv = clamp(screenUV.add(offset), 0.001, 0.999);
@@ -969,11 +975,7 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     const reflUv = clamp(
         reflClip.xy
             .div(reflClip.w)
-            .add(
-                vec2(normal.x, normal.y.negate()).mul(
-                    u.refraction.mul(0.03).add(0.03),
-                ),
-            ),
+            .add(distortion.mul(u.refraction.mul(0.03).add(0.03))),
         0.001,
         0.999,
     );

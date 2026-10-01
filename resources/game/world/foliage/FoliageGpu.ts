@@ -94,6 +94,11 @@ export class GpuCullFrame {
     readonly nearShadowScale = uniform(1);
     /** 1 while there is a near cascade (its casters get a list of their own). */
     readonly nearShadow = uniform(0);
+    /**
+     * 1 when the far (whole shadow distance) caster list is needed this frame: the cached far cascade
+     * re-renders, or there are no cascades (a single shadow map). Skipped otherwise.
+     */
+    readonly farShadow = uniform(1);
     /** Shadow camera of the near cascade: its shadow pass draws the near caster list. */
     nearShadowCamera: THREE.Camera | null = null;
     private readonly frustum = new THREE.Frustum();
@@ -147,6 +152,7 @@ export class GpuCullFrame {
     setShadowCascade(cascade: ShadowCascade | null): void {
         this.nearShadowCamera = cascade?.camera ?? null;
         this.nearShadow.value = cascade ? 1 : 0;
+        this.farShadow.value = !cascade || cascade.farRenders() ? 1 : 0;
 
         if (cascade) {
             const e = cascade.box.elements;
@@ -1339,7 +1345,8 @@ export class GpuFoliageType {
                 .and(castShadows.greaterThan(0.5))
                 .toVar();
 
-            If(casts, () => {
+            // The far cascade's list only when it re-renders this frame (it is cached: rarely).
+            If(casts.and(frame.farShadow.greaterThan(0.5)), () => {
                 const slot = atomicAdd(counters.element(shadowRegion), 1);
                 visible
                     .element(uint(shadowRegion).mul(capacity).add(slot))
@@ -1477,7 +1484,19 @@ export class GpuFoliageType {
 
             for (let r = 0; r <= occludedSlot; r++) {
                 if (!isLate(r) && r !== candidateRegion) {
-                    stats.element(r).assign(atomicLoad(counters.element(r)));
+                    if (r === shadowRegion) {
+                        // Keeps the count of the last frame that built the far list.
+                        If(frame.farShadow.greaterThan(0.5), () => {
+                            stats
+                                .element(r)
+                                .assign(atomicLoad(counters.element(r)));
+                        });
+                    } else {
+                        stats
+                            .element(r)
+                            .assign(atomicLoad(counters.element(r)));
+                    }
+
                     atomicStore(counters.element(r), 0);
                 }
             }

@@ -48,6 +48,8 @@ export type CloudShadow = (position: THREE.Node<'vec3'>) => THREE.Node<'float'>;
 export type ShadowCascade = {
     readonly camera: THREE.Camera;
     readonly box: THREE.Matrix4;
+    /** The cached far cascade re-renders this frame (its casters are needed). */
+    farRenders(): boolean;
 };
 
 /**
@@ -225,6 +227,7 @@ export class SunShadows {
         this.nearCascade = {
             camera: this.near.shadow.camera,
             box: new THREE.Matrix4(),
+            farRenders: () => this.far.shadow.autoUpdate,
         };
 
         const near = shadowTerm(

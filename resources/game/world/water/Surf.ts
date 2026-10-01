@@ -26,6 +26,7 @@ import {
     uniformArray,
     vec2,
     vec3,
+    vec4,
 } from 'three/tsl';
 import type { GridRect, Heightfield } from '../Heightfield';
 import { causticPattern } from '../waterPatterns';
@@ -132,7 +133,6 @@ export class Surf {
     readonly field: ShoreField;
     /** Surf strength (0-1) per data sample: body / paint / beach slope at its nearest shore. */
     readonly strength: Float32Array;
-    readonly textureA: THREE.DataTexture;
     readonly textureB: THREE.DataTexture;
     /** Per body row (height, period, dirX, dirZ): a uniform array (the materials are at their texture limit). */
     readonly table = uniformArray(
@@ -145,7 +145,6 @@ export class Surf {
         size: uniform(1),
         spacing: uniform(1),
     };
-    private readonly pixelsA: Uint16Array;
     private readonly pixelsB: Float32Array;
     /** Per table row: (height, period, dirX, dirZ) and surf flag (CPU copies). */
     private rows: {
@@ -170,18 +169,7 @@ export class Surf {
         this.field = new ShoreField(data, surface, terrain, mask);
         const n = data.size;
         this.strength = new Float32Array(n * n);
-        this.pixelsA = new Uint16Array(n * n * 4);
         this.pixelsB = new Float32Array(n * n * 4);
-        this.textureA = new THREE.DataTexture(
-            this.pixelsA,
-            n,
-            n,
-            THREE.RGBAFormat,
-            THREE.HalfFloatType,
-        );
-        this.textureA.minFilter = this.textureA.magFilter = THREE.LinearFilter;
-        this.textureA.generateMipmaps = false;
-        this.textureA.name = 'Shore distance';
         this.textureB = new THREE.DataTexture(
             this.pixelsB,
             n,
@@ -191,7 +179,7 @@ export class Surf {
         );
         this.textureB.minFilter = this.textureB.magFilter = THREE.NearestFilter;
         this.textureB.generateMipmaps = false;
-        this.textureB.name = 'Shore level';
+        this.textureB.name = 'Shore field';
         this.u.mapHalf.value = surface.half;
         this.u.size.value = n;
         this.u.spacing.value = data.spacing;
@@ -229,7 +217,6 @@ export class Surf {
     refresh(region = this.field.affected()): void {
         const f = this.field;
         const n = f.size;
-        const half = (v: number) => THREE.DataUtils.toHalfFloat(v);
 
         for (let j = region.j0; j <= region.j1; j++) {
             for (let i = region.i0; i <= region.i1; i++) {
@@ -246,18 +233,15 @@ export class Surf {
                               f.slope[k],
                           );
                 this.strength[k] = strength;
-                this.pixelsA[k * 4] = half(f.dist[k]);
-                this.pixelsA[k * 4 + 1] = half(f.dirX[k]);
-                this.pixelsA[k * 4 + 2] = half(f.dirZ[k]);
-                this.pixelsA[k * 4 + 3] = half(strength);
-                this.pixelsB[k * 4] = f.level[k];
-                this.pixelsB[k * 4 + 1] = f.slope[k];
-                this.pixelsB[k * 4 + 2] = row;
-                this.pixelsB[k * 4 + 3] = 0;
+                // One texture (the materials are at the sampled-texture limit): distance, level,
+                // slope, and body row + strength × 0.99 (row nearest, the rest bilinear).
+                this.pixelsB[k * 4] = f.dist[k];
+                this.pixelsB[k * 4 + 1] = f.level[k];
+                this.pixelsB[k * 4 + 2] = f.slope[k];
+                this.pixelsB[k * 4 + 3] = row + Math.min(1, strength) * 0.99;
             }
         }
 
-        this.textureA.needsUpdate = true;
         this.textureB.needsUpdate = true;
     }
 
@@ -334,7 +318,7 @@ export class Surf {
         const dx = bil(f.dirX);
         const dz = bil(f.dirZ);
         const len = Math.hypot(dx, dz) || 1;
-        const row = Math.round(this.pixelsB[k * 4 + 2]);
+        const row = Math.floor(this.pixelsB[k * 4 + 3]);
         const params = this.rows[row];
 
         if (!params) {
@@ -448,7 +432,7 @@ export class Surf {
                     continue;
                 }
 
-                const row = Math.round(this.pixelsB[k * 4 + 2]);
+                const row = Math.floor(this.pixelsB[k * 4 + 3]);
                 const params = this.rows[row];
 
                 if (!params) {
@@ -487,7 +471,7 @@ export class Surf {
             const sx = i * f.spacing - half;
             const sz = j * f.spacing - half;
             const params =
-                this.rows[Math.round(this.pixelsB[nearestK * 4 + 2])];
+                this.rows[Math.floor(this.pixelsB[nearestK * 4 + 3])];
             const u = surfPhase(0, this.time, alongshore(sx, sz), {
                 height: params.height,
                 period: Math.max(1, params.period),
@@ -531,30 +515,37 @@ export class Surf {
         const u = this.u;
         const g = xz.add(u.mapHalf).div(u.spacing);
         const inside = max(abs(xz.x), abs(xz.y)).lessThan(u.mapHalf);
-        const a = texture(this.textureA, g.add(0.5).div(u.size)).level(
-            float(0),
-        );
         const gi = clamp(floor(g.add(0.5)), 0, u.size.sub(1));
-        const row = textureLoad(this.textureB, ivec2(int(gi.x), int(gi.y))).z;
-        // Level and slope bilinear (Float32 is not filterable everywhere): the crests' travel time
-        // depends on the slope, a nearest lookup would step their phase.
+        const row = floor(
+            textureLoad(this.textureB, ivec2(int(gi.x), int(gi.y))).w,
+        );
+        // Bilinear by hand (Float32 is not filterable everywhere): the crests' travel time depends
+        // on the slope, a nearest lookup would step their phase.
         const gc = clamp(g, 0, u.size.sub(1.001));
         const i0 = floor(gc);
         const f = gc.sub(i0);
-        const tap = (dx: number, dz: number) =>
-            textureLoad(
+        const tap = (dx: number, dz: number) => {
+            const v = textureLoad(
                 this.textureB,
                 ivec2(int(i0.x).add(int(dx)), int(i0.y).add(int(dz))),
-            ).xy;
-        const b = mix(
-            mix(tap(0, 0), tap(1, 0), f.x),
-            mix(tap(0, 1), tap(1, 1), f.x),
-            f.y,
+            );
+
+            return vec4(v.x, v.y, v.z, fract(v.w).div(0.99));
+        };
+        const t00 = tap(0, 0);
+        const t10 = tap(1, 0);
+        const t01 = tap(0, 1);
+        const t11 = tap(1, 1);
+        const b = mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+        // Travel direction: down the distance gradient (towards the shore, on up the beach).
+        const grad = vec2(
+            mix(t10.x.sub(t00.x), t11.x.sub(t01.x), f.y),
+            mix(t01.x.sub(t00.x), t11.x.sub(t10.x), f.x),
         );
         const t = this.table.element(
             int(clamp(floor(row.add(0.5)), 0, BODY_ROWS - 1)),
         ) as unknown as Node<'vec4'>;
-        const dir = normalize(vec2(a.y, a.z).add(vec2(1e-5, 0))) as Vec2;
+        const dir = normalize(grad.negate().add(vec2(1e-5, 0))) as Vec2;
         const facing = smoothstep(
             -0.2,
             0.6,
@@ -565,14 +556,14 @@ export class Surf {
             facing.mul(0.8).add(0.2),
             float(1),
         );
-        const strength = select(inside, a.w.mul(dirWeight), float(0));
+        const strength = select(inside, b.w.mul(dirWeight), float(0));
 
         return {
-            dist: a.x as Float,
+            dist: b.x as Float,
             dir,
             strength,
-            level: b.x as Float,
-            slope: clamp(b.y, MIN_SLOPE, MAX_SLOPE) as Float,
+            level: b.y as Float,
+            slope: clamp(b.z, MIN_SLOPE, MAX_SLOPE) as Float,
             height: (t.x as Float).mul(strength),
             period: max(t.y, 1) as Float,
         };
@@ -822,7 +813,6 @@ export class Surf {
     }
 
     dispose(): void {
-        this.textureA.dispose();
         this.textureB.dispose();
     }
 }

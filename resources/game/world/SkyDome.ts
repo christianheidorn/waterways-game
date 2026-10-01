@@ -855,8 +855,7 @@ export class CloudShadowBake {
             Math.round(centerX / texel) * texel,
             Math.round(centerZ / texel) * texel,
         );
-        const moved =
-            this.next.distanceTo(this.center.value) > BAKE_SPAN * 0.1;
+        const moved = this.next.distanceTo(this.center.value) > BAKE_SPAN * 0.1;
         this.frame = (this.frame + 1) % BAKE_INTERVAL;
 
         if (this.valid.value && !moved && this.frame !== 0) {
@@ -874,10 +873,7 @@ export class CloudShadowBake {
             renderer.setRenderTarget(this.target);
             this.quad.render(renderer as never);
         } finally {
-            THREE.RendererUtils.restoreRendererState(
-                renderer as never,
-                state,
-            );
+            THREE.RendererUtils.restoreRendererState(renderer as never, state);
         }
 
         this.center.value.copy(this.next);
@@ -946,7 +942,9 @@ export function cloudShadowNode(
                             .greaterThan(0.5)
                             .and(edge.greaterThan(0.002)),
                         () => {
-                            mask.assign(bakedMask.sample(local).level(float(0)).r);
+                            mask.assign(
+                                bakedMask.sample(local).level(float(0)).r,
+                            );
                         },
                     ).Else(() => {
                         mask.assign(cloudMaskAt(sky, onPlane));

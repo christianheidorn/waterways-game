@@ -396,7 +396,11 @@ function foliagePosition(
                     float(1)
                         .sub(u.falloff.y)
                         .mul(
-                            smoothstep(u.falloff.x.mul(fadeEnd), fadeEnd, camDist),
+                            smoothstep(
+                                u.falloff.x.mul(fadeEnd),
+                                fadeEnd,
+                                camDist,
+                            ),
                         ),
                 )
                 .toVar();

@@ -366,10 +366,8 @@ export class Atmosphere {
         this.cloudShadow.lightDir.value.copy(lightDir);
         // Cloud shadow mask baked around where the focus's light ray meets the cloud layer.
         const rise =
-            Math.max(
-                0,
-                this.cloudShadow.base.value + CLOUD_HEIGHT - focus.y,
-            ) / Math.max(lightDir.y, 0.12);
+            Math.max(0, this.cloudShadow.base.value + CLOUD_HEIGHT - focus.y) /
+            Math.max(lightDir.y, 0.12);
         this.cloudShadow.baked?.update(
             this.renderer,
             focus.x + lightDir.x * rise,

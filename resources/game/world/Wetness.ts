@@ -257,7 +257,8 @@ function boxBlur(
 
         for (let r = 0; r < h; r++) {
             out[r * w + c] = sum / width;
-            sum += tmp[atZ(r + radius + 1) * w + c] - tmp[atZ(r - radius) * w + c];
+            sum +=
+                tmp[atZ(r + radius + 1) * w + c] - tmp[atZ(r - radius) * w + c];
         }
     }
 

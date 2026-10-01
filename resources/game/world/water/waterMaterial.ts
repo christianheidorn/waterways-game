@@ -32,6 +32,7 @@ import {
     positionViewDirection,
     positionWorld,
     pow,
+    reflect,
     screenUV,
     select,
     sin,
@@ -473,7 +474,8 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     };
     const swellNode = swell();
 
-    const disp = Fn(() => {
+    /** Wind waves and swell only (the crests' subsurface glow is scaled to these). */
+    const waveDisp = Fn(() => {
         const d = vec3(0, swellNode.x, 0).toVar();
         const chop = vWaves.w;
 
@@ -507,7 +509,10 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
         }
 
         // Wind waves calm down in the shallows; layers (surf) bring their own shallow-water behaviour.
-        const out = d.mul(vFade).toVar();
+        return d.mul(vFade);
+    })();
+    const disp = Fn(() => {
+        const out = waveDisp.toVar();
 
         for (const layer of o.layers) {
             if (layer.displacement) {
@@ -555,7 +560,9 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
         positionGeometry.z.add(disp.z.div(localScale)),
     );
     const vBase = varying(baseXZ, 'vWaterBase');
-    const vHeight = varying(disp.y, 'vWaterHeight');
+    // Wave height for the crests' glow: without the layers, whose bumps (a wading character's bow wave,
+    // ripples) dwarf the waves of a calm pond and lit up as sunlit orange patches.
+    const vHeight = varying(waveDisp.y, 'vWaterHeight');
     const vFine = varying(fine, 'vWaterFine');
     const vSlope = varying(slopeJac.xy, 'vWaterSlope');
     const vJac = varying(slopeJac.zw, 'vWaterJac');
@@ -935,7 +942,9 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
             ),
         );
     })();
-    const normal = worldNormal.transformDirection(cameraViewMatrix);
+    const normal = horizonSafe(worldNormal, viewDir).transformDirection(
+        cameraViewMatrix,
+    );
     material.normalNode = normal;
     // Screen-space distortion from the waves: the normal's deviation from flat water (in view space).
     // (The whole view normal would add a constant shift — at grazing angles its y is ~1 — which pulled
@@ -1053,4 +1062,23 @@ function atlasBilinear(
         mix(at(x0, y1), at(x1, y1), f.x),
         f.y,
     ) as Node<'vec4'>;
+}
+
+/**
+ * Keeps the mirror direction of a surface normal above the horizon. Steep slopes (ripple rings, choppy
+ * crests) seen at a shallow angle would otherwise reflect the environment map's ground below the
+ * horizon: brown, hard-edged patches on the water (e.g. around a wading character). On real water such
+ * rays hit the next wave, which shows sky-lit water much like the horizon. The normal is bent just
+ * enough that the reflection grazes the horizon; continuous where the clamp starts.
+ */
+export function horizonSafe(
+    n: Node<'vec3'>,
+    viewDir: Node<'vec3'>,
+): Node<'vec3'> {
+    return Fn(() => {
+        const r = reflect(viewDir.negate(), n).toVar();
+        const lifted = normalize(viewDir.add(normalize(vec3(r.x, max(r.y, 0.04), r.z))));
+
+        return select(r.y.lessThan(0.04), lifted, n);
+    })() as Node<'vec3'>;
 }

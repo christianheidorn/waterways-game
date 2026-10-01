@@ -7,10 +7,11 @@ import {
     positionWorld,
     normalWorld,
     pow,
+    floor,
+    min,
     texture,
-    texture3D,
     uniform,
-    vec3,
+    vec2,
 } from 'three/tsl';
 import type { GameRenderer } from '../../core/renderer';
 import { NO_WATER } from '../../shared/types';
@@ -67,10 +68,12 @@ const VIEW_GAIN = 3;
  * textures start as a single empty probe: no bounce, full sky visibility.
  */
 const shared = {
-    a: texture3D(emptyVolume()),
-    b: texture3D(emptyVolume()),
-    c: texture3D(emptyVolume()),
+    a: texture(emptyVolume()),
+    b: texture(emptyVolume()),
+    c: texture(emptyVolume()),
     h: texture(emptyHeights()),
+    /** Probe columns per side. */
+    res: uniform(1),
     /** Sun / moon irradiance (colour × intensity) and the sky's irradiance on flat open ground. */
     sun: uniform(new THREE.Color(0, 0, 0)),
     sky: uniform(new THREE.Color(0, 0, 0)),
@@ -96,13 +99,21 @@ function probes(): { a: Node<'vec4'>; b: Node<'vec4'>; c: Node<'vec4'> } {
         .clamp(0, 1)
         .add(above.sub(5).div(8).clamp(0, 1))
         .add(above.sub(13).div(17).clamp(0, 1));
-    const coord = vec3(uv.x, uv.y, layer.add(0.5).div(PROBE_LAYERS));
+    // The layers are stacked vertically in one 2D texture (res × res·layers): the two around the
+    // shaded height are sampled (rows clamped inside their layer) and blended.
+    const lower = floor(layer).toVar();
+    const upper = min(lower.add(1), float(PROBE_LAYERS - 1));
+    const t = layer.sub(lower);
+    const row = uv.y.mul(u.res).clamp(0.5, u.res.sub(0.5));
+    const rows = u.res.mul(PROBE_LAYERS);
+    const at = (l: Node<'float'>) =>
+        vec2(uv.x, l.mul(u.res).add(row).div(rows));
+    const lo = at(lower);
+    const hi = at(upper);
+    const blend = (tex: THREE.TextureNode) =>
+        mix(tex.sample(lo), tex.sample(hi), t) as Node<'vec4'>;
 
-    return {
-        a: u.a.sample(coord) as Node<'vec4'>,
-        b: u.b.sample(coord) as Node<'vec4'>,
-        c: u.c.sample(coord) as Node<'vec4'>,
-    };
+    return { a: blend(u.a), b: blend(u.b), c: blend(u.c) };
 }
 
 /**
@@ -113,7 +124,7 @@ export function bounceSkyVisibility(): Node<'float'> {
     return pow(max(probes().a.w, float(0.02)), shared.strength) as Node<'float'>;
 }
 
-function emptyVolume(res = 1): THREE.Data3DTexture {
+function emptyVolume(res = 1): THREE.DataTexture {
     const data = new Uint16Array(res * res * PROBE_LAYERS * 4);
     // Empty probes: no bounce, full sky visibility (A.w = 1.0 in half float).
     const one = 0x3c00;
@@ -122,18 +133,19 @@ function emptyVolume(res = 1): THREE.Data3DTexture {
         data[i] = one;
     }
 
-    const tex = new THREE.Data3DTexture(data, res, res, PROBE_LAYERS);
-    tex.type = THREE.HalfFloatType;
-    tex.format = THREE.RGBAFormat;
+    // Same memory layout as a res × res × layers volume: layer-major, then rows, then columns.
+    const tex = new THREE.DataTexture(
+        data,
+        res,
+        res * PROBE_LAYERS,
+        THREE.RGBAFormat,
+        THREE.HalfFloatType,
+    );
     tex.minFilter = THREE.LinearFilter;
     tex.magFilter = THREE.LinearFilter;
     tex.wrapS = THREE.ClampToEdgeWrapping;
     tex.wrapT = THREE.ClampToEdgeWrapping;
-    tex.wrapR = THREE.ClampToEdgeWrapping;
     tex.generateMipmaps = false;
-    tex.unpackAlignment = 1;
-    // Sample clones bind as plain textures on WebGPU unless the texture says it is 3D.
-    (tex as THREE.Data3DTexture & { is3DTexture: boolean }).is3DTexture = true;
     tex.needsUpdate = true;
 
     return tex;
@@ -187,9 +199,9 @@ export class BounceLight {
     private rays = 0;
     private installed = false;
     private worker: Worker | null = null;
-    private aTex = shared.a.value as THREE.Data3DTexture;
-    private bTex = shared.b.value as THREE.Data3DTexture;
-    private cTex = shared.c.value as THREE.Data3DTexture;
+    private aTex = shared.a.value as THREE.DataTexture;
+    private bTex = shared.b.value as THREE.DataTexture;
+    private cTex = shared.c.value as THREE.DataTexture;
     private hTex = shared.h.value as THREE.DataTexture;
     private readonly u = shared;
     private envStrength = 1;
@@ -525,6 +537,7 @@ export class BounceLight {
         shared.b.value = this.bTex;
         shared.c.value = this.cTex;
         shared.h.value = this.hTex;
+        shared.res.value = res;
 
         for (const tex of old) {
             tex.dispose();

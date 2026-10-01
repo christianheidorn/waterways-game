@@ -1428,6 +1428,11 @@ export class Foliage {
         this.gustSpeed = Math.max(0, speed);
     }
 
+    /** The travelling gust field (strength, 1 / patch size) and its downwind offset (shared with the water's catspaws). */
+    gustField(): [THREE.Vector2, THREE.Vector2] {
+        return [this.globals.gust.value, this.globals.gustOffset.value];
+    }
+
     /** Dithered LOD cross-fades (graphics lod_crossfade); off switches LODs at once. */
     setLodCrossfade(enabled: boolean): void {
         if (this.globals.lodFade.value > 0 === enabled) {

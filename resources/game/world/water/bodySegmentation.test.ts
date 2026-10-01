@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { NO_WATER } from '../../shared/types';
-import { bodyFetch, matchBodies, sanitizeSettings, segmentWaterBodies, serializeBodies, DEFAULT_BODY_SETTINGS } from './waterBodies';
-import type { GridLike } from './waterBodies';
+import { bodyFetch, matchBodies, sanitizeSettings, segmentWaterBodies, serializeBodies, DEFAULT_BODY_SETTINGS } from './bodySegmentation';
+import type { GridLike } from './bodySegmentation';
 
 const RES = 101;
 const CELL = 2; // 200 m map

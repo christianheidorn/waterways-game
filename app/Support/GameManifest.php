@@ -48,6 +48,8 @@ final class GameManifest
                 'props' => $asset('props'),
                 // Roads and rivers as editable splines (JSON).
                 'splines' => $asset('splines'),
+                // Water body ids and per-body settings (JSON).
+                'water_bodies' => $asset('water_bodies'),
                 // ESA WorldCover class per sample (Uint8, resolution²), real-world maps only.
                 'landcover' => $asset('landcover'),
             ],
@@ -58,6 +60,7 @@ final class GameManifest
                 'save_foliage' => route('api.maps.assets.update', [$map, 'foliage']),
                 'save_props' => route('api.maps.assets.update', [$map, 'props']),
                 'save_splines' => route('api.maps.assets.update', [$map, 'splines']),
+                'save_water_bodies' => route('api.maps.assets.update', [$map, 'water_bodies']),
                 'save_meta' => route('api.maps.meta.update', $map),
                 'save_thumbnail' => route('api.maps.thumbnail.store', $map),
                 'update_foliage_type' => url('/api/foliage-types'),

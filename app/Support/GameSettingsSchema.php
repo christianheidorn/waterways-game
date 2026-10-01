@@ -89,6 +89,9 @@ final class GameSettingsSchema
                 SettingField::select('water_quality', 'Water quality', 'medium', [
                     'low' => 'Low', 'medium' => 'Medium', 'high' => 'High',
                 ], 'Resolution of the refraction/depth pass and planar reflections used by water.'),
+                SettingField::select('water_waves', 'Water waves', 'fft', [
+                    'simple' => 'Simple', 'fft' => 'FFT (WebGPU)',
+                ], 'Wind waves on lakes, rivers and the sea. FFT: a GPU wave simulation with choppy crests and whitecaps (WebGPU; WebGL 2 falls back to Simple). Simple: a sum of the strongest waves (cheaper).'),
                 SettingField::boolean('caustics', 'Caustics', true, 'Animated light patterns on shallow river and lake beds.'),
                 SettingField::boolean('snow_footprints', 'Snow footprints', true, 'The character leaves footprints in snow cover that fade and fill with new snow.'),
                 SettingField::select('bounce_light_quality', 'Bounce light', 'medium', [

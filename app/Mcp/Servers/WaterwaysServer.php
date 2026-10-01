@@ -16,6 +16,7 @@ use App\Mcp\Tools\DeleteTerrainLayer;
 use App\Mcp\Tools\EditFoliage;
 use App\Mcp\Tools\EditRoad;
 use App\Mcp\Tools\EditWater;
+use App\Mcp\Tools\EditWaterBody;
 use App\Mcp\Tools\GenerateImage;
 use App\Mcp\Tools\GenerateMaterial;
 use App\Mcp\Tools\GenerateModel;
@@ -195,5 +196,7 @@ class WaterwaysServer extends Server
         // Building I: roads, river splines, stamps (docs/ROADMAP.md phase 3)
         EditRoad::class,
         ApplyStamp::class,
+        // Water bodies and waves (docs/ROADMAP.md phase 10)
+        EditWaterBody::class,
     ];
 }

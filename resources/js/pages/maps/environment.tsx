@@ -120,6 +120,20 @@ const SECTIONS: SettingsSection[] = [
         ],
     },
     {
+        title: 'Waves',
+        description:
+            'Wind waves grow with the wind and each water body’s fetch (per-body settings in the editor’s Water › Bodies tool); ripples, whitecaps, crest glow and the ocean swell.',
+        icon: Waves,
+        fields: [
+            'wave_scale',
+            'wave_strength',
+            'wave_speed',
+            'whitecaps',
+            'water_subsurface',
+            'wave_height',
+        ],
+    },
+    {
         title: 'Shores, rivers & caustics',
         description:
             'Foam where water meets land, rivers flowing along their course, and light patterns on shallow beds.',

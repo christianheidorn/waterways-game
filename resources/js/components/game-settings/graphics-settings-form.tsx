@@ -126,6 +126,7 @@ const SECTIONS: Section[] = [
             'cloud_quality',
             'snow_footprints',
             'water_quality',
+            'water_waves',
             'caustics',
             'ssr',
             'bounce_light_quality',

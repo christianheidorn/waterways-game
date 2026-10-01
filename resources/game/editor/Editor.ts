@@ -65,7 +65,7 @@ export type SculptTool =
     | 'terrace'
     | 'stamp';
 export type FoliageTool = 'paint' | 'erase' | 'single';
-export type WaterTool = 'lake' | 'river' | 'erase';
+export type WaterTool = 'lake' | 'river' | 'erase' | 'bodies';
 export type DirtyChannel =
     | 'heightmap'
     | 'splatmap'
@@ -73,6 +73,7 @@ export type DirtyChannel =
     | 'foliage'
     | 'props'
     | 'splines'
+    | 'water_bodies'
     | 'meta';
 
 export type EditorWorld = {
@@ -971,7 +972,8 @@ export class Editor {
             s.group === 'request' ||
             s.group === 'world' ||
             s.group === 'roads' ||
-            (s.group === 'water' && s.waterTool === 'river') ||
+            (s.group === 'water' &&
+                (s.waterTool === 'river' || s.waterTool === 'bodies')) ||
             (s.group === 'sculpt' && s.sculptTool === 'stamp')
         ) {
             this.world.material.hideBrush();
@@ -1041,6 +1043,17 @@ export class Editor {
             // Dragging a point (applyStroke) until the button is released.
             this.stroking = true;
             this.history.beginStroke('noop');
+
+            return;
+        }
+
+        if (s.group === 'water' && s.waterTool === 'bodies') {
+            // Bodies: select the water body under the cursor.
+            const water = this.world.water;
+            water.flushBodies();
+            const body = water.bodies.at(this.cursor.x, this.cursor.z);
+            water.bodies.select(body?.id ?? null);
+            this.notify();
 
             return;
         }

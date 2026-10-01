@@ -67,6 +67,7 @@ import { SplatMap } from '../world/SplatMap';
 import { Terrain } from '../world/Terrain';
 import { TerrainMaterial } from '../world/TerrainMaterial';
 import { Water } from '../world/Water';
+import type { WaterBodiesFile } from '../world/Water';
 import { WaterReflection } from '../world/WaterReflection';
 import { Weather } from '../world/Weather';
 import { Wetness } from '../world/Wetness';
@@ -853,6 +854,20 @@ export class Game {
         );
         // Rivers flow along their splines (the editor's spline tool chains its own listener).
         const water = new Water(waterGrid, heights, splines.rivers);
+        water.loadBodies(
+            assets.water_bodies
+                ? await this.api
+                      .json<WaterBodiesFile>(assets.water_bodies)
+                      .catch(() => null)
+                : null,
+        );
+        water.setRenderer(this.renderer);
+        // Body settings edited (the Water tool's Bodies, agents): saved with the map.
+        water.onBodiesChanged = (reason) => {
+            if (reason === 'settings') {
+                this.markDirty('water_bodies');
+            }
+        };
         splines.onChange = () => water.setRivers(splines.rivers);
         this.scene.add(water.group);
 
@@ -1470,7 +1485,12 @@ export class Game {
             this.atmosphere.lightDirection(),
         );
         this.world.terrain.updateLod(this.camera);
-        this.world.water.update(dt);
+        this.world.water.setLighting(
+            this.atmosphere.lightDirection(),
+            this.sunLight,
+        );
+        this.world.water.setGusts(...this.world.foliage.gustField());
+        this.world.water.update(dt, this.camera);
         this.world.wetness.update(dt);
         // Grass bends around the character (play and the editor's walk mode).
         this.world.foliage.setInteractor(
@@ -2201,6 +2221,7 @@ export class Game {
         this.world.foliage.setInteraction(g.grass_interaction !== false);
         this.world.props.setLodCrossfade(g.lod_crossfade !== false);
         this.atmosphere.setCloudShadows(g.cloud_shadows !== false);
+        this.world.water.setWaveQuality(g.water_waves !== 'simple');
         this.bounce?.setQuality(g.bounce_light_quality ?? 'off');
         this.camera.far = g.draw_distance;
         this.camera.updateProjectionMatrix();
@@ -2379,6 +2400,17 @@ export class Game {
                 await this.api.putBinary(
                     endpoints.save_splines,
                     JSON.stringify(this.world.splines.serialize()),
+                );
+            }
+
+            if (
+                (channels.has('water') || channels.has('water_bodies')) &&
+                endpoints.save_water_bodies
+            ) {
+                this.world.water.flushBodies();
+                await this.api.putBinary(
+                    endpoints.save_water_bodies,
+                    JSON.stringify(this.world.water.bodies.serialize()),
                 );
             }
 

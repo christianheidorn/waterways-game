@@ -1,53 +1,24 @@
 import * as THREE from 'three/webgpu';
-import type { Node, NodeBuilder } from 'three/webgpu';
-import {
-    abs,
-    attribute,
-    cameraFar,
-    cameraNear,
-    cameraPosition,
-    cameraViewMatrix,
-    clamp,
-    cos,
-    dot,
-    exp,
-    float,
-    Fn,
-    fract,
-    fwidth,
-    If,
-    length,
-    max,
-    mix,
-    modelWorldMatrix,
-    normalGeometry,
-    normalize,
-    perspectiveDepthToViewZ,
-    positionGeometry,
-    positionView,
-    positionViewDirection,
-    positionWorld,
-    pow,
-    screenUV,
-    select,
-    sin,
-    smoothstep,
-    texture,
-    uniform,
-    varying,
-    vec2,
-    vec3,
-    vec4,
-    viewportTexture,
-} from 'three/tsl';
-import { depthPrecision, isSkyDepth } from '../core/depth';
 import { gridWaterLevel } from './foliage/placement';
 import { NO_WATER } from '../shared/types';
 import type { EnvironmentSettings, RiverSpline } from '../shared/types';
+import type { GameRenderer } from '../core/renderer';
 import { mulberry32 } from '../util/noise';
 import type { GridRect, Heightfield } from './Heightfield';
 import { sampleSpline } from './Splines';
-import { rainRipples } from './waterPatterns';
+import { createFineMeshGeometry } from './water/fineMesh';
+import type { FineMeshLayout } from './water/fineMesh';
+import { bandEnergy, CASCADES, OPEN_FETCH } from './water/spectrum';
+import { BODY_TABLE, WaterBodies } from './water/WaterBodies';
+import { createSharedNodes, createWaterMaterial, createWaterUniforms } from './water/waterMaterial';
+import type { WaterMaterial, WaterSharedNodes, WaterSurfaceLayer } from './water/waterMaterial';
+import { WaterSurfaceData } from './water/WaterSurfaceData';
+import { shoreFade, WaveField } from './water/WaveField';
+import type { WaveSample } from './water/WaveField';
+import type { WaterBody } from './water/bodySegmentation';
+
+export type { WaterSurfaceLayer, WaterLayerContext } from './water/waterMaterial';
+export type { WaterBody, WaterBodySettings, WaterBodyKind, WaterBodiesFile } from './water/bodySegmentation';
 
 const CHUNK_CELLS = 64;
 
@@ -57,41 +28,73 @@ type WaterChunk = {
     mesh: THREE.Mesh | null;
 };
 
+/** Wave rendering: 'fft' = GPU FFT (WebGPU only), 'simple' = sum of waves (any backend). */
+export type WaveMode = 'fft' | 'simple';
+
+/** The water surface at a point, for gameplay (swimming, buoyancy, splashes). */
+export type WaterSurfaceSample = {
+    /** Still water level (m) and the surface height including waves (m). */
+    level: number;
+    height: number;
+    normal: THREE.Vector3;
+    /** Surface velocity (m/s): wave orbital motion plus the river current. */
+    velocity: THREE.Vector3;
+    /** Water depth below the still level (m). */
+    depth: number;
+    /** The water body there (null: the open ocean beyond the map). */
+    body: WaterBody | null;
+};
+
 /**
  * Renders rivers, lakes and the ocean from a grid of surface heights (NO_WATER where dry).
  *
- * Shading model (per pixel, TSL node material drawn with the transparent objects, after the opaque scene):
- * - the opaque scene rendered so far is read back from the same scene pass (viewport colour + depth
- *   copies, taken once when the first water chunk is drawn), so there is no separate refraction pass
- *   and everything follows the pass resolution (dynamic resolution / temporal upscaling);
- * - the true water thickness along the view ray comes from that depth, driving Beer–Lambert
- *   absorption, the water body colour, soft shorelines and depth-based foam;
- * - the scene behind is refracted through the wave normals and attenuated by the absorption;
- * - reflections come from the standard PBR lighting (sky environment, sun specular) weighted by
- *   Fresnel; near the reflected water level the environment is replaced by the planar reflection;
- * - waves: a physically inspired spectrum normal map in three scrolling octaves plus a gentle
- *   vertex swell on deep water;
- * - rivers flow along their course: the river splines (splines.json) give the direction downstream
- *   (faster mid-stream), elsewhere the downhill surface gradient does; normals and foam streaks are
- *   flow-mapped along it;
- * - foam: an animated band along every shore (lines lapping towards the land, broken into drifting
- *   patches by noise), rapids on fast water and streaks drifting downstream.
+ * - Bodies (WaterBodies): the grid's connected pieces (lake / pond / river / sea) with per-body settings
+ *   (wind exposure, fetch, wave height, choppiness, colours, surf), recomputed after water edits.
+ * - Waves (WaveField): a fetch-limited JONSWAP spectrum in three cascades (swell, wind waves, chop),
+ *   transformed by a GPU FFT on WebGPU (displacement with choppiness, normals, whitecaps from the
+ *   Jacobian) or summed from its strongest waves on WebGL 2; each body scales the cascades by its own
+ *   fetch-limited sea state. `sampleSurface` gives the same waves on the CPU for gameplay.
+ * - Geometry: the map's water as 64-cell chunks at the water grid's resolution, a camera-centred fine
+ *   mesh (0.25 m quads near the camera, clipmap rings with CDLOD morphing) where displacement reads close
+ *   up, and a coarse ring for the ocean beyond the map.
+ * - Shading (waterMaterial.ts): refraction and Beer–Lambert absorption from the scene behind, planar
+ *   reflection, shore / rapids / river foam and whitecaps, subsurface glow through crests, glints that
+ *   stay stable (sub-pixel slope variance goes into the roughness), catspaws from the travelling gusts.
+ * - Extension: `addSurfaceLayer` adds displacement / slope / foam sources (surf, interaction ripples).
  */
 export class Water {
     readonly group = new THREE.Group();
-    readonly material: WaterMaterial;
+    material: WaterMaterial;
+    readonly bodies: WaterBodies;
+    readonly waves = new WaveField();
+    readonly data: WaterSurfaceData;
     private readonly u = createWaterUniforms();
     private readonly waveTexture = createWaveTexture();
-    private readonly reflectionNode: THREE.TextureNode;
+    private readonly shared: WaterSharedNodes = createSharedNodes();
+    private reflectionNode: THREE.TextureNode;
+    private reflectionTexture: THREE.Texture | null = null;
     private chunks: WaterChunk[] = [];
     private chunksPerSide: number;
     private ocean: THREE.Mesh | null = null;
+    private readonly fine: THREE.Mesh;
+    private readonly fineLayout: FineMeshLayout;
     private step: number;
-    /** Flow along the river splines per surface sample (x, z; 0 = no river here). */
     private riverFlow: Float32Array | null = null;
     private riverRect: GridRect | null = null;
+    private renderer: GameRenderer | null = null;
+    private mode: WaveMode = 'simple';
+    private fftAllowed = true;
+    private readonly layers: WaterSurfaceLayer[] = [];
+    private env: EnvironmentSettings | null = null;
+    /** Seconds until the bodies are re-segmented after a water edit (-1: none pending). */
+    private segmentIn = 0;
+    private tableVersion = -1;
+    private tableDirty = true;
+    private componentsVersion = -1;
     /** Called whenever water meshes are rebuilt (e.g. to refresh shore wetness). */
     onRebuild: ((rect?: GridRect) => void) | null = null;
+    /** Called after the bodies were re-segmented or their settings changed. */
+    onBodiesChanged: ((reason: 'segmented' | 'settings') => void) | null = null;
 
     constructor(
         readonly surface: Heightfield,
@@ -101,33 +104,139 @@ export class Water {
         this.group.name = 'Water';
         this.chunksPerSide = (surface.resolution - 1) / CHUNK_CELLS;
         this.step = surface.resolution > 600 ? 2 : 1;
-        this.u.gridSpacing.value = surface.cell * this.step;
+        this.data = new WaterSurfaceData(surface, terrain, this.step);
+        this.bodies = new WaterBodies(surface, terrain);
+        this.bodies.onChange = (reason) => {
+            this.waves.invalidateWeights();
+            this.tableDirty = true;
+
+            if (reason === 'segmented') {
+                this.data.setBodies(this.bodies.labels, (label) => this.bodies.rowOfLabel(label));
+            }
+
+            this.onBodiesChanged?.(reason);
+        };
         this.u.mapHalf.value = surface.half;
-        const { material, reflection } = createWaterMaterial(
-            this.u,
-            this.waveTexture,
-        );
+        this.u.dataSize.value = this.data.size;
+        this.u.dataSpacing.value = this.data.spacing;
+        this.u.fineHalf.value = 0;
+        const { material, reflection } = this.createMaterial();
         this.material = material;
         this.reflectionNode = reflection;
 
+        const fine = createFineMeshGeometry();
+        this.fineLayout = fine.layout;
+        this.fine = new THREE.Mesh(fine.geometry, this.material);
+        this.fine.name = 'Water_fine';
+        this.fine.frustumCulled = false;
+        this.fine.renderOrder = 2;
+        this.fine.receiveShadow = true;
+        this.fine.visible = false;
+        this.group.add(this.fine);
+
         for (let cz = 0; cz < this.chunksPerSide; cz++) {
             for (let cx = 0; cx < this.chunksPerSide; cx++) {
-                this.chunks.push({
-                    col0: cx * CHUNK_CELLS,
-                    row0: cz * CHUNK_CELLS,
-                    mesh: null,
-                });
+                this.chunks.push({ col0: cx * CHUNK_CELLS, row0: cz * CHUNK_CELLS, mesh: null });
             }
         }
 
         this.computeRiverFlow(rivers);
-        this.rebuildRect({
-            x0: 0,
-            z0: 0,
-            x1: surface.resolution - 1,
-            z1: surface.resolution - 1,
+        this.rebuildRect({ x0: 0, z0: 0, x1: surface.resolution - 1, z1: surface.resolution - 1 });
+        this.segmentBodies();
+    }
+
+    // ------------------------------------------------------------------ setup
+
+    /**
+     * The renderer (once it exists): WebGPU runs the FFT waves unless the graphics settings turned them off.
+     */
+    setRenderer(renderer: GameRenderer): void {
+        this.renderer = renderer;
+        this.applyMode();
+    }
+
+    /** Graphics setting water_waves: FFT allowed (WebGPU) or the sum of waves everywhere. */
+    setWaveQuality(fft: boolean): void {
+        this.fftAllowed = fft;
+        this.applyMode();
+    }
+
+    /** The environment last applied (null before the first). */
+    get environment(): EnvironmentSettings | null {
+        return this.env;
+    }
+
+    get waveMode(): WaveMode {
+        return this.mode;
+    }
+
+    /** Adds a source of displacement / slope / foam (and its CPU sampler); rebuilds the material. */
+    addSurfaceLayer(layer: WaterSurfaceLayer): void {
+        this.layers.push(layer);
+        this.rebuildMaterial();
+    }
+
+    removeSurfaceLayer(name: string): void {
+        const i = this.layers.findIndex((l) => l.name === name);
+
+        if (i >= 0) {
+            this.layers.splice(i, 1);
+            this.rebuildMaterial();
+        }
+    }
+
+    /** Stored body ids and settings (water_bodies.json). */
+    loadBodies(file: Parameters<WaterBodies['load']>[0]): void {
+        this.bodies.load(file);
+        this.segmentBodies();
+    }
+
+    private applyMode(): void {
+        const backendFft = !!this.renderer && !!(this.renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend;
+        const mode: WaveMode = backendFft && this.fftAllowed ? 'fft' : 'simple';
+
+        if (mode === this.mode && (mode === 'fft') === !!this.waves.fft) {
+            return;
+        }
+
+        this.mode = mode;
+        this.waves.setFft(mode === 'fft');
+        this.rebuildMaterial();
+    }
+
+    private createMaterial(): { material: WaterMaterial; reflection: THREE.TextureNode } {
+        return createWaterMaterial({
+            u: this.u,
+            shared: this.shared,
+            waveTexture: this.waveTexture,
+            levelTexture: this.data.levelTexture,
+            dataTexture: this.data.dataTexture,
+            bodyTable: this.bodies.table,
+            fft: this.waves.fft,
+            layers: this.layers,
         });
     }
+
+    private rebuildMaterial(): void {
+        const old = this.material;
+        const { material, reflection } = this.createMaterial();
+        material.envMapIntensity = old.envMapIntensity;
+        this.material = material;
+        this.reflectionNode = reflection;
+
+        if (this.reflectionTexture) {
+            reflection.value = this.reflectionTexture;
+        }
+
+        this.group.traverse((o) => {
+            if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).material === old) {
+                (o as THREE.Mesh).material = material;
+            }
+        });
+        old.dispose();
+    }
+
+    // ------------------------------------------------------------------ rivers
 
     /** River splines changed: recompute their flow and rebuild the water they touch (before and after). */
     setRivers(rivers: RiverSpline[]): void {
@@ -145,18 +254,9 @@ export class Water {
                 : (before ?? after);
 
         if (rect) {
-            for (const chunk of this.chunks) {
-                if (
-                    rect.x1 < chunk.col0 - 1 ||
-                    rect.x0 > chunk.col0 + CHUNK_CELLS + 1 ||
-                    rect.z1 < chunk.row0 - 1 ||
-                    rect.z0 > chunk.row0 + CHUNK_CELLS + 1
-                ) {
-                    continue;
-                }
-
-                this.buildChunk(chunk);
-            }
+            this.data.update(rect, this.riverFlow);
+            this.buildChunksIn(rect);
+            this.scheduleSegmentation();
         }
     }
 
@@ -283,13 +383,10 @@ export class Water {
         this.riverRect = rect;
     }
 
+    // ------------------------------------------------------------------ weather & lighting
+
     /** Rain ripples (0-1), current (gusting) wind strength and direction the wind blows towards. */
-    setWeather(
-        rain: number,
-        windStrength: number,
-        windX: number,
-        windZ: number,
-    ): void {
+    setWeather(rain: number, windStrength: number, windX: number, windZ: number): void {
         this.u.rain.value = rain;
         this.u.wind.value = windStrength;
         const len = Math.hypot(windX, windZ);
@@ -297,10 +394,26 @@ export class Water {
         if (len > 1e-4) {
             this.u.windDir.value.set(windX / len, windZ / len);
         }
+
+        this.waves.setWind(windStrength, windX, windZ);
+    }
+
+    /** Travelling gusts (the foliage's gust field): strength, 1 / patch size and the field's downwind offset. */
+    setGusts(gust: THREE.Vector2, offset: THREE.Vector2): void {
+        this.u.gust.value.copy(gust);
+        this.u.gustOffset.value.copy(offset);
+    }
+
+    /** Sun direction (towards the sun) and colour × intensity, for the subsurface glow through crests. */
+    setLighting(sunDir: THREE.Vector3, sunColor: THREE.Color): void {
+        this.u.sunDir.value.copy(sunDir);
+        this.u.sunColor.value.copy(sunColor);
     }
 
     applyEnvironment(env: EnvironmentSettings): void {
         const u = this.u;
+        const seaChanged = !this.env || this.env.ocean_enabled !== env.ocean_enabled || this.env.sea_level !== env.sea_level;
+        this.env = env;
         u.shallow.value.set(env.water_shallow_color);
         u.deep.value.set(env.water_deep_color);
         u.clarity.value = env.water_clarity;
@@ -308,7 +421,7 @@ export class Water {
         u.waveScale.value = env.wave_scale;
         u.waveStrength.value = env.wave_strength;
         u.waveSpeed.value = env.wave_speed;
-        u.waveHeight.value = env.wave_height;
+        u.oceanSwell.value = env.wave_height;
         u.flowSpeed.value = env.flow_speed;
         u.refraction.value = env.water_refraction;
         u.foamEnabled.value = env.shore_foam ? 1 : 0;
@@ -317,26 +430,28 @@ export class Water {
         u.rapids.value = env.rapids_foam ? 1 : 0;
         u.foamBreakup.value = env.foam_breakup ?? 0.6;
         u.roughness.value = env.water_roughness;
+        u.whitecaps.value = env.whitecaps ?? 1;
+        u.subsurface.value = env.water_subsurface ?? 1;
         this.material.envMapIntensity = env.water_reflectivity;
+        this.waves.setWind(env.wind_strength, u.windDir.value.x, u.windDir.value.y);
+        this.tableDirty = true;
         this.setOcean(env.ocean_enabled, env.sea_level);
+
+        if (seaChanged) {
+            this.scheduleSegmentation(0);
+        }
     }
 
     /**
      * Connect (or disconnect) the planar reflection of the nearest water level. `matrix` maps world
      * positions to reflection texture UVs (top-left origin).
      */
-    setReflection(
-        reflection: {
-            texture: THREE.Texture;
-            matrix: THREE.Matrix4;
-            level: number;
-        } | null,
-    ): void {
+    setReflection(reflection: { texture: THREE.Texture; matrix: THREE.Matrix4; level: number } | null): void {
         this.u.hasReflection.value = reflection ? 1 : 0;
 
         if (reflection) {
+            this.reflectionTexture = reflection.texture;
             this.reflectionNode.value = reflection.texture;
-
             this.u.reflMatrix.value.copy(reflection.matrix);
             this.u.reflLevel.value = reflection.level;
         }
@@ -364,10 +479,7 @@ export class Water {
         dir.normalize();
 
         for (const d of [15, 40, 80, 150, 300, 600, 1200]) {
-            const level = this.levelAt(
-                camera.position.x + dir.x * d,
-                camera.position.z + dir.z * d,
-            );
+            const level = this.levelAt(camera.position.x + dir.x * d, camera.position.z + dir.z * d);
 
             if (level !== null) {
                 return level;
@@ -377,11 +489,38 @@ export class Water {
         return null;
     }
 
-    update(dt: number): void {
+    // ------------------------------------------------------------------ per frame
+
+    /** Advances the waves (and the FFT), follows the camera with the fine mesh, re-segments after edits. */
+    update(dt: number, camera?: THREE.Camera): void {
         this.u.time.value += dt;
+
+        if (this.segmentIn >= 0) {
+            this.segmentIn -= dt;
+
+            if (this.segmentIn < 0) {
+                this.segmentBodies();
+            }
+        }
+
+        this.waves.update(dt * (this.env?.wave_speed ?? 1), this.renderer);
+
+        if (this.waves.version !== this.componentsVersion) {
+            this.componentsVersion = this.waves.version;
+            this.uploadComponents();
+            this.tableDirty = true;
+        }
+
+        if (this.tableDirty) {
+            this.writeTable();
+        }
+
+        if (camera) {
+            this.placeFineMesh(camera);
+        }
     }
 
-    /** Water surface height at a world position, or null when dry. */
+    /** Water surface height at a world position (still level, no waves), or null when dry. */
     levelAt(x: number, z: number): number | null {
         if (!this.surface.contains(x, z)) {
             return this.ocean ? this.ocean.position.y : null;
@@ -391,21 +530,103 @@ export class Water {
         return gridWaterLevel(this.surface, x, z);
     }
 
+    /**
+     * The water surface at a world position with its waves (CPU, for gameplay: swimming, buoyancy,
+     * splashes) or null when dry. The waves are the sum of the spectrum's strongest waves with the
+     * body's weights: exact for the WebGL 2 surface, a close approximation of the FFT surface (its long
+     * waves match; the fine chop is left out). Extra surface layers add their own `sample`.
+     */
+    sampleSurface(x: number, z: number, out?: WaterSurfaceSample): WaterSurfaceSample | null {
+        const level = this.levelAt(x, z);
+
+        if (level === null) {
+            return null;
+        }
+
+        const result = out ?? {
+            level: 0,
+            height: 0,
+            normal: new THREE.Vector3(),
+            velocity: new THREE.Vector3(),
+            depth: 0,
+            body: null,
+        };
+        const inside = this.surface.contains(x, z);
+        const depth = inside ? this.data.depthAt(x, z) : 40;
+        const row = inside ? this.data.bodyRowAt(x, z) : 0;
+        const body = inside ? this.bodies.at(x, z) : null;
+        const table = this.bodies.table.image.data as Float32Array;
+        const at = (entry: number, c: number) => table[(entry * 256 + row) * 4 + c];
+        const weights: [number, number, number] = [at(BODY_TABLE.waves, 0), at(BODY_TABLE.waves, 1), at(BODY_TABLE.waves, 2)];
+        const edge = Math.min(1, Math.max(0, (this.surface.half - Math.max(Math.abs(x), Math.abs(z))) / 60));
+        const fade = shoreFade(depth) * (inside ? edge * edge * (3 - 2 * edge) : 0);
+        const sample = this.waveSample;
+        this.waves.sample(x, z, weights, at(BODY_TABLE.waves, 3), fade, sample, this.u.time.value * (this.env?.wave_speed ?? 1));
+        const layer = this.layerSample;
+        layer.height = 0;
+        layer.slopeX = 0;
+        layer.slopeZ = 0;
+        layer.velocity.set(0, 0, 0);
+
+        for (const l of this.layers) {
+            l.sample?.(x, z, this.u.time.value, layer);
+        }
+
+        result.level = level;
+        result.depth = depth;
+        result.body = body;
+        result.height = level + sample.height + layer.height;
+        result.normal
+            .set(sample.normal.x / sample.normal.y - layer.slopeX, 1, sample.normal.z / sample.normal.y - layer.slopeZ)
+            .normalize();
+        const flow = inside ? this.data.flowAt(x, z, this.flowSample) : { x: 0, z: 0 };
+        // River current: the shader's flow speeds (0-1) are ~1.5 m/s at full speed.
+        const current = 1.5 * (this.env?.flow_speed ?? 1);
+        result.velocity
+            .copy(sample.velocity)
+            .add(layer.velocity)
+            .add(new THREE.Vector3(flow.x * current, 0, flow.z * current));
+
+        return result;
+    }
+
+    private readonly waveSample: WaveSample = { height: 0, normal: new THREE.Vector3(), velocity: new THREE.Vector3() };
+    private readonly layerSample = { height: 0, slopeX: 0, slopeZ: 0, velocity: new THREE.Vector3() };
+    private readonly flowSample = { x: 0, z: 0 };
+
+    /** Bodies listing for agents and the editor. */
+    describeBodies(): (ReturnType<WaterBodies['describe']> & { waves: ReturnType<Water['describeWaves']> })[] {
+        const dir = { x: this.waves.windDir.x, z: this.waves.windDir.y };
+
+        return this.bodies.bodies.map((b) => ({
+            ...this.bodies.describe(b, dir, OPEN_FETCH),
+            waves: this.describeWaves(b),
+        }));
+    }
+
+    /** Current sea state of a body: significant wave height and peak wavelength (for agents). */
+    describeWaves(body: WaterBody): { significant_height_m: number; cascade_weights: number[] } {
+        const w = this.waves.weights(body, 1);
+        const variance = CASCADES.reduce((sum, c, i) => sum + bandEnergy(this.waves.reference, c.kMin, c.kMax) * w[i] * w[i], 0);
+
+        return {
+            significant_height_m: Math.round(4 * Math.sqrt(variance) * 100) / 100,
+            cascade_weights: w.map((v) => Math.round(v * 100) / 100),
+        };
+    }
+
     /** Rebuilds the water meshes that overlap the rect (after water painting or terrain sculpting). */
     rebuildRect(rect: GridRect): void {
         this.onRebuild?.(rect);
+        this.data.update(rect, this.riverFlow);
+        this.buildChunksIn(rect);
+        this.scheduleSegmentation();
+    }
 
-        for (const chunk of this.chunks) {
-            if (
-                rect.x1 < chunk.col0 - 1 ||
-                rect.x0 > chunk.col0 + CHUNK_CELLS + 1 ||
-                rect.z1 < chunk.row0 - 1 ||
-                rect.z0 > chunk.row0 + CHUNK_CELLS + 1
-            ) {
-                continue;
-            }
-
-            this.buildChunk(chunk);
+    /** Re-segments the bodies now (e.g. before an agent lists them). */
+    flushBodies(): void {
+        if (this.segmentIn >= 0) {
+            this.segmentBodies();
         }
     }
 
@@ -418,9 +639,114 @@ export class Water {
             chunk.mesh?.geometry.dispose();
         }
 
+        this.fine.geometry.dispose();
         this.ocean?.geometry.dispose();
         this.material.dispose();
         this.waveTexture.dispose();
+        this.data.dispose();
+        this.bodies.dispose();
+        this.waves.dispose();
+    }
+
+    private scheduleSegmentation(delay = 0.4): void {
+        this.segmentIn = this.segmentIn >= 0 ? Math.min(this.segmentIn, delay) : delay;
+    }
+
+    private segmentBodies(): void {
+        this.segmentIn = -1;
+        this.bodies.segment({
+            riverFlow: this.riverFlow,
+            seaLevel: this.env?.ocean_enabled ? this.env.sea_level : null,
+            wallLimit: Math.max(1.5, this.surface.cell * this.step * 0.5),
+        });
+        let maxFetch = 50;
+        const dir = this.waves.windDir;
+
+        for (const b of this.bodies.bodies) {
+            maxFetch = Math.max(maxFetch, this.bodies.fetch(b, dir.x, dir.y, OPEN_FETCH));
+        }
+
+        this.waves.setMaxFetch(this.ocean ? OPEN_FETCH : maxFetch);
+    }
+
+    private writeTable(): void {
+        this.tableDirty = false;
+        this.tableVersion = this.waves.version;
+        this.bodies.writeTable((b) => this.waves.weights(b, 1), { choppiness: 1 });
+        const ref = this.waves.reference;
+        this.u.slopeVar.value.fromArray(this.waves.slopeVariance);
+        this.u.heightStd.value.fromArray(CASCADES.map((c) => Math.sqrt(bandEnergy(ref, c.kMin, c.kMax))));
+    }
+
+    private uploadComponents(): void {
+        const a = this.u.compA.array as THREE.Vector4[];
+        const b = this.u.compB.array as THREE.Vector4[];
+        const comps = this.waves.components;
+
+        for (let i = 0; i < a.length; i++) {
+            const c = comps[i];
+
+            if (c) {
+                a[i].set(c.kx, c.kz, c.amp, c.phase);
+                b[i].set(c.omega, c.cascade, 0, 0);
+            } else {
+                a[i].set(1, 0, 0, 0);
+                b[i].set(0, 0, 0, 0);
+            }
+        }
+    }
+
+    /**
+     * Centres the fine mesh under the camera (in steps of twice its coarsest spacing), scaled up with the
+     * camera's height above the water so it never gets finer than the screen can show.
+     */
+    private placeFineMesh(camera: THREE.Camera): void {
+        const p = camera.position;
+        const level = this.levelAt(p.x, p.z) ?? this.dominantLevel(p, camera);
+        const height = level === null ? Infinity : Math.abs(p.y - level);
+
+        if (!this.surface.contains(p.x, p.z) && !this.ocean) {
+            this.hideFine();
+
+            return;
+        }
+
+        if (!Number.isFinite(height) || height > 300 || !this.chunks.some((c) => c.mesh)) {
+            this.hideFine();
+
+            return;
+        }
+
+        const scale = 2 ** Math.max(0, Math.ceil(Math.log2(Math.max(1, height / 12))));
+        const snap = this.fineLayout.coarsest * 2 * scale;
+        const cx = Math.round(p.x / snap) * snap;
+        const cz = Math.round(p.z / snap) * snap;
+        this.fine.position.set(cx, 0, cz);
+        this.fine.scale.set(scale, 1, scale);
+        this.fine.visible = true;
+        this.u.fineCenter.value.set(cx, cz);
+        this.u.fineHalf.value = this.fineLayout.half * scale;
+        this.u.fineScale.value = scale;
+    }
+
+    private hideFine(): void {
+        this.fine.visible = false;
+        this.u.fineHalf.value = 0;
+    }
+
+    private buildChunksIn(rect: GridRect): void {
+        for (const chunk of this.chunks) {
+            if (
+                rect.x1 < chunk.col0 - 1 ||
+                rect.x0 > chunk.col0 + CHUNK_CELLS + 1 ||
+                rect.z1 < chunk.row0 - 1 ||
+                rect.z0 > chunk.row0 + CHUNK_CELLS + 1
+            ) {
+                continue;
+            }
+
+            this.buildChunk(chunk);
+        }
     }
 
     private setOcean(enabled: boolean, level: number): void {
@@ -451,7 +777,6 @@ export class Water {
         // Rings of increasing size: map edge → 2× → 5× → far.
         const radii = [h, h * 1.4, h * 2.2, h * 5, far];
         const positions: number[] = [];
-        const depth: number[] = [];
         const index: number[] = [];
         const perSide = 16;
 
@@ -461,16 +786,8 @@ export class Water {
             for (let side = 0; side < 4; side++) {
                 for (let i = 0; i < perSide; i++) {
                     const t = -1 + (2 * i) / perSide;
-                    const [x, z] =
-                        side === 0
-                            ? [t * r, -r]
-                            : side === 1
-                              ? [r, t * r]
-                              : side === 2
-                                ? [-t * r, r]
-                                : [-r, -t * r];
+                    const [x, z] = side === 0 ? [t * r, -r] : side === 1 ? [r, t * r] : side === 2 ? [-t * r, r] : [-r, -t * r];
                     positions.push(x, 0, z);
-                    depth.push(r <= h ? 15 : 60);
                 }
             }
 
@@ -491,62 +808,28 @@ export class Water {
         }
 
         const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute(
-            'position',
-            new THREE.Float32BufferAttribute(positions, 3),
-        );
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
         geometry.setAttribute(
             'normal',
             new THREE.Float32BufferAttribute(
-                Array.from({ length: positions.length }, (_, i) =>
-                    i % 3 === 1 ? 1 : 0,
-                ),
+                Array.from({ length: positions.length }, (_, i) => (i % 3 === 1 ? 1 : 0)),
                 3,
             ),
         );
-        geometry.setAttribute(
-            'waterDepth',
-            new THREE.Float32BufferAttribute(depth, 1),
-        );
-        geometry.setAttribute(
-            'waterFlow',
-            new THREE.Float32BufferAttribute(
-                new Float32Array((positions.length / 3) * 2),
-                2,
-            ),
-        );
+        geometry.setAttribute('waterFine', new THREE.Float32BufferAttribute(new Float32Array(positions.length / 3), 1));
         geometry.setIndex(index);
         fixWinding(geometry);
 
         return geometry;
     }
 
+    /** One chunk of the map's water from the resampled grid (WaterSurfaceData): levels and cell mask. */
     private buildChunk(chunk: WaterChunk): void {
         const s = this.step;
-        const hf = this.surface;
-        const res = hf.resolution;
+        const d = this.data;
         const n = CHUNK_CELLS / s + 1;
-        const wet = (c: number, r: number) => hf.get(c, r) > NO_WATER + 1;
-
-        // Quick reject: any wet sample in or bordering the chunk?
-        let any = false;
-
-        for (
-            let r = Math.max(0, chunk.row0 - s);
-            r <= Math.min(res - 1, chunk.row0 + CHUNK_CELLS + s) && !any;
-            r++
-        ) {
-            for (
-                let c = Math.max(0, chunk.col0 - s);
-                c <= Math.min(res - 1, chunk.col0 + CHUNK_CELLS + s);
-                c++
-            ) {
-                if (wet(c, r)) {
-                    any = true;
-                    break;
-                }
-            }
-        }
+        const i0 = chunk.col0 / s;
+        const j0 = chunk.row0 / s;
 
         if (chunk.mesh) {
             this.group.remove(chunk.mesh);
@@ -554,114 +837,15 @@ export class Water {
             chunk.mesh = null;
         }
 
-        if (!any) {
-            return;
-        }
-
-        const count = n * n;
-        const positions = new Float32Array(count * 3);
-        const depth = new Float32Array(count);
-        const flow = new Float32Array(count * 2);
-        const level = new Float32Array(count);
-        const isWet = new Uint8Array(count);
-
-        for (let j = 0; j < n; j++) {
-            for (let i = 0; i < n; i++) {
-                const c = chunk.col0 + i * s;
-                const r = chunk.row0 + j * s;
-                const k = j * n + i;
-                let h = hf.get(c, r);
-
-                if (h > NO_WATER + 1) {
-                    isWet[k] = 1;
-                } else {
-                    // Extrapolate from the lowest wet neighbour so the surface tucks under the shore
-                    // without climbing up towards a higher neighbouring pool.
-                    let lowest = Infinity;
-
-                    for (let dz = -s; dz <= s; dz += s) {
-                        for (let dx = -s; dx <= s; dx += s) {
-                            const v = hf.get(c + dx, r + dz);
-
-                            if (v > NO_WATER + 1) {
-                                lowest = Math.min(lowest, v);
-                            }
-                        }
-                    }
-
-                    h = Number.isFinite(lowest)
-                        ? lowest
-                        : this.terrain.get(c, r) - 2;
-                }
-
-                level[k] = h;
-                positions[k * 3] = hf.colToX(c);
-                positions[k * 3 + 1] = h;
-                positions[k * 3 + 2] = hf.rowToZ(r);
-                depth[k] = isWet[k]
-                    ? Math.max(0, h - this.terrain.get(c, r))
-                    : 0;
-            }
-        }
-
-        // Flow follows the river splines (downstream along the course), elsewhere the downhill
-        // surface gradient; on a river a steep run speeds the current up.
-        const river = this.riverFlow;
-
-        for (let j = 0; j < n; j++) {
-            for (let i = 0; i < n; i++) {
-                const k = j * n + i;
-                const l = level[j * n + Math.max(0, i - 1)];
-                const rr = level[j * n + Math.min(n - 1, i + 1)];
-                const u = level[Math.max(0, j - 1) * n + i];
-                const d = level[Math.min(n - 1, j + 1) * n + i];
-                const gx = (l - rr) / (2 * hf.cell * s);
-                const gz = (u - d) / (2 * hf.cell * s);
-                const mag = Math.hypot(gx, gz);
-                const speed = Math.min(1, mag * 40);
-                flow[k * 2] = mag > 1e-5 ? (gx / mag) * speed : 0;
-                flow[k * 2 + 1] = mag > 1e-5 ? (gz / mag) * speed : 0;
-
-                if (river) {
-                    const g =
-                        Math.min(res - 1, chunk.row0 + j * s) * res +
-                        Math.min(res - 1, chunk.col0 + i * s);
-                    const fx = river[g * 2];
-                    const fz = river[g * 2 + 1];
-                    const base = Math.hypot(fx, fz);
-
-                    if (base > 1e-5) {
-                        const total = Math.min(1, Math.max(base, speed));
-                        flow[k * 2] = (fx / base) * total;
-                        flow[k * 2 + 1] = (fz / base) * total;
-                    }
-                }
-            }
-        }
-
-        // Never stretch a quad across a big level jump (that would draw a vertical sheet of water).
-        const wallLimit = Math.max(1.5, hf.cell * s * 0.5);
         const index: number[] = [];
 
         for (let j = 0; j < n - 1; j++) {
             for (let i = 0; i < n - 1; i++) {
-                const a = j * n + i;
-                const b = (j + 1) * n + i;
-                const c = j * n + i + 1;
-                const d = (j + 1) * n + i + 1;
-
-                if (!(isWet[a] || isWet[b] || isWet[c] || isWet[d])) {
-                    continue;
+                if (d.mask[(j0 + j) * d.size + i0 + i]) {
+                    const a = j * n + i;
+                    const b = (j + 1) * n + i;
+                    index.push(a, b, a + 1, a + 1, b, b + 1);
                 }
-
-                const lo = Math.min(level[a], level[b], level[c], level[d]);
-                const hi = Math.max(level[a], level[b], level[c], level[d]);
-
-                if (hi - lo > wallLimit) {
-                    continue;
-                }
-
-                index.push(a, b, c, c, b, d);
             }
         }
 
@@ -669,19 +853,28 @@ export class Water {
             return;
         }
 
+        const positions = new Float32Array(n * n * 3);
+
+        for (let j = 0; j < n; j++) {
+            for (let i = 0; i < n; i++) {
+                const k = j * n + i;
+                positions[k * 3] = d.x(i0 + i);
+                positions[k * 3 + 1] = d.level[(j0 + j) * d.size + i0 + i];
+                positions[k * 3 + 2] = d.z(j0 + j);
+            }
+        }
+
         const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute(
-            'position',
-            new THREE.BufferAttribute(positions, 3),
-        );
-        geometry.setAttribute(
-            'waterDepth',
-            new THREE.BufferAttribute(depth, 1),
-        );
-        geometry.setAttribute('waterFlow', new THREE.BufferAttribute(flow, 2));
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('waterFine', new THREE.BufferAttribute(new Float32Array(n * n), 1));
         geometry.setIndex(index);
         geometry.computeVertexNormals();
         geometry.computeBoundingSphere();
+
+        if (geometry.boundingSphere) {
+            // Waves lift the surface a little above its still level.
+            geometry.boundingSphere.radius += 4;
+        }
 
         const mesh = new THREE.Mesh(geometry, this.material);
         mesh.receiveShadow = true;
@@ -827,518 +1020,4 @@ function createWaveTexture(): THREE.DataTexture {
     texture.needsUpdate = true;
 
     return texture;
-}
-
-/** Material inputs (TSL uniforms), updated from the environment and the weather. */
-function createWaterUniforms() {
-    return {
-        time: uniform(0),
-        shallow: uniform(new THREE.Color('#2fa3a0')),
-        deep: uniform(new THREE.Color('#0b2f45')),
-        clarity: uniform(4),
-        wind: uniform(0.4),
-        waveScale: uniform(8),
-        waveStrength: uniform(0.6),
-        waveSpeed: uniform(1),
-        waveHeight: uniform(0.15),
-        flowSpeed: uniform(1),
-        refraction: uniform(0.5),
-        foamEnabled: uniform(1),
-        foamWidth: uniform(1.2),
-        foamIntensity: uniform(0.6),
-        rapids: uniform(1),
-        foamBreakup: uniform(0.6),
-        roughness: uniform(0.06),
-        reflMatrix: uniform(new THREE.Matrix4()),
-        reflLevel: uniform(0),
-        hasReflection: uniform(0),
-        // Weather (Weather.ts): rain ripple intensity and the wind direction (x, z).
-        rain: uniform(0),
-        windDir: uniform(new THREE.Vector2(0.8, 0.6)),
-        // Surface mesh: vertex spacing of the water chunks (m) and the half size of the map.
-        gridSpacing: uniform(8),
-        mapHalf: uniform(1e6),
-    };
-}
-
-type WaterUniforms = ReturnType<typeof createWaterUniforms>;
-
-/** Long directional swells: direction, wavelength (m) and relative amplitude. */
-const SWELLS: { dir: [number, number]; length: number; amp: number }[] = [
-    { dir: [1, 0.25], length: 42, amp: 0.6 },
-    { dir: [0.7, -0.7], length: 23, amp: 0.3 },
-    { dir: [0.2, 1], length: 13, amp: 0.1 },
-];
-
-/**
- * MeshStandardNodeMaterial with two water-specific hooks: the planar reflection replaces the
- * environment radiance near the reflected level, and the water blends into the scene underneath at
- * the waterline (soft shores).
- */
-class WaterMaterial extends THREE.MeshStandardNodeMaterial {
-    /** Planar reflection colour and its weight (0 = environment only). */
-    planarNode: Node<'vec3'> | null = null;
-    planarWeightNode: Node<'float'> | null = null;
-    /** Scene colour under the water surface and the 0-1 shore blend towards the water shading. */
-    underNode: Node<'vec3'> | null = null;
-    shoreNode: Node<'float'> | null = null;
-    /** Copy of the scene depth behind the water: its format has to match the depth buffer's. */
-    sceneDepth: THREE.DepthTexture | null = null;
-
-    override setup(builder: NodeBuilder): void {
-        if (this.sceneDepth) {
-            this.sceneDepth.type = builder.renderer.reversedDepthBuffer
-                ? THREE.FloatType
-                : THREE.UnsignedIntType;
-        }
-
-        super.setup(builder);
-    }
-
-    override setupEnvironment(
-        builder: NodeBuilder,
-    ): THREE.EnvironmentNode | null {
-        const env = super.setupEnvironment(builder);
-
-        if (!this.planarNode || !this.planarWeightNode) {
-            return env;
-        }
-
-        return new PlanarEnvironmentNode(
-            env?.envNode ?? null,
-            this.planarNode,
-            this.planarWeightNode,
-        );
-    }
-
-    override setupOutput(builder: NodeBuilder, outputNode: Node): Node {
-        if (!this.underNode || !this.shoreNode) {
-            return super.setupOutput(builder, outputNode);
-        }
-
-        const rgba = outputNode as Node<'vec4'>;
-
-        return super.setupOutput(
-            builder,
-            vec4(mix(this.underNode, rgba.rgb, this.shoreNode), rgba.a),
-        );
-    }
-}
-
-/** Sky environment lighting whose specular radiance is then blended towards the planar reflection. */
-class PlanarEnvironmentNode extends THREE.EnvironmentNode {
-    constructor(
-        envNode: Node | null,
-        private readonly planar: Node<'vec3'>,
-        private readonly weight: Node<'float'>,
-    ) {
-        super(envNode);
-    }
-
-    override setup(builder: NodeBuilder): undefined {
-        if (this.envNode) {
-            super.setup(builder);
-        }
-
-        const radiance = (builder.context as { radiance: Node<'vec3'> })
-            .radiance;
-        radiance.assign(mix(radiance, this.planar, this.weight));
-
-        return undefined;
-    }
-}
-
-/** The water material and its planar reflection texture node (for swapping in the reflection). */
-function createWaterMaterial(
-    u: WaterUniforms,
-    waveTexture: THREE.Texture,
-): { material: WaterMaterial; reflection: THREE.TextureNode } {
-    const material = new WaterMaterial({
-        color: 0xffffff,
-        metalness: 0,
-        envMapIntensity: 1,
-    });
-    // Drawn after the opaque scene (it reads it back); alpha stays 1, so blending is a plain overwrite.
-    material.transparent = true;
-    material.depthWrite = true;
-    material.name = 'Water';
-
-    const waterDepth = attribute<'float'>('waterDepth', 'float');
-    const waterFlow = varying(attribute<'vec2'>('waterFlow', 'vec2'));
-    const waveTime = u.time.mul(u.waveSpeed);
-
-    // ---- vertex: long swells on deep water, with the matching geometric normal
-    const swell = Fn(() => {
-        const p = modelWorldMatrix.mul(vec4(positionGeometry, 1)).xz;
-        // Calm towards the map edge: the chunks meet the coarse ocean ring there, and a surface both
-        // meshes keep flat stays watertight (no crack flickering along the seam). The ring itself is far
-        // too coarse to carry these wavelengths anyway.
-        const edge = u.mapHalf.sub(max(abs(p.x), abs(p.y)));
-        const amp = u.waveHeight
-            .mul(u.wind.mul(0.5).add(0.5))
-            .mul(smoothstep(0.5, 4, waterDepth))
-            .mul(smoothstep(0, 60, edge));
-        let h: Node<'float'> = float(0);
-        let grad: Node<'vec2'> = vec2(0);
-
-        SWELLS.forEach((s, i) => {
-            const len = Math.hypot(s.dir[0], s.dir[1]);
-            const dir = vec2(s.dir[0] / len, s.dir[1] / len);
-            const k = (Math.PI * 2) / s.length;
-            const speed = Math.sqrt(9.81 / k);
-            const arg = dot(dir, p).sub(waveTime.mul(speed)).mul(k);
-            // Swells shorter than a few vertex spacings alias into regular bands across the mesh.
-            const resolved = smoothstep(
-                u.gridSpacing.mul(2.5),
-                u.gridSpacing.mul(4),
-                float(s.length),
-            );
-            // Wave groups: a slow modulation along and across the crests, so a swell doesn't read as
-            // endless parallel lines across a lake (its slope is left out of the normal: it is small).
-            const group = sin(
-                dot(vec2(dir.y.negate(), dir.x), p)
-                    .mul((Math.PI * 2) / (s.length * 4.7))
-                    .add(i * 1.7),
-            )
-                .mul(sin(dot(dir, p).mul((Math.PI * 2) / (s.length * 7.3))))
-                .mul(0.4)
-                .add(0.6);
-            const a = resolved.mul(group).mul(s.amp);
-            h = h.add(sin(arg).mul(a));
-            grad = grad.add(dir.mul(cos(arg).mul(a.mul(k))));
-        });
-
-        return vec3(h, grad).mul(amp);
-    })();
-    material.positionNode = positionGeometry.add(vec3(0, swell.x, 0));
-    const geoNormal = varying(
-        normalize(
-            normalGeometry.add(vec3(swell.y.negate(), 0, swell.z.negate())),
-        ),
-    );
-
-    // ---- fragment
-    const wave = (uv: Node<'vec2'>) => texture(waveTexture, uv);
-    const waveNormal = (uv: Node<'vec2'>) => wave(uv).xyz.mul(2).sub(1);
-    const pos = positionWorld;
-    const viewDist = length(positionView);
-    const fragDepth = positionView.z.negate();
-
-    // Scene behind the water: one colour and one depth copy per frame, sampled through clones.
-    const sceneColorBase = viewportTexture(
-        screenUV,
-        null,
-        createFramebufferTexture(),
-    );
-    material.sceneDepth = new THREE.DepthTexture(1, 1);
-    const sceneDepthBase = new THREE.ViewportDepthTextureNode(
-        screenUV,
-        null,
-        material.sceneDepth,
-    );
-    const sceneColor = (uv: Node<'vec2'>) =>
-        sceneColorBase.sample(uv).rgb as Node<'vec3'>;
-    // Perspective depth → positive view-space distance. Nothing behind the water (open sea beyond
-    // the terrain, out to the far plane) counts as bottomless, not as the far plane: water that
-    // reaches the far plane would otherwise turn shallow (and see-through) right at the horizon.
-    const sceneDistance = (uv: Node<'vec2'>) => {
-        const depth = sceneDepthBase.sample(uv).x;
-
-        return select(
-            isSkyDepth(depth),
-            float(1e6),
-            perspectiveDepthToViewZ(depth, cameraNear, cameraFar).negate(),
-        );
-    };
-    // Thickness below a few depth buffer steps is quantisation noise (banding that TAA jitter turns into
-    // shimmer on distant water): never resolve less than that, which fades far shores to deep water.
-    const resolvable = (thickness: Node<'float'>) =>
-        max(thickness, depthPrecision(fragDepth, cameraNear).mul(4));
-
-    const viewDir = normalize(cameraPosition.sub(pos));
-    const cosV = max(abs(viewDir.y), 0.08);
-    // Path length through the water along the view ray (m) and the approximate vertical depth.
-    const thickness = resolvable(
-        max(sceneDistance(screenUV).sub(fragDepth), 0),
-    );
-    const vertical = thickness.mul(cosV);
-
-    // Foam: soft bubbly band along every intersection (shores, rocks, reeds) + rapids on fast rivers.
-    const wind = u.windDir;
-    const bubblesA = wave(
-        pos.xz
-            .div(3.3)
-            .add(wind.mul(waveTime.mul(0.015)))
-            .add(waterFlow.mul(waveTime.mul(0.2))),
-    ).a;
-    const bubblesB = wave(
-        pos.xz.div(1.7).sub(wind.yx.mul(waveTime.mul(0.022))),
-    ).a;
-    const bubbles = bubblesA.mul(0.6).add(bubblesB.mul(0.4));
-    const foamWidth = max(u.foamWidth, 0.05);
-    const edge = smoothstep(0, foamWidth, vertical).oneMinus();
-    // Large drifting patches (smooth noise from the wave normals) break the band up.
-    const patchNoise = wave(
-        pos.xz
-            .div(29)
-            .add(wind.mul(waveTime.mul(0.006)))
-            .add(waterFlow.mul(waveTime.mul(0.02))),
-    )
-        .x.add(wave(pos.xz.div(11.3).sub(wind.yx.mul(waveTime.mul(0.01)))).y)
-        .mul(0.5)
-        .toVar();
-    const patches = smoothstep(0.36, 0.62, patchNoise);
-    const breakup = mix(1, patches, clamp(u.foamBreakup, 0, 1));
-    // Bubbly lace: dense at the waterline, thinning out towards the foam width, pulsing as the
-    // water laps against the shore.
-    const lap = sin(waveTime.mul(1.3).sub(vertical.mul(5).div(foamWidth)))
-        .mul(0.5)
-        .add(0.5);
-    const lace = smoothstep(
-        mix(0.72, 0.18, edge),
-        mix(0.9, 0.42, edge),
-        bubbles.add(edge.mul(lap).mul(0.12)),
-    ).mul(edge);
-    // Lines of foam rolling in towards the shore (wavy along the shoreline).
-    const rollPhase = vertical
-        .div(foamWidth)
-        .mul(4.5)
-        .add(waveTime.mul(1.1))
-        .add(patchNoise.mul(9));
-    const rolls = smoothstep(0.6, 0.95, sin(rollPhase).mul(0.5).add(0.5))
-        .mul(smoothstep(0, 0.4, edge))
-        .mul(smoothstep(0.25, 0.5, bubbles))
-        .mul(0.7);
-    // A thin line where the water touches anything, even inside the gaps between patches.
-    const contact = smoothstep(0.02, 0.12, vertical)
-        .oneMinus()
-        .mul(smoothstep(0.1, 0.35, bubbles));
-    const shoreFoam = u.foamEnabled.mul(
-        max(contact.mul(0.85), lace.add(rolls).mul(breakup)),
-    );
-    const flowSpeed = length(waterFlow);
-    // Foam carried downstream: two phases of a flow-mapped lookup, cross-faded (as the normals).
-    const flowUv = pos.xz.div(4.1);
-    const flowVec = waterFlow.mul(u.flowSpeed).mul(0.35);
-    const fph0 = fract(waveTime.mul(0.12));
-    const fph1 = fract(waveTime.mul(0.12).add(0.5));
-    // Three taps along the current smear the bubbles into streaks.
-    const streakDir = waterFlow.div(max(flowSpeed, 1e-3)).mul(0.09);
-    const smeared = (uv: Node<'vec2'>) =>
-        wave(uv)
-            .a.add(wave(uv.add(streakDir)).a)
-            .add(wave(uv.sub(streakDir)).a)
-            .div(3);
-    const carried = mix(
-        smeared(flowUv.sub(flowVec.mul(fph0))),
-        smeared(flowUv.sub(flowVec.mul(fph1)).add(0.37)),
-        abs(fph0.sub(0.5)).mul(2),
-    );
-    // Streaks of foam drifting downstream on rivers (with the rapids switch).
-    const streaks = u.rapids
-        .mul(smoothstep(0.38, 0.7, carried))
-        .mul(smoothstep(0.2, 0.5, flowSpeed))
-        .mul(mix(1, patches, 0.6))
-        .mul(0.45);
-    const rapids = u.rapids
-        .mul(smoothstep(0.45, 1, flowSpeed))
-        .mul(smoothstep(0.25, 0.6, bubbles.mul(0.5).add(carried.mul(0.5))));
-    // Far away the bubble texture minifies into a solid band, so fade foam out with distance.
-    const foamFade = smoothstep(40, 220, viewDist).oneMinus();
-    const foam = clamp(
-        shoreFoam
-            .add(rapids)
-            .add(streaks)
-            .mul(u.foamIntensity)
-            .mul(1.5)
-            .mul(foamFade),
-        0,
-        1,
-    );
-
-    // Water body colour (in-scattering): shallow → deep with optical depth.
-    const clarity = max(u.clarity, 0.05);
-    const optical = exp(thickness.negate().div(clarity)).oneMinus();
-    const body = mix(u.shallow, u.deep, smoothstep(0, 1, optical));
-    material.colorNode = vec4(
-        mix(body.mul(optical).mul(0.9), vec3(0.9, 0.93, 0.95), foam),
-        1,
-    );
-    material.roughnessNode = mix(u.roughness.add(u.rain.mul(0.05)), 0.6, foam);
-
-    // Wave normals.
-    const worldNormal = Fn(() => {
-        const uv = pos.xz.div(max(u.waveScale, 0.1));
-
-        // River flow mapping: two phases of the same layer, cross-faded to hide the reset.
-        const flow = waterFlow.mul(u.flowSpeed).mul(0.9);
-        const ph0 = fract(waveTime.mul(0.25));
-        const ph1 = fract(waveTime.mul(0.25).add(0.5));
-        const fw = abs(ph0.sub(0.5)).mul(2);
-        const flowN = mix(
-            waveNormal(uv.sub(flow.mul(ph0))),
-            waveNormal(uv.sub(flow.mul(ph1)).add(0.5)),
-            fw,
-        );
-
-        const big = waveNormal(uv.mul(0.27).add(wind.mul(waveTime.mul(0.011))));
-        const rotated = vec2(
-            uv.x.mul(0.8).sub(uv.y.mul(0.6)),
-            uv.x.mul(0.6).add(uv.y.mul(0.8)),
-        );
-        const hasFlow = smoothstep(0.02, 0.2, flowSpeed);
-        const mid = mix(
-            waveNormal(rotated.mul(0.9).sub(wind.mul(waveTime.mul(0.023)))),
-            flowN,
-            hasFlow,
-        );
-        const fine = waveNormal(
-            uv
-                .mul(3.1)
-                .add(vec2(wind.y.negate(), wind.x).mul(waveTime.mul(0.05))),
-        );
-
-        // Far away the dominant crests of a layer (two per tile) shrink to a few pixels and its repeats
-        // line up into regular bands across the water: each layer fades out by its screen-space tile
-        // rate (derivatives) before that, and a broad rotated layer takes over from the big one.
-        const tiles = (scale: number) => {
-            const rate = fwidth(uv.mul(scale));
-
-            return smoothstep(0.03, 0.12, max(rate.x, rate.y)).oneMinus();
-        };
-        const bigWeight = tiles(0.27);
-        const broad = waveNormal(
-            vec2(
-                uv.x.mul(0.6).add(uv.y.mul(0.8)),
-                uv.y.mul(0.6).sub(uv.x.mul(0.8)),
-            )
-                .mul(0.071)
-                .add(wind.mul(waveTime.mul(0.004))),
-        );
-        const fade = mix(1, 0.35, smoothstep(60, 900, viewDist));
-        const strength = u.waveStrength
-            .mul(u.wind.mul(0.45).add(0.55))
-            .mul(fade);
-        const slope = big.xy
-            .div(big.z)
-            .mul(bigWeight.mul(0.9))
-            .add(
-                broad.xy
-                    .div(broad.z)
-                    .mul(bigWeight.oneMinus().mul(tiles(0.071)).mul(0.9)),
-            )
-            .add(mid.xy.div(mid.z).mul(tiles(0.9)))
-            .add(
-                fine.xy
-                    .div(fine.z)
-                    .mul(0.45)
-                    .mul(smoothstep(20, 150, viewDist).oneMinus()),
-            )
-            .mul(strength.mul(0.35))
-            .mul(foam.mul(0.7).oneMinus())
-            // Calm the surface in very shallow water.
-            .mul(smoothstep(0, 0.4, vertical).mul(0.7).add(0.3))
-            .toVar();
-
-        If(u.rain.greaterThan(0.001), () => {
-            slope.addAssign(
-                rainRipples(pos.xz, u.time).mul(
-                    u.rain
-                        .mul(0.35)
-                        .mul(smoothstep(12, 60, viewDist).oneMinus()),
-                ),
-            );
-        });
-
-        // Combine with the geometric (swell) normal, flattened with distance: far away its crests
-        // shrink to a few pixels and read as regular bands.
-        const geo = normalize(
-            mix(
-                normalize(geoNormal),
-                vec3(0, 1, 0),
-                smoothstep(150, 900, viewDist).mul(0.6),
-            ),
-        );
-
-        return normalize(
-            vec3(
-                geo.x.div(geo.y).sub(slope.x),
-                1,
-                geo.z.div(geo.y).sub(slope.y),
-            ),
-        );
-    })();
-    const normal = worldNormal.transformDirection(cameraViewMatrix);
-    material.normalNode = normal;
-
-    // Refraction: offset the scene lookup along the wave normal, more in deeper water (screen UVs
-    // point down, view-space y up).
-    const offset = vec2(normal.x, normal.y.negate()).mul(
-        u.refraction.mul(0.08).mul(smoothstep(0, 2.5, thickness)),
-    );
-    const bentUv = clamp(screenUV.add(offset), 0.001, 0.999);
-    // Don't refract things that are in front of the water surface.
-    const refractUv = select(
-        sceneDistance(bentUv).lessThan(fragDepth),
-        screenUV,
-        bentUv,
-    );
-    const refractThickness = resolvable(
-        max(sceneDistance(refractUv).sub(fragDepth), 0),
-    );
-    // Beer–Lambert absorption tinted by the shallow colour (red is absorbed first).
-    const sigma = vec3(1)
-        .sub(clamp(u.shallow.mul(1.4), 0, 0.98))
-        .mul(1.6)
-        .div(clarity)
-        .add(float(0.02).div(clarity));
-    const transmittance = exp(sigma.negate().mul(refractThickness));
-    const nDotV = clamp(dot(normal, positionViewDirection), 0, 1);
-    const fresnel = pow(nDotV.oneMinus(), 5).mul(0.98).add(0.02);
-    material.emissiveNode = sceneColor(refractUv)
-        .mul(transmittance)
-        .mul(fresnel.oneMinus())
-        .mul(foam.oneMinus());
-
-    // Planar reflection of the dominant level, for the pixels on (or near) that level.
-    const reflClip = u.reflMatrix.mul(vec4(pos.x, u.reflLevel, pos.z, 1));
-    const reflUv = clamp(
-        reflClip.xy
-            .div(reflClip.w)
-            .add(
-                vec2(normal.x, normal.y.negate()).mul(
-                    u.refraction.mul(0.02).add(0.012),
-                ),
-            ),
-        0.001,
-        0.999,
-    );
-    // Black until a reflection is connected (weight 0). Its own placeholder: nodes that start on the
-    // same texture share one binding, and the shader's sampling mode (filtered or texel fetch) is
-    // chosen from the placeholder's filters.
-    const placeholder = new THREE.DataTexture(new Uint8Array(4), 1, 1);
-    placeholder.minFilter = placeholder.magFilter = THREE.LinearFilter;
-    placeholder.needsUpdate = true;
-    const reflection = texture(placeholder, reflUv);
-    material.planarNode = reflection.rgb;
-    material.planarWeightNode = u.hasReflection.mul(
-        smoothstep(0.4, 2, abs(pos.y.sub(u.reflLevel))).oneMinus(),
-    );
-
-    // Blend seamlessly into the ground at the waterline.
-    material.underNode = sceneColor(screenUV);
-    material.shoreNode = smoothstep(0, 0.18, vertical);
-
-    return { material, reflection };
-}
-
-/** Colour copy target for the scene behind the water: no mipmaps (only sampled at full detail). */
-function createFramebufferTexture(): THREE.FramebufferTexture {
-    const target = new THREE.FramebufferTexture(1, 1);
-    target.name = 'Water scene colour';
-    target.minFilter = THREE.LinearFilter;
-    target.magFilter = THREE.LinearFilter;
-    target.generateMipmaps = false;
-
-    return target;
 }

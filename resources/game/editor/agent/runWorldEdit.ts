@@ -393,9 +393,46 @@ export function runWorldEdit(
                     ),
             );
         }
+        case 'water_body':
+            return waterBodyEdit(editor, payload);
         default:
             throw new EditError(`Unknown edit kind ${String(payload.kind)}.`);
     }
+}
+
+/** MCP edit_water_body: list / get / update the water bodies (Water › Bodies). */
+function waterBodyEdit(editor: Editor, payload: Record<string, unknown>): Record<string, unknown> {
+    const water = editor.worldData.water;
+    water.flushBodies();
+    const all = water.describeBodies();
+    const wind = {
+        strength: Math.round(water.waves.windStrength * 100) / 100,
+        towards: { x: Math.round(water.waves.windDir.x * 100) / 100, z: Math.round(water.waves.windDir.y * 100) / 100 },
+        wave_mode: water.waveMode,
+    };
+
+    if (payload.action === 'list') {
+        return { count: all.length, wind, bodies: all };
+    }
+
+    const point = payload.point as { x: number; z: number } | undefined;
+    const body = typeof payload.id === 'string' ? water.bodies.get(payload.id) : point ? water.bodies.at(point.x, point.z) : null;
+
+    if (!body) {
+        throw new EditError(
+            typeof payload.id === 'string'
+                ? `There is no water body "${payload.id}". Action "list" lists them.`
+                : 'There is no water at that point.',
+        );
+    }
+
+    if (payload.action === 'update') {
+        water.bodies.update(body.id, (payload.params ?? {}) as Record<string, unknown>);
+    } else if (payload.action !== 'get') {
+        throw new EditError(`Unknown water body action ${String(payload.action)}.`);
+    }
+
+    return { wind, body: water.describeBodies().find((b) => b.id === body.id) };
 }
 
 function grow(rect: GridRect, by: number, res: number): GridRect {

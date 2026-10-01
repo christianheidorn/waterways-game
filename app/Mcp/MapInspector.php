@@ -3,6 +3,7 @@
 namespace App\Mcp;
 
 use App\Http\Controllers\MapController;
+use App\Mcp\Tools\EditWaterBody;
 use App\Models\FoliageType;
 use App\Models\Map;
 use App\Models\TerrainLayer;
@@ -121,8 +122,35 @@ class MapInspector
         }
 
         $stats['water_coverage_percent'] = $water !== null && $samples > 0 ? round($wet / $samples * 100, 1) : 0;
+        $stats['water_bodies'] = $this->waterBodies($map);
 
         return $stats;
+    }
+
+    /**
+     * Saved water bodies (edit_water_body): counts per kind and the largest ones.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function waterBodies(Map $map): ?array
+    {
+        $bodies = EditWaterBody::saved($map);
+
+        if ($bodies === null) {
+            return null;
+        }
+
+        $described = array_map(EditWaterBody::describe(...), $bodies);
+        usort($described, fn ($a, $b) => ($b['area_m2'] ?? 0) <=> ($a['area_m2'] ?? 0));
+
+        return [
+            'count' => count($described),
+            'by_kind' => array_count_values(array_map(fn ($b) => (string) $b['kind'], $described)),
+            'largest' => array_map(fn ($b) => [
+                'id' => $b['id'], 'name' => $b['name'], 'kind' => $b['kind'], 'area_m2' => $b['area_m2'], 'level' => $b['level'],
+            ], array_slice($described, 0, 8)),
+            'tip' => 'edit_water_body lists every body with its wave settings and changes them.',
+        ];
     }
 
     /**

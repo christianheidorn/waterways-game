@@ -54,6 +54,10 @@ export type EnvironmentSettings = {
     rapids_foam: boolean;
     /** 0-1: breaks the shoreline foam into drifting patches (0 = an even band). */
     foam_breakup?: number;
+    /** Wind wave whitecaps (0 = none, 1 = natural, 2 = more). */
+    whitecaps?: number;
+    /** Sunlight glowing through thin wave crests (0 = off). */
+    water_subsurface?: number;
     /** Caustics on shallow beds: brightness (0 = off), cell size (m) and the depth they reach (m). */
     caustics_intensity?: number;
     caustics_scale?: number;
@@ -232,6 +236,11 @@ export type GraphicsSettings = {
     cloud_shadows: boolean;
     /** Animated caustics on shallow river / lake beds. */
     caustics: boolean;
+    /**
+     * Wind waves: 'fft' = GPU FFT ocean (WebGPU; the sum of waves on WebGL 2), 'simple' = a sum of the
+     * strongest waves everywhere (cheaper).
+     */
+    water_waves?: 'simple' | 'fft';
     /** Footprints in snow cover (a trail texture around the character). */
     snow_footprints: boolean;
     /**
@@ -476,6 +485,8 @@ export type MapAssets = {
     props?: string | null;
     /** Roads and rivers as editable splines (SplinesFile JSON). */
     splines?: string | null;
+    /** Water body ids and settings (WaterBodiesFile JSON). */
+    water_bodies?: string | null;
 };
 
 /** A placeable model of the prop library (App\\Models\\PropModel::toGameArray). */
@@ -538,6 +549,7 @@ export type GameManifest = {
         save_foliage: string;
         save_props?: string;
         save_splines?: string;
+        save_water_bodies?: string;
         save_meta: string;
         save_thumbnail: string;
         /** PATCH a foliage type's settings from the in-game editor: `${update_foliage_type}/{id}`. */

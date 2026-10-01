@@ -50,6 +50,7 @@ import type { FalloffType } from '../Brush';
 import type { Editor, FoliageTool, SculptTool, WaterTool } from '../Editor';
 import { FoliageThumbnails } from '../FoliageThumbnails';
 import { WorldPanel } from './WorldPanel';
+import { waterBodiesKey, waterBodiesSection } from './waterBodiesSection';
 import type { WorldHost } from './WorldPanel';
 import {
     propAlongSection,
@@ -167,6 +168,12 @@ const WATER_TOOLS: ToolDef<WaterTool>[] = [
         label: 'Lake',
         icon: Droplets,
         hint: 'Fill with water at the water level · Ctrl+click to pick the level',
+    },
+    {
+        value: 'bodies',
+        label: 'Bodies',
+        icon: Wind,
+        hint: 'Click a lake, pond, river or the sea to select it and edit its waves and look',
     },
     {
         value: 'river',
@@ -299,7 +306,7 @@ export class EditorPanel {
         const key =
             s.group === 'world'
                 ? 'world'
-                : `${splines}:${s.sculptTool === 'stamp' ? 'stamp' : ''}:${props}:${requests}:${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}`;
+                : `${splines}:${s.sculptTool === 'stamp' ? 'stamp' : ''}:${props}:${requests}:${s.group}:${s.sculptTool}:${s.foliageTool}:${s.waterTool}:${this.editor.layers.map((l) => `${l.id}${l.name}${l.color}${l.tint}${l.texture_scale}${l.material?.thumbnail_url ?? ''}`).join()}:${this.editor.foliageTypes.map((t) => `${t.id}${t.name}${t.kind}${t.color}${t.color_secondary}${t.tint ?? ''}${t.model_url ?? ''}${t.asset?.thumbnail_url ?? ''}${t.asset?.height ?? ''}`).join()}:${s.group === 'foliage' ? this.foliageThumbs.version : ''}:${s.group === 'water' && s.waterTool === 'bodies' ? waterBodiesKey(this.editor) : ''}`;
 
         if (key !== this.renderedKey) {
             this.renderedKey = key;
@@ -424,6 +431,11 @@ export class EditorPanel {
                 );
                 if (s.waterTool === 'river') {
                     this.body.append(this.building(riverSection(this.editor)));
+                    break;
+                }
+
+                if (s.waterTool === 'bodies') {
+                    this.body.append(waterBodiesSection(this.editor, this.refreshers));
                     break;
                 }
 

@@ -32,6 +32,8 @@ class TerrainStorage
         // Roads and rivers as editable splines: {version, roads: [...], rivers: [...]} (see the game's Splines).
         'splines' => 'splines.json',
         'landcover' => 'landcover.u8',
+        // Water bodies: stable ids and per-body settings {version, bodies: [{id, seed, kind, ...settings}]}.
+        'water_bodies' => 'water_bodies.json',
     ];
 
     public function disk(): Filesystem

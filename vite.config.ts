@@ -54,6 +54,10 @@ export default defineConfig({
             ],
         },
     },
+    test: {
+        // Unit tests of the game's pure code (no browser, no GPU): npm test.
+        include: ['resources/**/*.test.ts'],
+    },
     lint: {
         ignorePatterns: [
             'vendor/**',

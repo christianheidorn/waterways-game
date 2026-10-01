@@ -14,6 +14,7 @@ import {
     fwidth,
     If,
     max,
+    min,
     mix,
     nodeObject,
     normalize,
@@ -101,7 +102,7 @@ function createUniforms(
     );
     // x: slot enabled, y: has material, z: tile size (m), w: height contrast
     const mat = Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, 4, 1));
-    // x: roughness scale, y: normal strength, z: macro variation, w: unused
+    // x: roughness scale, y: normal strength, z: variation, w: large-scale (macro) variation
     const mat2 = Array.from(
         { length: 8 },
         () => new THREE.Vector4(1, 1, 0.5, 0),
@@ -250,7 +251,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
                 (layer.roughness_scale ?? 1) * (ref?.roughness_scale ?? 1),
                 (layer.normal_strength ?? 1) * (ref?.normal_strength ?? 1),
                 layer.variation,
-                0,
+                Math.max(0, layer.macro_variation ?? 1),
             );
             tint[i]
                 .set(layer.tint ?? '#ffffff')
@@ -558,6 +559,25 @@ function terrainSurface(u: TerrainUniforms) {
     const dist = positionView.length().toVar();
     const macro = u.uNoise.sample(wp.div(420)).toVar();
     const macro2 = u.uNoise.sample(wp.div(97)).toVar();
+    // Large-scale variation (see the layers' macro_variation): broad brightness and hue patches from
+    // a few hundred metres down to ~25 m, shared by all layers.
+    const macro3 = u.uNoise.sample(wp.div(1500).add(0.37)).toVar();
+    const macroLum = macro3.x
+        .sub(0.5)
+        .mul(0.55)
+        .add(macro.w.sub(0.5).mul(0.5))
+        .add(macro.x.sub(0.5).mul(0.3))
+        .add(macro2.z.sub(0.5).mul(0.14))
+        .toVar();
+    const macroHue = macro3.y
+        .sub(0.5)
+        .mul(1.3)
+        .add(macro.y.sub(0.5).mul(0.7))
+        .toVar();
+    // Seen from further away the variation grows (up close the texture detail dominates anyway) and
+    // material layers lean towards their average colour, which hides their repeat.
+    const macroAmount = mix(0.6, 1.15, smoothstep(25, 450, dist)).toVar();
+    const detailBlend = smoothstep(110, 750, dist).mul(0.6).toVar();
     const tileNoise = u.uNoise.sample(wp.div(61)).w.toVar();
 
     // Triplanar weights for steep ground (cliffs); flat ground only uses the top projection.
@@ -742,15 +762,13 @@ function terrainSurface(u: TerrainUniforms) {
                     });
                 });
 
-                // Gentle macro variation so large areas don't look uniform.
-                col.mulAssign(
-                    macro2.y
-                        .sub(0.5)
-                        .mul(m2.z.mul(0.25))
-                        .add(macro.x.mul(0.12))
-                        .add(0.9),
+                albedo.assign(
+                    mix(
+                        col.mul(u.uTint.element(index)),
+                        u.uGround.element(index).div(0.97),
+                        detailBlend.mul(min(m2.w, 1)),
+                    ),
                 );
-                albedo.assign(col.mul(u.uTint.element(index)));
                 normal.assign(normalize(nSum));
                 roughness.assign(clamp(rough.mul(m2.x), 0.03, 1));
                 ao.assign(occ);
@@ -797,6 +815,17 @@ function terrainSurface(u: TerrainUniforms) {
                 height.assign(n.x.mul(0.6).add(n.y.mul(0.4)));
                 bump.assign(height.mul(p.w));
             });
+
+            // Large-scale variation: brighter / darker and warmer / cooler patches.
+            const amount = m2.w.mul(macroAmount).toVar();
+            const hue = macroHue.mul(amount);
+            albedo.mulAssign(
+                vec3(
+                    hue.mul(0.09).add(1),
+                    hue.mul(0.025).add(1),
+                    hue.mul(-0.1).add(1),
+                ).mul(max(macroLum.mul(amount).add(1), 0.3)),
+            );
         });
 
         samples.push({

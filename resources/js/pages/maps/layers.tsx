@@ -98,6 +98,7 @@ const NEW_LAYER: LayerForm = {
     tint: '#ffffff',
     roughness_scale: 1,
     normal_strength: 1,
+    macro_variation: 1,
     auto_min_height: null,
     auto_max_height: null,
     auto_min_slope: null,
@@ -119,6 +120,7 @@ function toForm(layer: TerrainLayer): LayerForm {
         tint: layer.tint ?? '#ffffff',
         roughness_scale: layer.roughness_scale ?? 1,
         normal_strength: layer.normal_strength ?? 1,
+        macro_variation: layer.macro_variation ?? 1,
         auto_min_height: layer.auto_min_height,
         auto_max_height: layer.auto_max_height,
         auto_min_slope: layer.auto_min_slope,
@@ -556,6 +558,18 @@ function LayerCard({
                         </>
                     )}
                 </section>
+
+                <SliderField
+                    label="Large-scale variation"
+                    value={form.data.macro_variation ?? 1}
+                    onChange={(v) => set('macro_variation', v)}
+                    min={0}
+                    max={2}
+                    step={0.01}
+                    unit="×"
+                    description="Broad patches of lighter, darker and slightly shifted colour across the layer, strongest from a distance, so the texture repeat disappears when seen from above. 0 = uniform."
+                    error={errors.macro_variation}
+                />
 
                 <ProceduralFallback
                     map={map}

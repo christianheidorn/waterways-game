@@ -23,7 +23,7 @@ class Biome extends Model
     /** Terrain layer fields a biome carries (height / slope auto-paint rules stay with the map). */
     public const LOOK = [
         'material_id', 'color', 'color_secondary', 'roughness', 'noise_scale', 'variation', 'bump',
-        'texture_scale', 'tint', 'roughness_scale', 'normal_strength',
+        'texture_scale', 'tint', 'roughness_scale', 'normal_strength', 'macro_variation',
     ];
 
     protected function casts(): array

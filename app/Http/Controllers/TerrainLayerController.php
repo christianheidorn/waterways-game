@@ -201,6 +201,7 @@ class TerrainLayerController extends Controller
             'tint' => ['sometimes', 'required', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
             'roughness_scale' => ['sometimes', 'required', 'numeric', 'between:0,3'],
             'normal_strength' => ['sometimes', 'required', 'numeric', 'between:0,3'],
+            'macro_variation' => ['sometimes', 'required', 'numeric', 'between:0,2'],
             'auto_min_height' => ['nullable', 'numeric'],
             'auto_max_height' => ['nullable', 'numeric'],
             'auto_min_slope' => ['nullable', 'numeric', 'between:0,90'],

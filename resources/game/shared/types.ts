@@ -272,6 +272,8 @@ export type TerrainLayer = {
     tint: string;
     roughness_scale: number;
     normal_strength: number;
+    /** 0-2 strength of the large-scale colour / brightness variation (hides tiling from afar; 1 = default). */
+    macro_variation?: number;
     /** Automatic painting rules (used by "Auto paint" and for fresh maps). */
     auto_min_height: number | null;
     auto_max_height: number | null;

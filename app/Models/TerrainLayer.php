@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property string $tint
  * @property float $roughness_scale
  * @property float $normal_strength
+ * @property float $macro_variation
  * @property string $name
  * @property string $color
  * @property string $color_secondary
@@ -31,7 +32,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property list<array{foliage_type_id: int, density: float, clustering?: float, spacing?: float}>|null $ground_cover
  */
 #[Fillable([
-    'slot', 'material_id', 'tint', 'roughness_scale', 'normal_strength', 'name', 'color', 'color_secondary', 'roughness', 'noise_scale', 'variation', 'bump',
+    'slot', 'material_id', 'tint', 'roughness_scale', 'normal_strength', 'macro_variation', 'name', 'color', 'color_secondary', 'roughness', 'noise_scale', 'variation', 'bump',
     'texture_path', 'texture_scale', 'auto_min_height', 'auto_max_height', 'auto_min_slope',
     'auto_max_slope', 'auto_priority', 'ground_cover',
 ])]
@@ -46,6 +47,7 @@ class TerrainLayer extends Model
             'material_id' => 'integer',
             'roughness_scale' => 'float',
             'normal_strength' => 'float',
+            'macro_variation' => 'float',
             'roughness' => 'float',
             'noise_scale' => 'float',
             'variation' => 'float',
@@ -124,6 +126,7 @@ class TerrainLayer extends Model
             'tint' => $this->tint,
             'roughness_scale' => $this->roughness_scale,
             'normal_strength' => $this->normal_strength,
+            'macro_variation' => $this->macro_variation ?? 1.0,
             'ground_cover' => $this->groundCover(),
         ];
     }

@@ -18,7 +18,7 @@ class AddTerrainLayer extends WaterwaysTool
     private const DEFAULTS = [
         'name' => 'New layer', 'color' => '#7c7462', 'color_secondary' => '#9a917c', 'roughness' => 0.9,
         'noise_scale' => 5, 'variation' => 0.5, 'bump' => 0.4, 'texture_scale' => 4, 'tint' => '#ffffff',
-        'roughness_scale' => 1, 'normal_strength' => 1, 'auto_priority' => 0,
+        'roughness_scale' => 1, 'normal_strength' => 1, 'macro_variation' => 1, 'auto_priority' => 0,
     ];
 
     public function schema(JsonSchema $schema): array

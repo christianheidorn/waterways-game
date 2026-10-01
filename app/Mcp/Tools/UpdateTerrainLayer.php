@@ -13,7 +13,7 @@ use Laravel\Mcp\Server\Attributes\Description;
 use Laravel\Mcp\Server\Attributes\Name;
 
 #[Name('update_terrain_layer')]
-#[Description('Changes one terrain layer (by slot 0-7) of a map: name, PBR material (material_id from list_materials, or null for procedural colours), tint, texture_scale (m per repeat), colours / roughness / noise of the procedural look, auto-paint rules (auto_min_height, auto_max_height in m, auto_min_slope, auto_max_slope in degrees, auto_priority 0-10) and ground_cover ([{foliage_type_id, density 0-4, clustering 0-1, spacing m}]: foliage that grows by itself wherever the layer is painted). Pass only what changes. Applies live in an open editor.')]
+#[Description('Changes one terrain layer (by slot 0-7) of a map: name, PBR material (material_id from list_materials, or null for procedural colours), tint, texture_scale (m per repeat), macro_variation (0-2, default 1: large-scale colour and brightness variation that hides tiling from afar; 0 = uniform), colours / roughness / noise of the procedural look, auto-paint rules (auto_min_height, auto_max_height in m, auto_min_slope, auto_max_slope in degrees, auto_priority 0-10) and ground_cover ([{foliage_type_id, density 0-4, clustering 0-1, spacing m}]: foliage that grows by itself wherever the layer is painted). Pass only what changes. Applies live in an open editor.')]
 class UpdateTerrainLayer extends WaterwaysTool
 {
     public function schema(JsonSchema $schema): array
@@ -69,7 +69,7 @@ class UpdateTerrainLayer extends WaterwaysTool
         return [
             ...$layer->only([
                 'name', 'color', 'color_secondary', 'roughness', 'noise_scale', 'variation', 'bump', 'texture_scale',
-                'material_id', 'tint', 'roughness_scale', 'normal_strength', 'auto_min_height', 'auto_max_height',
+                'material_id', 'tint', 'roughness_scale', 'normal_strength', 'macro_variation', 'auto_min_height', 'auto_max_height',
                 'auto_min_slope', 'auto_max_slope', 'auto_priority',
             ]),
             'ground_cover' => $layer->groundCover(),

@@ -780,6 +780,7 @@ sample.
 php artisan test            # terrain pipeline (faked tiles / Overpass), materials, foliage assets, AI plans, API, pages
 npm run types:check         # TypeScript (studio + game)
 npm run check               # lint + format (vite-plus)
+npm test                    # unit tests of pure game code (card matte keying, alpha coverage checks)
 vendor/bin/pint --test      # PHP style
 ```
 

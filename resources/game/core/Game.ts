@@ -976,7 +976,7 @@ export class Game {
         });
         splat.onChange = coverAt;
         water.onRebuild = (rect) => {
-            wetness.invalidate();
+            wetness.invalidate(rect);
             coverAt(rect);
         };
 

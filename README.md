@@ -39,13 +39,14 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
 - **Terrain.** Chunked terrain with geomipmapping LOD and crack-hiding skirts. The PBR material blends 8
   height-aware splat layers, adds procedural detail and bump, and optionally uses texture arrays.
 - **Water.**
-    - Rivers and lakes are built from a water-surface grid. Flow-mapped normals make rivers visibly flow
-      downhill.
+    - Rivers and lakes are built from a water-surface grid. Flow-mapped normals and drifting foam streaks make
+      rivers visibly flow along their course: downstream along the river splines, elsewhere downhill.
     - Colour, absorption, refraction and soft shorelines follow the water thickness, which the water reads per
       pixel from the scene depth of the same render pass (no extra refraction pass).
     - Planar reflection of the water level nearest to the focus point (`water_quality` high: 60 % resolution;
       medium: 40 %, redrawn every other frame; low: sky reflection only).
-    - Shorelines and rapids get foam.
+    - Shorelines get animated foam (a bubbly lace with lines rolling in, broken into drifting patches), rapids
+      white water, and shallow beds caustics.
     - An ocean ring extends to the horizon, and the view tints when the camera goes underwater.
 - **Atmosphere & weather.** Physical sky with lit clouds whose shadows drift over the land, stars and a moon;
   valley (height) fog with sunbeams; rain, snow, lightning with thunder, gusts that sweep across fields and
@@ -123,6 +124,14 @@ that any map's terrain layers can use. Sources:
 **Terrain rendering** uses texture arrays with anti-tiling, triplanar projection on cliffs, height-based
 blending between layers, far-distance blending, AO and wet shores. Resolution: _Game settings → Graphics →
 Terrain texture resolution_.
+
+**Large-scale colour variation.** Every layer gets broad patches of lighter / darker, warmer / cooler and drier /
+lusher colour from a smooth, isotropic tiling noise at two scales (≈ 2.3 km and 600 m per repeat, features from
+a few hundred metres down to ~50 m), so a field of one material no longer reads as a repeating tile from above.
+The variation grows with distance (up close the texture detail dominates), and from ~100 m on material layers
+lean towards their average colour (up to 60 % at 750 m), which hides the repeat itself. Strength per layer:
+`macro_variation` (0-2, default 1; 0 = uniform) on the studio's Terrain layers page, in the editor's World →
+Layers tab and in `update_terrain_layer`.
 
 **AI assistance** (Studio → Settings → AI): enter an OpenRouter key (stored encrypted, or set
 `OPENROUTER_API_KEY`) and choose image and text models. Besides generation, the text model can
@@ -360,8 +369,9 @@ leave these values alone:
 | Epic      | 20 km      | ultra (400 m)   | TAA  | GTAO medium | 2K / 16×             | 1 / 1.5× / 250 m                 | 1 / 2×                    |
 | Cinematic | 30 km      | ultra (700 m)   | TAA  | GTAO high   | 2K / 16×             | 1 / 2× / 350 m                   | 1.25 (supersampled) / 3×  |
 
-Low also switches off the LOD cross-fades, grass bending around the character (Foliage group) and the cloud
-shadows (Shadows group); Medium and up have all three.
+Low also switches off the LOD cross-fades, grass bending around the character (Foliage group), the cloud
+shadows (Shadows group), caustics (Shading group) and footprints in snow (Effects group); Medium and up have
+all of them.
 
 **Retina / HiDPI resolution cap.** `max_pixel_ratio` caps the device pixel ratio of the output (the
 canvas); the browser upsamples the canvas to the screen. A MacBook's 2× Retina screen at native resolution
@@ -536,7 +546,9 @@ look over a few seconds, so changes preview smoothly.
 | `cloud_shadow_strength`               | Darkness of the drifting cloud shadows (their coverage follows `cloud_coverage`)                  |
 | `fog_shaft_intensity`                 | Sunbeams through trees and cloud gaps in fog and haze (Camera & look has the sky light shafts)    |
 | `height_fog_height` / `_density`      | Valley fog up to this height above the lowest point of the map (sea level with an ocean); 0 = off |
-| `wetness`                             | Darker, glossier ground with puddles on flat ground; rain also soaks the ground over time         |
+| `wetness`                             | Darker, glossier ground; rain also soaks the ground over time (keeps some puddles standing)       |
+| `puddles` / `puddle_dry_time`         | Rain water collecting in hollows as reflective, rippling puddles (0-1); seconds they take to dry  |
+| `footprint_depth` / `_fade_time`      | The character's footprints in snow (0-1); seconds they take to fade without snowfall              |
 
 How it works (`resources/game/world/`):
 
@@ -559,6 +571,31 @@ How it works (`resources/game/world/`):
   WebAudio (rain and wind noise loops, thunder claps). Browsers only allow sound after a click or key
   press. Set `localStorage['waterways.muted'] = '1'` to mute.
 - **Ground** (`TerrainMaterial.ts`): global wetness and snow cover. Snow settles on flatter ground first.
+- **Puddles** (`Wetness.ts`, `TerrainMaterial.ts`): the ground-state texture (RGBA8 on the splat grid,
+  recomputed after terrain or water edits) holds per terrain sample the wetness next to water, the water depth
+  and a puddle potential: how far the ground lies below a 3 m and a 10 m blur of itself (local hollows) on flat,
+  dry ground. `Weather.ts` keeps a puddle level that rises while it rains (full after about a minute of heavy
+  rain; the map's `wetness` keeps some standing) and falls over `puddle_dry_time` afterwards. Where potential
+  plus some noise exceeds the level, the ground turns into still water: dark, mirror-smooth (roughness 0.02,
+  reflecting the sky through the environment light, and in screen-space reflections when they are on) with
+  rain-drop ripples while it rains, inside a darker soaked rim. Snow covers them.
+- **Footprints in snow** (`SnowTrail.ts`): in play and walk mode the character presses oval prints (left /
+  right, every 0.34 m, heel narrower) into an R8 texture of print depth on a 51 m window that follows it (5 cm
+  texels, toroidal addressing: only the rows and columns that scroll in are cleared). The terrain shader darkens
+  and tints the snow in the prints and bends its normal along their slopes. Prints fade over
+  `footprint_fade_time` without snowfall, within ~20 s in heavy snowfall, and go with the snow when it melts.
+  Graphics `snow_footprints`.
+- **Caustics** (`waterPatterns.ts`, `TerrainMaterial.ts`): on the terrain under water an animated caustic
+  network (an iterated-warp pattern, `caustics_scale` m cells) is projected along the sun or moon direction
+  through the water above, brightening the bed where the waves focus light; strongest from ~0.3 m of water,
+  fading out by `caustics_depth` and with distance (beyond ~150 m). Graphics `caustics`.
+- **Shoreline foam and river flow** (`Water.ts`): the foam band follows the water depth along every shore:
+  dense bubbly lace at the waterline thinning out over `foam_width`, lines rolling in towards the land, broken
+  into drifting patches by low-frequency noise (`foam_breakup`), with a thin contact line where the water
+  touches anything. River splines (splines.json) set the flow direction downstream along their course within
+  the river's width (fastest mid-stream; the end with the lower water is downstream), so flat stretches flow
+  too; elsewhere the downhill surface gradient does. The normals and foam streaks (smeared along the current)
+  are flow-mapped along it.
 
 ## AI agents (MCP server)
 

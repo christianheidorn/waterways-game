@@ -201,7 +201,7 @@ deliberately do not get, with the reason. New UI ships with its MCP tool in the 
 | Toolbar             | Build / Play (P, Alt+P from the player start)                                                                                                                                                                  | `control_editor` `set_mode`; `control_player`                                                                                    |
 | Toolbar             | Undo / Redo (Ctrl+Z / Ctrl+Y)                                                                                                                                                                                  | `control_editor` `undo` / `redo`                                                                                                 |
 | World (7)           | History: the list of undo steps, click one to jump back / forward to it                                                                                                                                        | `control_editor` `history` / `history_jump`                                                                                      |
-| World (7)           | Layers: look (colours, tint, tile size, roughness, normals), material from the library, auto-paint rules (height, slope, priority), ground cover, apply / save biome                                           | `update_terrain_layer`, `list_materials`, `apply_biome`, `save_layer_as_biome`                                                   |
+| World (7)           | Layers: look (colours, tint, tile size, roughness, normals, large-scale variation), material from the library, auto-paint rules (height, slope, priority), ground cover, apply / save biome                    | `update_terrain_layer`, `list_materials`, `apply_biome`, `save_layer_as_biome`                                                   |
 | World (7)           | Weather: every environment field (sun & sky, weather & wind, fog, water, camera & look)                                                                                                                        | `update_environment` (`get_settings` group `environment`)                                                                        |
 | World (7)           | Snapshots: take, list, restore; automatic ones after saves                                                                                                                                                     | `map_snapshots`; settings `update_game_settings` group `editor` (`auto_snapshot_minutes`, `auto_snapshot_keep`)                  |
 | World (7)           | New map: from a template or a description (opens the studio page)                                                                                                                                              | `list_map_templates`, `create_map` `template`; descriptions become an open request (`list_requests`)                             |
@@ -445,6 +445,42 @@ the project; all on from Medium up, off on Low):
 
 Light shafts in fog use the existing `god_rays` switch (off on Low). `take_screenshot` / `take_photo` show all of
 it; gusts and grass bending need a few frames (an open editor in play mode for the character).
+
+## Surfaces and water
+
+Per terrain layer (`update_terrain_layer` / `add_terrain_layer`, the studio's Terrain layers page and the
+editor's World → Layers tab):
+
+| Field             | Default | Range | What it does                                                                                                                              |
+| ----------------- | ------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `macro_variation` | 1       | 0-2   | Large-scale colour variation: broad lighter / darker, warmer / cooler patches that hide the texture repeat from afar (0 = uniform colour) |
+
+Per-map environment fields (`update_environment`, `get_settings` group `environment`; the studio's Maps →
+Environment page (Weather; Shores, rivers & caustics) and the editor's World → Weather tab):
+
+| Field                 | Default | Range     | What it does                                                                                              |
+| --------------------- | ------- | --------- | --------------------------------------------------------------------------------------------------------- |
+| `foam_breakup`        | 0.6     | 0-1       | Breaks the shoreline foam into drifting patches and streaks (0 = an even band)                            |
+| `caustics_intensity`  | 0.8     | 0-2       | Brightness of the caustics the waves focus onto shallow river and lake beds (0 = off)                     |
+| `caustics_scale`      | 2.5     | 0.5-10 m  | Size of the caustic cells                                                                                 |
+| `caustics_depth`      | 4       | 0.5-20 m  | Water depth down to which caustics reach (they fade with depth)                                           |
+| `puddles`             | 0.6     | 0-1       | How much rain collects in hollows as reflective puddles that ripple in the rain; they fill while it rains |
+| `puddle_dry_time`     | 240     | 10-1800 s | How long full puddles take to dry after the rain                                                          |
+| `footprint_depth`     | 0.7     | 0-1       | How deep the character's footprints press into snow cover (0 = none)                                      |
+| `footprint_fade_time` | 300     | 10-1800 s | How long footprints take to fade without snowfall (falling snow fills them within ~20 s)                  |
+
+Rivers flow along their splines (`edit_water` river actions, the editor's river splines; the first point is the
+source unless the water level says otherwise) without an extra field; `flow_speed`, `rapids_foam` (now also the
+foam streaks drifting downstream), `shore_foam`, `foam_width` and `foam_intensity` keep their meaning.
+
+Graphics switches (`set_device_graphics` `settings` for this device, `update_game_settings` group `graphics` for
+the project; on from Medium up, off on Low):
+
+- `caustics` (Shading group): caustics on shallow beds.
+- `snow_footprints` (Effects group): footprints in snow.
+
+`take_screenshot` / `take_photo` show all of it. Footprints need a character walking in snow (play or walk mode
+in an open editor); puddles fill over about a minute of rain (or set `wetness` for standing puddles at once).
 
 ## How it works
 

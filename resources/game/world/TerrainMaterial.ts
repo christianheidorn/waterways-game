@@ -939,10 +939,7 @@ function terrainSurface(u: TerrainUniforms) {
             const hue = macroHue.mul(amount);
             const grey = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
             albedo.assign(
-                max(
-                    mix(albedo, vec3(grey), macroSat.mul(amount).mul(0.7)),
-                    0,
-                ),
+                max(mix(albedo, vec3(grey), macroSat.mul(amount).mul(0.7)), 0),
             );
             albedo.mulAssign(
                 vec3(
@@ -1223,7 +1220,10 @@ function createMacroTexture(): THREE.DataTexture {
                 let v = 0;
 
                 for (const w of waves) {
-                    v += Math.sin((tau * (w.kx * x + w.ky * y)) / size + w.phase) * w.amp;
+                    v +=
+                        Math.sin(
+                            (tau * (w.kx * x + w.ky * y)) / size + w.phase,
+                        ) * w.amp;
                 }
 
                 field[y * size + x] = v;

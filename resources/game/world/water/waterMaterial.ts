@@ -753,12 +753,20 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     }
 
     // Whitecaps: where the surface folds (Jacobian < ~0.5) foam breaks out and lingers.
-    const capCover = smoothstep(0.35, -0.35, minJacobian).mul(u.whitecaps);
+    // Only the strongest folds break; the bubble noise laces the patch (a solid sheet looks painted).
+    // (The FFT's persistent Jacobian lingers below the instantaneous one the sum of waves has.)
+    const capCover = (
+        fft
+            ? smoothstep(0.05, -0.6, minJacobian)
+            : smoothstep(0.6, -0.05, minJacobian)
+    ).mul(u.whitecaps);
     const whitecap = smoothstep(
-        0.25,
-        0.75,
-        capCover.mul(bubbles.mul(0.9).add(0.55)),
-    ).mul(smoothstep(60, 400, viewDist).oneMinus().mul(0.7).add(0.3));
+        0.35,
+        0.95,
+        capCover.mul(bubbles.mul(1.2).add(0.3)),
+    )
+        .mul(0.85)
+        .mul(smoothstep(60, 400, viewDist).oneMinus().mul(0.7).add(0.3));
 
     let layerFoam: Node<'float'> = float(0);
     let layerSlope: Node<'vec2'> = vec2(0);

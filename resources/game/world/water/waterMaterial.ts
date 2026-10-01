@@ -15,6 +15,7 @@ import {
     floor,
     Fn,
     fract,
+    frontFacing,
     fwidth,
     If,
     int,
@@ -33,6 +34,7 @@ import {
     positionWorld,
     pow,
     reflect,
+    refract,
     screenUV,
     select,
     sin,
@@ -113,6 +115,11 @@ export function createWaterUniforms() {
         ),
         /** Highlight pulse of the selected body (editor). */
         highlight: uniform(1),
+        /**
+         * Seen from below: the water's own light (what total internal reflection mirrors outside
+         * Snell's window), set from the body at the camera (Water.setUnderwaterColor).
+         */
+        underColor: uniform(new THREE.Color(0.02, 0.07, 0.08)),
     };
 }
 
@@ -829,9 +836,10 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     // Water body colour (in-scattering): shallow → deep with optical depth.
     const optical = exp(thickness.negate().div(clarity)).oneMinus();
     const body = mix(shallowColor, deepColor, smoothstep(0, 1, optical));
-    material.colorNode = vec4(
-        mix(body.mul(optical).mul(0.9), vec3(0.9, 0.93, 0.95), foam),
-        1,
+    material.colorNode = select(
+        frontFacing,
+        vec4(mix(body.mul(optical).mul(0.9), vec3(0.9, 0.93, 0.95), foam), 1),
+        vec4(0, 0, 0, 1),
     );
     // Roughness: the setting, rain, and the slope variance of waves too small to see (Toksvig-like).
     const alpha0 = u.roughness.add(u.rain.mul(0.05)).pow(2);
@@ -945,7 +953,9 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     const normal = horizonSafe(worldNormal, viewDir).transformDirection(
         cameraViewMatrix,
     );
-    material.normalNode = normal;
+    // Back faces (the surface seen from below) face down, towards the camera.
+    const normalBelow = worldNormal.negate().transformDirection(cameraViewMatrix);
+    material.normalNode = select(frontFacing, normal, normalBelow);
     // Screen-space distortion from the waves: the normal's deviation from flat water (in view space).
     // (The whole view normal would add a constant shift — at grazing angles its y is ~1 — which pulled
     // the reflection's sky haze below the far shore into a pale band along the waterline.)
@@ -1005,12 +1015,48 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
         .mul(sin(u.time.mul(4)).mul(0.5).add(0.5))
         .mul(u.highlight);
 
-    material.emissiveNode = sceneColor(refractUv)
+    const emissiveAbove = sceneColor(refractUv)
         .mul(transmittance)
         .mul(fresnel.oneMinus())
         .mul(foam.oneMinus())
         .add(sss)
         .add(vec3(0.05, 0.35, 0.6).mul(selected.mul(0.35)));
+
+    // ---- the surface from below: Snell's window and total internal reflection
+    // Light from above reaches the eye only within ~48.6° of the (wavy) normal; it is squeezed into
+    // that cone, so the world above shows up compressed and wobbling in a bright disc. Outside it the
+    // surface mirrors the water itself. The murk between the eye and the surface is the underwater
+    // pass' (core/postfx/Underwater.ts).
+    const belowView = Fn(() => {
+        const nDown = worldNormal.negate();
+        const incident = normalize(pos.sub(cameraPosition));
+        const cosI = clamp(dot(incident, worldNormal), 0, 1);
+        const k = float(1).sub(
+            float(WATER_IOR * WATER_IOR).mul(cosI.mul(cosI).oneMinus()),
+        );
+        const cosT = sqrt(max(k, 0));
+        const transmit = float(1)
+            .sub(pow(cosT.oneMinus(), 5).mul(0.98).add(0.02))
+            .mul(smoothstep(0, 0.08, k));
+        const bent = refract(incident, nDown, WATER_IOR);
+        const shift = bent.sub(incident).transformDirection(cameraViewMatrix);
+        const through = sceneColor(
+            clamp(
+                screenUV
+                    .add(vec2(shift.x, shift.y.negate()).mul(0.06))
+                    .add(distortion.mul(0.04)),
+                0.001,
+                0.999,
+            ),
+        );
+        const under = u.underColor as unknown as Node<'vec3'>;
+
+        return through
+            .mul(transmit)
+            .add(under.mul(transmit.oneMinus()))
+            .add(under.mul(foam.mul(1.5)));
+    })();
+    material.emissiveNode = select(frontFacing, emissiveAbove, belowView);
 
     // ---- planar reflection of the dominant level
     const reflClip = u.reflMatrix.mul(vec4(pos.x, u.reflLevel, pos.z, 1));
@@ -1025,13 +1071,22 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     placeholder.minFilter = placeholder.magFilter = THREE.LinearFilter;
     placeholder.needsUpdate = true;
     const reflection = texture(placeholder, reflUv);
-    material.planarNode = reflection.rgb;
-    material.planarWeightNode = u.hasReflection.mul(
-        smoothstep(0.4, 2, abs(pos.y.sub(u.reflLevel))).oneMinus(),
+    // From below the environment / planar reflection is replaced (black): see belowView.
+    material.planarNode = select(frontFacing, reflection.rgb, vec3(0));
+    material.planarWeightNode = select(
+        frontFacing,
+        u.hasReflection.mul(
+            smoothstep(0.4, 2, abs(pos.y.sub(u.reflLevel))).oneMinus(),
+        ),
+        float(1),
     );
 
     material.underNode = sceneColor(screenUV);
-    material.shoreNode = smoothstep(0, 0.18, vertical);
+    material.shoreNode = select(
+        frontFacing,
+        smoothstep(0, 0.18, vertical),
+        float(1),
+    );
 
     return { material, reflection };
 }
@@ -1063,6 +1118,9 @@ function atlasBilinear(
         f.y,
     ) as Node<'vec4'>;
 }
+
+/** Refractive index of water. */
+const WATER_IOR = 1.333;
 
 /**
  * Keeps the mirror direction of a surface normal above the horizon. Steep slopes (ripple rings, choppy

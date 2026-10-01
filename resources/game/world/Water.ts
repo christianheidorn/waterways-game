@@ -621,6 +621,59 @@ export class Water {
         }
     }
 
+    /**
+     * What the water looks like from inside at a position: its colours and clarity (the body's
+     * overrides, else the environment's) and the extinction per metre they imply (the same formula as
+     * the material's absorption), for the underwater view.
+     */
+    underwaterLook(
+        x: number,
+        z: number,
+    ): {
+        shallow: THREE.Color;
+        deep: THREE.Color;
+        clarity: number;
+        sigma: THREE.Vector3;
+    } {
+        const body = this.surface.contains(x, z) ? this.bodies.at(x, z) : null;
+        const s = body?.settings;
+        const shallow = new THREE.Color(
+            s?.shallow_color ?? this.env?.water_shallow_color ?? '#2fa3a0',
+        );
+        const deep = new THREE.Color(
+            s?.deep_color ?? this.env?.water_deep_color ?? '#0b2f45',
+        );
+        const clarity = Math.max(
+            0.05,
+            s?.clarity ?? this.env?.water_clarity ?? 4,
+        );
+        const sigma = new THREE.Vector3(shallow.r, shallow.g, shallow.b)
+            .multiplyScalar(1.4)
+            .clampScalar(0, 0.98)
+            .negate()
+            .addScalar(1)
+            .multiplyScalar(1.6 / clarity)
+            .addScalar(0.02 / clarity);
+
+        return { shallow, deep, clarity, sigma };
+    }
+
+    /**
+     * The camera is at or below the surface: water meshes draw their back faces too (the surface seen
+     * from below, see the material), and `color` is the water's own light for total internal reflection.
+     */
+    setViewFromBelow(below: boolean, color?: THREE.Color): void {
+        const side = below ? THREE.DoubleSide : THREE.FrontSide;
+
+        if (this.material.side !== side) {
+            this.material.side = side;
+        }
+
+        if (color) {
+            this.u.underColor.value.copy(color);
+        }
+    }
+
     /** Water surface height at a world position (still level, no waves), or null when dry. */
     levelAt(x: number, z: number): number | null {
         if (!this.surface.contains(x, z)) {

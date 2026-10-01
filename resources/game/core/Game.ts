@@ -27,6 +27,7 @@ import type { AgentContext } from './AgentCommands';
 import { Player } from '../player/Player';
 import { ThirdPersonCamera } from '../player/ThirdPersonCamera';
 import type { CameraWater } from '../player/ThirdPersonCamera';
+import type { UnderwaterState } from './postfx/Underwater';
 import type {
     GameMode,
     GameStats,
@@ -1636,11 +1637,7 @@ export class Game {
             this.camera.position.x,
             this.camera.position.z,
         );
-        const env = this.atmosphere.environment;
-        this.atmosphere.setUnderwater(
-            waterLevel !== null && this.camera.position.y < waterLevel - 0.05,
-            env?.water_shallow_color,
-        );
+        this.updateUnderwater(dt);
         this.weather?.update(dt, this.camera);
 
         if (this.weather) {
@@ -1672,6 +1669,89 @@ export class Game {
             });
         }
     }
+
+    /**
+     * The camera at or below the water surface: the water draws its underside (Snell's window), the
+     * underwater pass (fog in the body's colour, caustics, shafts, the waterline on the lens) gets this
+     * frame's values, sound is muffled, and the terrain's own caustics give way to the pass' (which
+     * light everything under water). Without the pass (underwater_effects off) a plain scene fog remains.
+     */
+    private updateUnderwater(dt: number): void {
+        const water = this.world.water;
+        const cam = this.camera.position;
+        const sample = water.sampleSurface(cam.x, cam.z, this.lensSurface);
+        const above = sample ? cam.y - sample.height : Infinity;
+        const under = above < 0;
+        const pass = this.postFx.underwaterPass;
+        // The lens reaches about this far above / below the camera's centre.
+        const lens = this.camera.near * 0.8 + 0.05;
+        const look = sample ? water.underwaterLook(cam.x, cam.z) : null;
+        let state: UnderwaterState | null = null;
+
+        if (look && sample) {
+            const sun = this.atmosphere.lightDirection();
+            const sky = this.skyLight;
+            const light = this.sunLight;
+            const ambient =
+                (sky.r + sky.g + sky.b) / 3 +
+                ((light.r + light.g + light.b) / 3) * Math.max(0, sun.y) * 0.5;
+            const tint = look.shallow.clone().lerp(look.deep, 0.55);
+            const fog = tint.clone().multiplyScalar(ambient * 0.35);
+            water.setViewFromBelow(above < 2, fog);
+
+            if (pass && above < lens) {
+                const n = sample.normal;
+                state = {
+                    surface: sample.height,
+                    slopeX: -n.x / Math.max(0.2, n.y),
+                    slopeZ: -n.z / Math.max(0.2, n.y),
+                    time: (this.underwaterClock += dt),
+                    sigma: look.sigma,
+                    fogColor: fog,
+                    shaftColor: light
+                        .clone()
+                        .multiply(look.shallow.clone().lerp(new THREE.Color(1, 1, 1), 0.5))
+                        .multiplyScalar(0.05),
+                    sunDir: sun.clone(),
+                    caustics: {
+                        intensity:
+                            this.manifest.settings.graphics.caustics === false
+                                ? 0
+                                : (this.manifest.environment.caustics_intensity ??
+                                  0.8),
+                        scale: this.manifest.environment.caustics_scale ?? 2.5,
+                        depth:
+                            (this.manifest.environment.caustics_depth ?? 4) * 2,
+                    },
+                };
+            }
+        } else {
+            water.setViewFromBelow(false);
+        }
+
+        this.postFx.setUnderwater(state);
+        this.atmosphere.setUnderwater(
+            under,
+            this.atmosphere.environment?.water_shallow_color,
+            !pass,
+        );
+        this.weather?.setCausticsSuppressed(pass && under);
+        this.underwaterAmount +=
+            ((under ? 1 : 0) - this.underwaterAmount) *
+            (1 - Math.exp(-dt * 10));
+        this.weather?.audio.setUnderwater(this.underwaterAmount);
+    }
+
+    private underwaterClock = 0;
+    private underwaterAmount = 0;
+    private readonly lensSurface: WaterSurfaceSample = {
+        level: 0,
+        height: 0,
+        normal: new THREE.Vector3(),
+        velocity: new THREE.Vector3(),
+        depth: 0,
+        body: null,
+    };
 
     private updatePlay(dt: number): void {
         const input = this.input;

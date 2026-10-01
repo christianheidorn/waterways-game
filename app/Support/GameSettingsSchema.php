@@ -96,6 +96,9 @@ final class GameSettingsSchema
                     'off' => 'Off', 'low' => 'Low', 'medium' => 'Medium', 'high' => 'High',
                 ], 'Interactive ripples around the character: footsteps, splashes and wakes spread as rings, reflect off shores and foam on strong impacts. A wave simulation of 128² / 192² / 256² cells over 40 m (WebGPU compute; on WebGL 2 at most 128², on the CPU).'),
                 SettingField::boolean('water_splashes', 'Water splashes', true, 'Splash, spray and drip particles when the character wades, jumps in or leaves the water, and when objects drop into water.'),
+                SettingField::select('underwater_effects', 'Underwater effects', 'high', [
+                    'off' => 'Off', 'low' => 'Low', 'high' => 'High',
+                ], 'The view below the water surface: absorption and murk in the body\'s colour and clarity, caustics on the bed and objects, a gentle wobble and the waterline on the lens (Low), plus light shafts from the surface (High). Off keeps a plain underwater fog.'),
                 SettingField::boolean('caustics', 'Caustics', true, 'Animated light patterns on shallow river and lake beds.'),
                 SettingField::boolean('snow_footprints', 'Snow footprints', true, 'The character leaves footprints in snow cover that fade and fill with new snow.'),
                 SettingField::select('bounce_light_quality', 'Bounce light', 'medium', [

@@ -129,6 +129,7 @@ const SECTIONS: Section[] = [
             'water_waves',
             'water_ripples',
             'water_splashes',
+            'underwater_effects',
             'caustics',
             'ssr',
             'bounce_light_quality',

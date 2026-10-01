@@ -119,6 +119,8 @@ export class Atmosphere {
     private envDirty = true;
     private envTimer = 0;
     private underwater = false;
+    /** Whether the scene fog turns into underwater fog (see setUnderwater). */
+    private underwaterFog = true;
     /** Cloud shadow inputs (light direction, strength) and the graphics switch. */
     private readonly cloudShadow: CloudShadowInputs = {
         lightDir: uniform(new THREE.Vector3(0, 1, 0)),
@@ -388,12 +390,21 @@ export class Atmosphere {
         }
     }
 
-    setUnderwater(underwater: boolean, shallowColor?: string): void {
-        if (underwater === this.underwater) {
+    /**
+     * @param sceneFog the scene fog turns into underwater murk (false: the underwater post pass does it,
+     *   per pixel, so the part of the view above a waterline on the lens keeps the normal fog)
+     */
+    setUnderwater(
+        underwater: boolean,
+        shallowColor?: string,
+        sceneFog = true,
+    ): void {
+        if (underwater === this.underwater && sceneFog === this.underwaterFog) {
             return;
         }
 
         this.underwater = underwater;
+        this.underwaterFog = sceneFog;
 
         if (shallowColor) {
             this.underwaterColor.set(shallowColor).multiplyScalar(0.35);
@@ -775,7 +786,7 @@ export class Atmosphere {
     private applyFog(): void {
         const c = this.current;
 
-        if (this.underwater) {
+        if (this.underwater && this.underwaterFog) {
             this.fog.color.copy(this.underwaterColor);
             this.fog.density = 0.08;
             heightFogParams.z = 0;

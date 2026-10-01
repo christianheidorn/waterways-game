@@ -58,6 +58,8 @@ export class Weather {
     private puddleFill = 0;
     private walker: TrailWalker | null = null;
     private causticsOn = true;
+    /** The terrain's caustics give way to the underwater pass' (camera under water). */
+    private causticsSuppressed = false;
     private time = 0;
     private nextStrike = 5;
     private windNow = 0;
@@ -146,6 +148,14 @@ export class Weather {
         this.applyCaustics();
     }
 
+    /** Switches the terrain caustics off while the underwater pass lights everything under water. */
+    setCausticsSuppressed(suppressed: boolean): void {
+        if (suppressed !== this.causticsSuppressed) {
+            this.causticsSuppressed = suppressed;
+            this.applyCaustics();
+        }
+    }
+
     private applyCaustics(): void {
         const env = this.env;
 
@@ -154,7 +164,7 @@ export class Weather {
                 env.caustics_intensity ?? 0.8,
                 env.caustics_scale ?? 2.5,
                 env.caustics_depth ?? 4,
-                this.causticsOn,
+                this.causticsOn && !this.causticsSuppressed,
             );
         }
     }

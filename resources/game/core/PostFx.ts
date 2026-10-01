@@ -51,6 +51,8 @@ import { MotionBlur } from './postfx/MotionBlur';
 import type { OutputFeatures } from './postfx/Output';
 import { OutputStage } from './postfx/Output';
 import { TemporalAA } from './postfx/Taa';
+import { Underwater } from './postfx/Underwater';
+import type { UnderwaterState } from './postfx/Underwater';
 import type { GameRenderer } from './renderer';
 
 /**
@@ -100,6 +102,8 @@ type Structure = {
     dof: GraphicsSettings['depth_of_field'];
     motionBlur: GraphicsSettings['motion_blur'];
     flare: boolean;
+    /** The view under water (graphics underwater_effects). */
+    underwater: 'off' | 'low' | 'high';
 };
 
 type Disposable = { dispose(): void };
@@ -124,6 +128,9 @@ type Effects = {
     ssrScale: number;
     godRays: GodRays | null;
     composite: Composite | null;
+    underwater: Underwater | null;
+    /** Input of the underwater pass (what consumers read while it is bypassed). */
+    underwaterInput: TextureNode | null;
     /** Temporal AA at the scene resolution (TAAU when upscaling is `temporal`). */
     taa: TemporalAA | null;
     temporal: TemporalNode | null;
@@ -190,6 +197,8 @@ export class PostFx {
     private look: Look = { ...DEFAULT_LOOK };
     private light: LightSource | null = null;
     private focusPoint: THREE.Vector2 | null = null;
+    /** The camera under (or at) the water surface this frame; null above water. */
+    private underwaterState: UnderwaterState | null = null;
     /** An unlit editor view mode is shown (see setUnlitView). */
     private unlitView = false;
     private readonly savedWhiteBalance = new THREE.Vector3();
@@ -284,6 +293,19 @@ export class PostFx {
         return dof
             ? dof.readFocusDistance(this.renderer)
             : Promise.resolve(null);
+    }
+
+    /**
+     * The water at the camera (null: above water, the underwater pass is skipped). Game sets it every
+     * frame from Water.underwaterLook.
+     */
+    setUnderwater(state: UnderwaterState | null): void {
+        this.underwaterState = state;
+    }
+
+    /** Whether the underwater view is drawn by the post pass (graphics underwater_effects not off). */
+    get underwaterPass(): boolean {
+        return !!this.effects?.underwater;
     }
 
     /**
@@ -469,6 +491,22 @@ export class PostFx {
             });
         }
 
+        // ---- under water (skipped above the surface)
+        if (e.underwater && e.underwaterInput) {
+            const input = e.underwaterInput;
+            const state = this.underwaterState;
+            e.underwater.pass.setBypass(
+                state ? null : input.value,
+                state
+                    ? null
+                    : (input as unknown as { passNode: THREE.Node }).passNode,
+            );
+
+            if (state) {
+                e.underwater.set(state);
+            }
+        }
+
         // ---- motion blur (skipped on camera cuts and for stills rendered with dt 0)
         if (e.motionBlur && e.motionInput) {
             const input = e.motionInput;
@@ -651,6 +689,7 @@ export class PostFx {
                     ? g.motion_blur
                     : 'off',
             flare: !!g.lens_effects && look.lensFlareIntensity > 0.001,
+            underwater: g.underwater_effects ?? 'high',
         };
         const key = JSON.stringify(s);
         let rebuilt = false;
@@ -847,6 +886,18 @@ export class PostFx {
             ? composite.pass.getTextureNode()
             : sceneColor;
 
+        // ---- under water (before TAA: its noise-jittered shafts resolve there)
+        let underwater: Underwater | null = null;
+        let underwaterInput: TextureNode | null = null;
+
+        if (s.underwater !== 'off') {
+            underwaterInput = hdr;
+            underwater = new Underwater(s.underwater, frame, hdr);
+            owned.push(underwater.pass);
+            hdr = underwater.pass.getTextureNode();
+            names.push(`Underwater ${s.underwater}`);
+        }
+
         // ---- anti-aliasing / temporal upscaling
         let temporal: TemporalNode | null = null;
         let taaPass: TemporalAA | null = null;
@@ -945,6 +996,8 @@ export class PostFx {
             ssrScale,
             godRays,
             composite,
+            underwater,
+            underwaterInput,
             taa: taaPass,
             temporal,
             dof,
@@ -992,6 +1045,10 @@ export class PostFx {
 
         if (e.composite) {
             e.composite.pass.scale = low;
+        }
+
+        if (e.underwater) {
+            e.underwater.pass.scale = low;
         }
 
         if (e.taa) {

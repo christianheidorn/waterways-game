@@ -17,7 +17,7 @@ export const CLIMB_MAX = 0.95;
 /** Seconds a climb out of the water takes. */
 export const CLIMB_TIME = 0.45;
 /** Rise speed (m/s) of a submerged character that neither dives nor swims up (it floats up). */
-export const RISE_SPEED = 0.45;
+export const RISE_SPEED = 0.6;
 /** The head counts as under water this far (m) below the surface. */
 export const HEAD_UNDER = 0.05;
 

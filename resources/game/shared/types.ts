@@ -254,6 +254,11 @@ export type GraphicsSettings = {
     water_ripples?: 'off' | 'low' | 'medium' | 'high';
     /** Splash, spray and drip particles from the character and objects in water. */
     water_splashes?: boolean;
+    /**
+     * The view under water: off (scene fog only), low (absorption, caustics, distortion, waterline on
+     * the lens), high (+ light shafts).
+     */
+    underwater_effects?: 'off' | 'low' | 'high';
     /** Footprints in snow cover (a trail texture around the character). */
     snow_footprints: boolean;
     /**

@@ -10,7 +10,7 @@ use Laravel\Mcp\Server\Attributes\Name;
 use Laravel\Mcp\Server\Tools\Annotations\IsReadOnly;
 
 #[Name('get_editor_state')]
-#[Description('Live state of the open editor: mode (edit / play), camera position and direction, view mode, selected tool and layer, unsaved changes, undo / redo availability and rendering stats (fps, draw calls, foliage).')]
+#[Description('Live state of the open editor: mode (edit / play), camera position and direction, view mode, selected tool and layer, unsaved changes, undo / redo availability, rendering stats (fps, draw calls, foliage) and foliage_warnings (e.g. a far LOD skipped because its cut-out texture is opaque on this GPU; rebake that asset).')]
 #[IsReadOnly]
 class GetEditorState extends WaterwaysTool
 {

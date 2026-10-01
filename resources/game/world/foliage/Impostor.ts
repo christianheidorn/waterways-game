@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { isWebGpu } from '../../core/renderer';
 import type { GameRenderer } from '../../core/renderer';
+import { describeCoverage, measureCoverage } from '../../util/alphaCoverage';
 import { keepBackFaceNormals, toNodeMaterial } from './FoliageMaterial';
 
 const IMPOSTOR_ANGLES = [0, 60, 120];
@@ -12,8 +13,13 @@ const IMPOSTOR_SUPERSAMPLE = 2;
 /**
  * Renders a model from 3 horizontal directions into a small atlas and builds 3 crossed quads (6
  * triangles) textured with it — the same impostor layout the baker writes. Uses the game renderer
- * (WebGPU or WebGL 2; each view goes to its own half-float target and is read back asynchronously)
- * and restores its render target / clear state; call outside a render pass. The source materials are
+ * (WebGPU or WebGL 2; each view goes to an 8-bit sRGB target and is read back asynchronously) and
+ * restores its render target / clear state right after each draw (frames rendered while a read-back is
+ * pending keep their own); call outside a render pass.
+ *
+ * 8-bit RGBA rather than half floats: reading RGBA16F back is implementation-defined in WebGL 2
+ * (RGBA / HALF_FLOAT is only guaranteed when the driver reports it; ANGLE on Metal may not), while
+ * RGBA / UNSIGNED_BYTE always works and the sRGB target stores what the atlas needs anyway. The source materials are
  * copied for the capture, so their foliage node versions never see the capture.
  */
 export async function renderImpostor(
@@ -65,7 +71,9 @@ export async function renderImpostor(
     const atlasH = ch;
     const ss = IMPOSTOR_SUPERSAMPLE;
     const target = new THREE.RenderTarget(cw * ss, ch * ss, {
-        type: THREE.HalfFloatType,
+        type: THREE.UnsignedByteType,
+        colorSpace: THREE.SRGBColorSpace,
+        generateMipmaps: false,
     });
     const clones = (Array.isArray(material) ? material : [material]).map(
         captureMaterial,
@@ -93,8 +101,8 @@ export async function renderImpostor(
     const previousTarget = renderer.getRenderTarget();
     const previousClear = renderer.getClearColor(new THREE.Color());
     const previousAlpha = renderer.getClearAlpha();
-    // Bottom-up rows (v = 0 at the bottom of every view), linear half floats.
-    const pixels = new Float32Array(atlasW * ss * atlasH * ss * 4);
+    // Bottom-up rows (v = 0 at the bottom of every view), sRGB colour, linear alpha.
+    const pixels = new Uint8Array(atlasW * ss * atlasH * ss * 4);
     const w = cw * ss;
     const h = ch * ss;
     // WebGPU reads textures top row first; the WebGL backend bottom row first.
@@ -119,13 +127,14 @@ export async function renderImpostor(
             renderer.setRenderTarget(target);
             renderer.render(scene, camera);
             renderer.setRenderTarget(previousTarget);
+            renderer.setClearColor(previousClear, previousAlpha);
             const data = (await renderer.readRenderTargetPixelsAsync(
                 target,
                 0,
                 0,
                 w,
                 h,
-            )) as Uint16Array;
+            )) as Uint8Array;
             // Rows may be padded (WebGPU copies align rows to 256 bytes).
             const stride = h > 1 ? (data.length - w * 4) / (h - 1) : w * 4;
 
@@ -136,9 +145,7 @@ export async function renderImpostor(
                     const o = (y * atlasW * ss + i * w + x) * 4;
 
                     for (let c = 0; c < 4; c++) {
-                        pixels[o + c] = THREE.DataUtils.fromHalfFloat(
-                            data[row + x * 4 + c],
-                        );
+                        pixels[o + c] = data[row + x * 4 + c];
                     }
                 }
             }
@@ -154,10 +161,23 @@ export async function renderImpostor(
         }
     }
 
-    const image = downsample(toSrgb8(pixels), atlasW, atlasH, ss);
+    const image = downsample(pixels, atlasW, atlasH, ss);
 
     if (!dilate(image, atlasW, atlasH)) {
         return null;
+    }
+
+    // Never a box: every view must be a cut-out (an opaque background means the capture lost alpha).
+    const coverage = measureCoverage(
+        image,
+        atlasW,
+        atlasH,
+        'views',
+        IMPOSTOR_ANGLES.length,
+    );
+
+    if (!coverage.ok) {
+        throw new Error(`captured views are ${describeCoverage(coverage)}`);
     }
 
     // Rows are bottom-up, so v = 0 is the bottom of every view.
@@ -205,24 +225,6 @@ function captureMaterial(material: THREE.Material): THREE.Material {
     keepBackFaceNormals(clone);
 
     return clone;
-}
-
-/** Linear float RGBA → 8-bit sRGB colour (alpha stays linear), like an sRGB render target. */
-function toSrgb8(pixels: Float32Array): Uint8Array {
-    const out = new Uint8Array(pixels.length);
-
-    for (let i = 0; i < pixels.length; i += 4) {
-        for (let c = 0; c < 3; c++) {
-            const v = Math.min(1, Math.max(0, pixels[i + c]));
-            const s =
-                v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
-            out[i + c] = Math.round(s * 255);
-        }
-
-        out[i + 3] = Math.round(Math.min(1, Math.max(0, pixels[i + 3])) * 255);
-    }
-
-    return out;
 }
 
 /** Alpha-weighted box filter; blended (premultiplied-looking) edges are un-premultiplied. */

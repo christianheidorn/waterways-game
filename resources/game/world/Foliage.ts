@@ -30,6 +30,7 @@ import {
     INTERACTORS,
     interactionStrength,
     LOD_FADE_BAND,
+    octahedralImpostorInfo,
     RANK_FADE,
     rootTintFor,
     setLodFadeMask,
@@ -61,6 +62,9 @@ import {
 import type { ScatterType } from './foliage/scatter';
 import { HiZ } from './foliage/HiZ';
 import { renderImpostor } from './foliage/Impostor';
+import { measureTextureCoverage } from './foliage/alphaCheck';
+import { describeCoverage } from '../util/alphaCoverage';
+import type { CoverageLayout } from '../util/alphaCoverage';
 import { InstanceBatch } from './foliage/InstanceBatch';
 import type { InstanceView } from './foliage/InstanceBatch';
 import { INSTANCE_FLOATS, writeInstance } from './foliage/instances';
@@ -454,6 +458,8 @@ export class Foliage {
     private lastCamera: THREE.Camera | null = null;
     /** Renderer used to render missing impostors (set explicitly or picked up from a draw). */
     private gl: GameRenderer | null = null;
+    /** Work that needs the renderer outside a render pass (run from update(); see withRenderer). */
+    private readonly gpuTasks: ((gl: GameRenderer) => void)[] = [];
     /** Shared inputs of the GPU culling passes; non-null once the GPU-driven path is active. */
     private gpuFrame: GpuCullFrame | null = null;
     private readonly previousCamera = new THREE.Vector3();
@@ -2116,6 +2122,23 @@ export class Foliage {
         this.insertFlat(renderer, data);
     }
 
+    /**
+     * Problems found while loading the types' models ("<type>: <warning>"): far LODs skipped because
+     * their cut-out texture is opaque on this GPU, failed impostor captures, models that failed to
+     * load. For get_editor_state (profile_performance lists them per type).
+     */
+    loadWarnings(): string[] {
+        const out: string[] = [];
+
+        for (const renderer of this.renderers.values()) {
+            for (const warning of renderer.lodInfo.warnings) {
+                out.push(`${renderer.type.name}: ${warning}`);
+            }
+        }
+
+        return [...new Set(out)];
+    }
+
     /** Foliage rendering statistics for the last evaluated camera (GPU path: last read-back). */
     stats(): FoliageStats {
         const stats: FoliageStats = {
@@ -2334,6 +2357,10 @@ export class Foliage {
         }
 
         if (this.gl) {
+            for (const task of this.gpuTasks.splice(0)) {
+                task(this.gl);
+            }
+
             this.renderPendingImpostor(this.gl);
         }
 
@@ -2755,6 +2782,105 @@ export class Foliage {
         };
     }
 
+    /**
+     * Runs `task` with the renderer from the next update() (outside any render pass); null when no
+     * renderer turns up within `timeout` ms (e.g. a hidden tab) or the task fails.
+     */
+    private withRenderer<T>(
+        task: (gl: GameRenderer) => Promise<T>,
+        timeout = 10_000,
+    ): Promise<T | null> {
+        return new Promise((resolve) => {
+            let done = false;
+            const timer = setTimeout(() => {
+                done = true;
+                resolve(null);
+            }, timeout);
+            this.gpuTasks.push((gl) => {
+                if (done) {
+                    return;
+                }
+
+                done = true;
+                clearTimeout(timer);
+                task(gl).then(resolve, () => resolve(null));
+            });
+        });
+    }
+
+    /**
+     * Alpha coverage of a model's cut-out textures (baked cards, octahedral and crossed-card
+     * impostors), measured once per load as the GPU samples them (see alphaCheck.ts). Returns the
+     * far LODs to skip (an opaque impostor at the end of the chain: the last mesh LOD takes over)
+     * and warnings for the F10 readout, profile_performance and get_editor_state.
+     */
+    private async checkCutouts(
+        lodMaterials: (THREE.Material | THREE.Material[])[],
+    ): Promise<{ skip: Set<number>; warnings: string[] }> {
+        const skip = new Set<number>();
+        const warnings: string[] = [];
+        const checked = new Map<THREE.Texture, Promise<string | null>>();
+
+        for (let lod = 0; lod < lodMaterials.length; lod++) {
+            for (const material of [lodMaterials[lod]].flat()) {
+                const map = (material as THREE.MeshStandardMaterial).map;
+                const octahedral = octahedralImpostorInfo(material);
+                const layout: CoverageLayout | null = octahedral
+                    ? 'octahedral'
+                    : material.name === 'card'
+                      ? 'card'
+                      : material.name.startsWith('impostor')
+                        ? 'views'
+                        : null;
+
+                if (!map || !layout) {
+                    continue;
+                }
+
+                let verdict = checked.get(map);
+
+                if (!verdict) {
+                    const cells =
+                        octahedral?.frames ?? (layout === 'views' ? 3 : 1);
+                    verdict = this.withRenderer((gl) =>
+                        measureTextureCoverage(
+                            gl,
+                            map,
+                            layout,
+                            cells,
+                            octahedral ? cells : 1,
+                        ),
+                    ).then((report) =>
+                        report && !report.ok ? describeCoverage(report) : null,
+                    );
+                    checked.set(map, verdict);
+                }
+
+                const problem = await verdict;
+
+                if (!problem) {
+                    continue;
+                }
+
+                const far =
+                    layout !== 'card' &&
+                    lod > 0 &&
+                    lod === lodMaterials.length - 1;
+                const warning = far
+                    ? `far LOD${lod} impostor skipped, its texture is ${problem}; the last mesh LOD is drawn instead (rebake the asset)`
+                    : `LOD${lod} texture "${material.name}" is ${problem} (draws as a box; rebake the asset or replace its image)`;
+                console.warn(`Foliage: ${warning}`);
+                warnings.push(warning);
+
+                if (far) {
+                    skip.add(lod);
+                }
+            }
+        }
+
+        return { skip, warnings };
+    }
+
     /** Renders at most one missing impostor at a time (outside the render pass). */
     private renderPendingImpostor(gl: GameRenderer): void {
         for (const renderer of this.renderers.values()) {
@@ -2765,6 +2891,7 @@ export class Foliage {
             }
 
             renderer.capturing = true;
+            let failure = 'impostor capture failed';
             void renderImpostor(
                 gl,
                 renderer.lods[0],
@@ -2775,6 +2902,7 @@ export class Foliage {
                         `Could not render an impostor for foliage type ${renderer.type.name}`,
                         error,
                     );
+                    failure = `impostor capture failed: ${error instanceof Error ? error.message : String(error)}`;
 
                     return null;
                 })
@@ -2792,7 +2920,7 @@ export class Foliage {
 
                     if (!built) {
                         renderer.lodInfo.warnings.push(
-                            'no far LOD (impostor capture failed)',
+                            `no far LOD (${failure})`,
                         );
 
                         return;
@@ -4226,6 +4354,30 @@ export class Foliage {
                 return;
             }
 
+            // Cut-out textures (cards, impostors) must be cut out as this GPU samples them: an
+            // opaque far LOD is skipped (the last mesh LOD is drawn further out instead).
+            const sourceCount = lods.length;
+            const cutouts = await this.checkCutouts(lodMaterials);
+
+            if (renderer.disposed) {
+                lods.forEach((g) => g.dispose());
+                new Set(lodMaterials.flat()).forEach((m) => {
+                    disposeMaterialTextures(m);
+                    m.dispose();
+                });
+
+                return;
+            }
+
+            while (lods.length > 1 && cutouts.skip.has(lods.length - 1)) {
+                lods.pop()!.dispose();
+
+                for (const m of [lodMaterials.pop()!].flat()) {
+                    disposeMaterialTextures(m);
+                    m.dispose();
+                }
+            }
+
             const type = renderer.type;
             const tint = new THREE.Color(type.tint || '#ffffff');
 
@@ -4243,7 +4395,10 @@ export class Foliage {
                 type.kind,
                 lods,
                 lodMaterials,
-                pickLodDistances(type, gltf.scene.userData, lods.length),
+                pickLodDistances(type, gltf.scene.userData, sourceCount).slice(
+                    0,
+                    lods.length,
+                ),
             );
 
             if (renderer.disposed) {
@@ -4324,7 +4479,7 @@ export class Foliage {
             renderer.lodInfo = {
                 source: type.asset ? 'baked' : 'model',
                 generated: completed.generated,
-                warnings: completed.warnings,
+                warnings: [...cutouts.warnings, ...completed.warnings],
             };
 
             // Swap existing meshes over right away (the stand-in geometry is disposed below);

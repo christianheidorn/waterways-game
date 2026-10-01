@@ -597,6 +597,9 @@ export function createFoliageMaterial(
 ): THREE.MeshStandardNodeMaterial {
     const material = toNodeMaterial(source, new FoliageNodeMaterial());
     const octahedral = octahedralImpostorInfo(source);
+    // Trees (the kinds without a root tint): the bounce light's probes, ~10 m apart, average a crown
+    // into its cell and would shade the outer leaves like the inner ones; they keep part of the sky.
+    material.userData.bounceOcclusion = options.root ? 1 : TREE_SKY_OCCLUSION;
 
     if (octahedral) {
         octahedralImpostor(material, octahedral, options);
@@ -661,6 +664,9 @@ function lightingOnlyAlbedo(
     };
 }
 
+/** How much of the bounce light's sky occlusion tree crowns take (see createFoliageMaterial). */
+const TREE_SKY_OCCLUSION = 0.6;
+
 /**
  * Light transmitted through leaves and blades (thin, translucent): sky light passing through the
  * canopy, strongest on the undersides the sky doesn't reach directly, plus a glow when the sun or moon
@@ -672,6 +678,7 @@ function leafTranslucency(
     material: THREE.MeshStandardNodeMaterial,
     g: FoliageGlobals,
 ): void {
+    const occlusion = Number(material.userData.bounceOcclusion ?? 1);
     const albedo = diffuseColor.rgb;
     const green = albedo.g
         .sub(max(albedo.r, albedo.b))
@@ -685,7 +692,7 @@ function leafTranslucency(
     // Less sky gets through where the bounce light's probes see little of it (under other crowns).
     const sky = g.skyLight
         .mul(mix(0.18, 0.45, underside))
-        .mul(bounceSkyVisibility());
+        .mul(bounceSkyVisibility(occlusion));
     const toCamera = normalize(cameraPosition.sub(positionWorld));
     const backlit = max(dot(toCamera.negate(), g.sunDir), 0).pow(4);
     const sun = g.sunLight.mul(backlit.mul(0.25));

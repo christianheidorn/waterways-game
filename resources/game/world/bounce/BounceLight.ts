@@ -128,8 +128,10 @@ function probes(): { a: Node<'vec4'>; b: Node<'vec4'>; c: Node<'vec4'> } {
  * Sky visibility at the shaded point raised to the bounce strength: 1 without bounce light. For
  * shading terms of their own that stand for sky light (e.g. the foliage's light through leaves).
  */
-export function bounceSkyVisibility(): Node<'float'> {
-    return pow(max(probes().a.w, float(0.02)), shared.strength) as Node<'float'>;
+export function bounceSkyVisibility(weight = 1): Node<'float'> {
+    const occ = pow(max(probes().a.w, float(0.02)), shared.strength);
+
+    return (weight >= 1 ? occ : mix(float(1), occ, weight)) as Node<'float'>;
 }
 
 function emptyAtlas(res = 1): THREE.DataTexture {
@@ -493,12 +495,9 @@ export class BounceLight {
      * (0-1, default 1) for surfaces the coarse probes can't place well (e.g. the outer leaves of a crown).
      */
     private occlusion(builder: THREE.NodeBuilder): Node<'float'> {
-        const occ = bounceSkyVisibility();
-        const weight = Number(
-            builder.material?.userData?.bounceOcclusion ?? 1,
+        return bounceSkyVisibility(
+            Number(builder.material?.userData?.bounceOcclusion ?? 1),
         );
-
-        return (weight >= 1 ? occ : mix(float(1), occ, weight)) as Node<'float'>;
     }
 
     /**

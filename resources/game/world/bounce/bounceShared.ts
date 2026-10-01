@@ -8,7 +8,8 @@
  * - A: bounce irradiance per unit of sun irradiance (rgb, averaged over all normals) and the sky
  *   visibility (w: cosine-weighted fraction of the upper hemisphere that reaches the sky),
  * - B: bounce irradiance per unit of sky irradiance (rgb),
- * - C: the dominant direction the bounce comes from (xyz, scaled so E(n) = E × max(0, 1 + n·d)).
+ * - C: the dominant direction the bounce comes from (xyz, scaled so E(n) = E × max(0, 1 + n·d)) and
+ *   the probe column's ground height (w, relative to a reference height; the same in every layer).
  *
  * Splitting the bounce into a sun and a sky part keeps weather, cloud and colour changes free (they
  * only change two uniforms): only a new sun / moon direction or an edit needs the worker.
@@ -62,6 +63,8 @@ export type BounceRequest =
           /** Probe columns per side (the scene grid is twice as fine). */
           res: number;
           rays: number;
+          /** Height the probe ground (C.w) is stored relative to. */
+          reference: number;
           /** Direction towards the sun / moon. */
           light: [number, number, number];
       }
@@ -81,13 +84,6 @@ export type BounceTile = {
 };
 
 export type BounceResponse =
-    | {
-          op: 'base';
-          /** Probe ground (max of terrain and water) relative to `min`, half floats, res². */
-          heights: Uint16Array;
-          min: number;
-          res: number;
-      }
     | { op: 'tiles'; tiles: BounceTile[]; remaining: number }
     | {
           op: 'done';

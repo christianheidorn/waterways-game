@@ -64,6 +64,7 @@ let levels: Level[] = [];
 let maxTop = 0;
 let half = 0;
 let probeBase: Float32Array = new Float32Array(0);
+let reference = 0;
 let dirty: Uint8Array = new Uint8Array(0);
 let tilesPerSide = 0;
 let focus = { x: 0, z: 0 };
@@ -79,6 +80,7 @@ self.onmessage = (event: MessageEvent<BounceRequest>) => {
 
     switch (msg.op) {
         case 'scene':
+            reference = msg.reference;
             setScene(msg.scene, msg.res, msg.rays, msg.light);
             break;
         case 'light':
@@ -583,8 +585,6 @@ function computeProbeBase(): void {
     const n = s.n;
     const ratio = n / res;
     probeBase = new Float32Array(res * res);
-    let min = Infinity;
-
     for (let z = 0; z < res; z++) {
         for (let x = 0; x < res; x++) {
             let sum = 0;
@@ -601,17 +601,9 @@ function computeProbeBase(): void {
 
             const v = sum / count;
             probeBase[z * res + x] = v;
-            min = Math.min(min, v);
         }
     }
 
-    const heights = new Uint16Array(res * res);
-
-    for (let i = 0; i < res * res; i++) {
-        heights[i] = toHalf(probeBase[i] - min);
-    }
-
-    post({ op: 'base', heights, min, res }, [heights.buffer]);
 }
 
 /** Marks the tiles near cells whose geometry or radiance changed. */
@@ -770,7 +762,7 @@ function computeTile(tx: number, tz: number): BounceTile {
                 c[o] = toHalf(dx * inv);
                 c[o + 1] = toHalf(dy * inv);
                 c[o + 2] = toHalf(dz * inv);
-                c[o + 3] = toHalf(1);
+                c[o + 3] = toHalf(probeBase[pz * res + px] - reference);
             }
         }
     }

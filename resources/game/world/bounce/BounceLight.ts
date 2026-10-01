@@ -64,14 +64,13 @@ const LIGHT_EPSILON = 0.026;
 const VIEW_GAIN = 3;
 
 /**
- * The probe textures and the shading uniforms, shared by every material (one game per page). The
- * textures start as a single empty probe: no bounce, full sky visibility.
+ * The probe texture and the shading uniforms, shared by every material (one game per page). One
+ * texture keeps the terrain shader within WebGPU's 16 sampled textures per stage: an atlas 3·res wide
+ * (A | B | C side by side) and res·layers high (the layers stacked). It starts as one empty probe: no
+ * bounce, full sky visibility.
  */
 const shared = {
-    a: texture(emptyVolume()),
-    b: texture(emptyVolume()),
-    c: texture(emptyVolume()),
-    h: texture(emptyHeights()),
+    probes: texture(emptyAtlas()),
     /** Probe columns per side. */
     res: uniform(1),
     /** Sun / moon irradiance (colour × intensity) and the sky's irradiance on flat open ground. */
@@ -81,7 +80,8 @@ const shared = {
     strength: uniform(0),
     half: uniform(1024),
     size: uniform(2048),
-    base: uniform(0),
+    /** Height the probes' ground (C.w) is stored relative to (half floats). */
+    reference: uniform(0),
     /** 1 in the "Bounce light only" view. */
     view: uniform(0),
 };
@@ -89,8 +89,19 @@ const shared = {
 /** Probe values at the shaded point: A (sun bounce, sky visibility), B (sky bounce), C (direction). */
 function probes(): { a: Node<'vec4'>; b: Node<'vec4'>; c: Node<'vec4'> } {
     const u = shared;
+    const tex = u.probes;
     const uv = positionWorld.xz.add(u.half).div(u.size);
-    const ground = u.h.sample(uv).r.add(u.base);
+    // Texel coordinates clamped inside a block, so filtering never reaches a neighbouring one.
+    const col = uv.x.mul(u.res).clamp(0.5, u.res.sub(0.5));
+    const row = uv.y.mul(u.res).clamp(0.5, u.res.sub(0.5));
+    const width = u.res.mul(3);
+    const rows = u.res.mul(PROBE_LAYERS);
+    const at = (block: number, layer: Node<'float'>) =>
+        vec2(
+            col.add(u.res.mul(block)).div(width),
+            layer.mul(u.res).add(row).div(rows),
+        );
+    const ground = tex.sample(at(2, float(0))).w.add(u.reference);
     const above = positionWorld.y.sub(ground);
     // Piecewise linear over the layer heights (1, 5, 13, 30 m; see PROBE_HEIGHTS).
     const layer = above
@@ -99,21 +110,18 @@ function probes(): { a: Node<'vec4'>; b: Node<'vec4'>; c: Node<'vec4'> } {
         .clamp(0, 1)
         .add(above.sub(5).div(8).clamp(0, 1))
         .add(above.sub(13).div(17).clamp(0, 1));
-    // The layers are stacked vertically in one 2D texture (res × res·layers): the two around the
-    // shaded height are sampled (rows clamped inside their layer) and blended.
+    // The two layers around the shaded height, blended.
     const lower = floor(layer).toVar();
     const upper = min(lower.add(1), float(PROBE_LAYERS - 1));
     const t = layer.sub(lower);
-    const row = uv.y.mul(u.res).clamp(0.5, u.res.sub(0.5));
-    const rows = u.res.mul(PROBE_LAYERS);
-    const at = (l: Node<'float'>) =>
-        vec2(uv.x, l.mul(u.res).add(row).div(rows));
-    const lo = at(lower);
-    const hi = at(upper);
-    const blend = (tex: THREE.TextureNode) =>
-        mix(tex.sample(lo), tex.sample(hi), t) as Node<'vec4'>;
+    const blend = (block: number) =>
+        mix(
+            tex.sample(at(block, lower)),
+            tex.sample(at(block, upper)),
+            t,
+        ) as Node<'vec4'>;
 
-    return { a: blend(u.a), b: blend(u.b), c: blend(u.c) };
+    return { a: blend(0), b: blend(1), c: blend(2) };
 }
 
 /**
@@ -124,39 +132,23 @@ export function bounceSkyVisibility(): Node<'float'> {
     return pow(max(probes().a.w, float(0.02)), shared.strength) as Node<'float'>;
 }
 
-function emptyVolume(res = 1): THREE.DataTexture {
-    const data = new Uint16Array(res * res * PROBE_LAYERS * 4);
+function emptyAtlas(res = 1): THREE.DataTexture {
+    const width = res * 3;
+    const data = new Uint16Array(width * res * PROBE_LAYERS * 4);
     // Empty probes: no bounce, full sky visibility (A.w = 1.0 in half float).
     const one = 0x3c00;
 
-    for (let i = 3; i < data.length; i += 4) {
-        data[i] = one;
+    for (let row = 0; row < res * PROBE_LAYERS; row++) {
+        for (let x = 0; x < res; x++) {
+            data[(row * width + x) * 4 + 3] = one;
+        }
     }
 
-    // Same memory layout as a res × res × layers volume: layer-major, then rows, then columns.
     const tex = new THREE.DataTexture(
         data,
-        res,
+        width,
         res * PROBE_LAYERS,
         THREE.RGBAFormat,
-        THREE.HalfFloatType,
-    );
-    tex.minFilter = THREE.LinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    tex.wrapS = THREE.ClampToEdgeWrapping;
-    tex.wrapT = THREE.ClampToEdgeWrapping;
-    tex.generateMipmaps = false;
-    tex.needsUpdate = true;
-
-    return tex;
-}
-
-function emptyHeights(res = 1): THREE.DataTexture {
-    const tex = new THREE.DataTexture(
-        new Uint16Array(res * res),
-        res,
-        res,
-        THREE.RedFormat,
         THREE.HalfFloatType,
     );
     tex.minFilter = THREE.LinearFilter;
@@ -199,10 +191,7 @@ export class BounceLight {
     private rays = 0;
     private installed = false;
     private worker: Worker | null = null;
-    private aTex = shared.a.value as THREE.DataTexture;
-    private bTex = shared.b.value as THREE.DataTexture;
-    private cTex = shared.c.value as THREE.DataTexture;
-    private hTex = shared.h.value as THREE.DataTexture;
+    private atlas = shared.probes.value as THREE.DataTexture;
     private readonly u = shared;
     private envStrength = 1;
     private build: Generator<void, BounceScene | null> | null = null;
@@ -226,6 +215,7 @@ export class BounceLight {
     ) {
         this.u.half.value = sources.heights.half;
         this.u.size.value = sources.heights.size;
+        this.u.reference.value = sources.heights.minMax().min;
     }
 
     /** Graphics quality (off removes it from every shader). */
@@ -395,9 +385,7 @@ export class BounceLight {
         if (this.uploadPending && this.uploadCooldown <= 0) {
             this.uploadPending = false;
             this.uploadCooldown = this.pendingTiles > 0 ? 0.35 : 0;
-            this.aTex.needsUpdate = true;
-            this.bTex.needsUpdate = true;
-            this.cTex.needsUpdate = true;
+            this.atlas.needsUpdate = true;
         }
     }
 
@@ -440,10 +428,7 @@ export class BounceLight {
     dispose(): void {
         this.stopWorker();
         this.uninstall();
-        this.aTex.dispose();
-        this.bTex.dispose();
-        this.cTex.dispose();
-        this.hTex.dispose();
+        this.atlas.dispose();
     }
 
     // ------------------------------------------------------------------ shading
@@ -528,20 +513,11 @@ export class BounceLight {
     // ------------------------------------------------------------------ textures
 
     private replaceTextures(res: number): void {
-        const old = [this.aTex, this.bTex, this.cTex, this.hTex];
-        this.aTex = emptyVolume(res);
-        this.bTex = emptyVolume(res);
-        this.cTex = emptyVolume(res);
-        this.hTex = emptyHeights(res);
-        shared.a.value = this.aTex;
-        shared.b.value = this.bTex;
-        shared.c.value = this.cTex;
-        shared.h.value = this.hTex;
+        const old = this.atlas;
+        this.atlas = emptyAtlas(res);
+        shared.probes.value = this.atlas;
         shared.res.value = res;
-
-        for (const tex of old) {
-            tex.dispose();
-        }
+        old.dispose();
     }
 
     // ------------------------------------------------------------------ worker
@@ -595,6 +571,7 @@ export class BounceLight {
                 scene,
                 res: this.res,
                 rays: this.rays,
+                reference: this.u.reference.value,
                 light: [lightDir.x, lightDir.y, lightDir.z],
             },
             [
@@ -611,25 +588,10 @@ export class BounceLight {
     }
 
     private receive(msg: BounceResponse): void {
-        if (msg.op === 'base') {
-            if (msg.res !== this.res) {
-                return;
-            }
-
-            (this.hTex.image.data as Uint16Array).set(msg.heights);
-            this.hTex.needsUpdate = true;
-            this.u.base.value = msg.min;
-
-            return;
-        }
-
         if (msg.op === 'tiles') {
             const res = this.res;
-            const targets = [
-                this.aTex.image.data as Uint16Array,
-                this.bTex.image.data as Uint16Array,
-                this.cTex.image.data as Uint16Array,
-            ];
+            const width = res * 3;
+            const atlas = this.atlas.image.data as Uint16Array;
 
             for (const tile of msg.tiles) {
                 if (tile.x0 + tile.w > res || tile.z0 + tile.h > res) {
@@ -638,16 +600,18 @@ export class BounceLight {
 
                 const sources = [tile.a, tile.b, tile.c];
 
-                for (let i = 0; i < 3; i++) {
-                    const src = sources[i];
-                    const dst = targets[i];
+                for (let block = 0; block < 3; block++) {
+                    const src = sources[block];
 
                     for (let layer = 0; layer < PROBE_LAYERS; layer++) {
                         for (let z = 0; z < tile.h; z++) {
-                            const from = ((layer * tile.h + z) * tile.w) * 4;
+                            const from = (layer * tile.h + z) * tile.w * 4;
                             const to =
-                                ((layer * res + tile.z0 + z) * res + tile.x0) * 4;
-                            dst.set(src.subarray(from, from + tile.w * 4), to);
+                                ((layer * res + tile.z0 + z) * width +
+                                    block * res +
+                                    tile.x0) *
+                                4;
+                            atlas.set(src.subarray(from, from + tile.w * 4), to);
                         }
                     }
                 }

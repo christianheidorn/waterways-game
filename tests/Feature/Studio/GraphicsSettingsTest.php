@@ -41,6 +41,7 @@ class GraphicsSettingsTest extends TestCase
         $this->assertTrue($defaults['cloud_shadows']);
         $this->assertTrue($defaults['caustics']);
         $this->assertTrue($defaults['snow_footprints']);
+        $this->assertSame('medium', $defaults['bounce_light_quality']);
         $this->assertArrayHasKey('bloom_intensity', $defaults);
         // Legacy switch stays for compatibility.
         $this->assertArrayHasKey('antialias', $defaults);

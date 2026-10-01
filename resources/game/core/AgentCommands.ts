@@ -76,6 +76,7 @@ export type AgentContext = {
 const VIEW_MODES: readonly TerrainViewMode[] = [
     'lit',
     'lighting',
+    'bounce',
     'layers',
     'slope',
     'height',

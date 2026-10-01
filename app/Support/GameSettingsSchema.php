@@ -91,6 +91,9 @@ final class GameSettingsSchema
                 ], 'Resolution of the refraction/depth pass and planar reflections used by water.'),
                 SettingField::boolean('caustics', 'Caustics', true, 'Animated light patterns on shallow river and lake beds.'),
                 SettingField::boolean('snow_footprints', 'Snow footprints', true, 'The character leaves footprints in snow cover that fade and fill with new snow.'),
+                SettingField::select('bounce_light_quality', 'Bounce light', 'medium', [
+                    'off' => 'Off', 'low' => 'Low', 'medium' => 'Medium', 'high' => 'High',
+                ], 'Light bounced off the ground, trees and props (diffuse global illumination from a grid of irradiance probes, computed in the background): darker forest floors, warm and green valleys. Low / Medium / High: 128² / 192² / 256² probe columns over the map, 16 / 24 / 32 rays per probe.'),
                 // Foliage
                 SettingField::number('foliage_density', 'Foliage density', 1, 0, 1, 0.05, '×', 'Scales the number of rendered foliage instances.'),
                 SettingField::number('foliage_distance', 'Foliage distance', 1, 0.25, 3, 0.05, '×', 'Scales every foliage type\'s cull distance.'),

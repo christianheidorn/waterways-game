@@ -1,3 +1,4 @@
+import { bounceSkyVisibility } from '../bounce/BounceLight';
 import * as THREE from 'three/webgpu';
 import {
     abs,
@@ -681,7 +682,10 @@ function leafTranslucency(
         mix(0.35, 1, green),
     );
     const underside = normalWorld.y.mul(-0.5).add(0.5);
-    const sky = g.skyLight.mul(mix(0.18, 0.45, underside));
+    // Less sky gets through where the bounce light's probes see little of it (under other crowns).
+    const sky = g.skyLight
+        .mul(mix(0.18, 0.45, underside))
+        .mul(bounceSkyVisibility());
     const toCamera = normalize(cameraPosition.sub(positionWorld));
     const backlit = max(dot(toCamera.negate(), g.sunDir), 0).pow(4);
     const sun = g.sunLight.mul(backlit.mul(0.25));

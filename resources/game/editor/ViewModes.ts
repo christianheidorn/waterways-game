@@ -31,6 +31,11 @@ export const VIEW_MODES: ViewModeInfo[] = [
         description: 'Grey albedo: judge light, shadows and AO',
     },
     {
+        id: 'bounce',
+        label: 'Bounce light only',
+        description: 'Only the indirect light bounced off the ground, trees and props',
+    },
+    {
         id: 'layers',
         label: 'Layers',
         description: 'Each terrain layer in its own colour',
@@ -74,6 +79,10 @@ export type ViewModeTargets = {
     /** Collider outlines (collision view) and the camera they are gathered around. */
     collision: CollisionDebug;
     camera: THREE.Camera;
+    /** Bounce light only: every other light off (Atmosphere) and the bounce brightened. */
+    setBounceView: (on: boolean) => void;
+    /** Whether the bounce light is on in the current graphics quality and environment. */
+    bounceActive: () => boolean;
 };
 
 /** Minimum time between two recomputations of the density grid or height range (s). */
@@ -202,6 +211,14 @@ export class ViewModes {
                     entries: [],
                     note: 'Grey albedo on terrain and foliage',
                 };
+            case 'bounce':
+                return {
+                    kind: 'swatches',
+                    entries: [],
+                    note: this.targets.bounceActive()
+                        ? 'Indirect diffuse light only, ×3, grey albedo on terrain and foliage'
+                        : 'Bounce light is off (graphics quality or the map\'s bounce strength)',
+                };
             case 'wireframe':
                 return {
                     kind: 'swatches',
@@ -234,9 +251,12 @@ export class ViewModes {
         const mode = this.suspended ? 'lit' : this.mode;
         const { material, foliage, postFx } = this.targets;
         material.debug.setMode(mode);
-        foliage.setLightingOnly(mode === 'lighting');
+        foliage.setLightingOnly(mode === 'lighting' || mode === 'bounce');
+        this.targets.setBounceView(mode === 'bounce');
         this.targets.collision.setVisible(mode === 'collision');
-        postFx.setUnlitView(mode !== 'lit' && mode !== 'lighting');
+        postFx.setUnlitView(
+            mode !== 'lit' && mode !== 'lighting' && mode !== 'bounce',
+        );
     }
 
     /** Recomputes the current mode's data if its source changed. */

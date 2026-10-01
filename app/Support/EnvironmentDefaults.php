@@ -32,6 +32,7 @@ final class EnvironmentDefaults
             SettingField::number('cloud_shadow_strength', 'Cloud shadows', 0.6, 0, 1, 0.01, null, 'How much the shadows of drifting clouds darken the ground, water, plants and props. How much of the land they cover follows the cloud coverage.'),
             SettingField::number('fog_density', 'Fog density', 0.00018, 0, 0.004, 0.00001),
             SettingField::number('exposure', 'Exposure', 0.5, 0.1, 2, 0.01),
+            SettingField::number('bounce_light', 'Bounce light', 1, 0, 2, 0.01, null, 'Sunlight and skylight bounced off the ground, trees and props: valleys pick up the warm or green light of their slopes and forests get darker underneath (1 = physical, 0 = off). Needs the Bounce light graphics setting.'),
             SettingField::number('wind_strength', 'Wind strength', 0.4, 0, 2, 0.01),
             SettingField::number('wind_direction', 'Wind direction', 45, 0, 360, 1, '°', 'Direction the wind blows towards (0 = north, 90 = east). Moves clouds and slants rain.'),
             SettingField::number('gust_strength', 'Gust strength', 0.5, 0, 2, 0.01, null, 'Gusts that travel downwind across grass fields and canopies as visible waves (0 = steady wind).'),

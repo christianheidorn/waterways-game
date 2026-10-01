@@ -109,6 +109,18 @@ class WeatherEnvironmentTest extends TestCase
         ])->assertSessionHasErrors(['gust_strength', 'gust_scale', 'gust_speed', 'cloud_shadow_strength', 'fog_shaft_intensity']);
     }
 
+    public function test_bounce_light_strength_is_saved_and_range_checked(): void
+    {
+        $map = Map::factory()->create();
+
+        $this->put("/maps/{$map->slug}/environment", ['bounce_light' => 1.3])
+            ->assertSessionHasNoErrors()->assertRedirect();
+        $this->assertSame(1.3, $map->fresh()->resolvedEnvironment()['bounce_light']);
+
+        $this->put("/maps/{$map->slug}/environment", ['bounce_light' => 3])->assertSessionHasErrors(['bounce_light']);
+        $this->put("/maps/{$map->slug}/environment", ['bounce_light' => -1])->assertSessionHasErrors(['bounce_light']);
+    }
+
     public function test_foam_caustics_puddles_and_footprints_are_saved_and_range_checked(): void
     {
         $map = Map::factory()->create();

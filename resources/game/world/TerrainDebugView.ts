@@ -34,6 +34,7 @@ import {
 export type TerrainViewMode =
     | 'lit'
     | 'lighting'
+    | 'bounce'
     | 'layers'
     | 'slope'
     | 'height'
@@ -45,6 +46,8 @@ export type TerrainViewMode =
 const VIEW_INDEX: Record<TerrainViewMode, number> = {
     lit: 0,
     lighting: 1,
+    // Grey albedo like `lighting`; every light but the bounce light is switched off.
+    bounce: 1,
     layers: 2,
     slope: 3,
     height: 4,

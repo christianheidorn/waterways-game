@@ -283,7 +283,8 @@ export class Game {
             syncFlyCamera: () => this.editor.fly.setFromCamera(),
             viewMode: () => this.viewModes.current,
             setViewMode: (mode) => this.viewModes.set(mode),
-            settling: () => this.world.foliage.settling,
+            settling: () =>
+                this.world.foliage.settling || !!this.bounce?.settling,
             capture: (maxWidth) => this.captureImage(maxWidth),
             unsaved: () => [...this.dirty],
             save: () => this.save(),
@@ -431,6 +432,8 @@ export class Game {
                     editor_worker: !!this.editorWorker?.available,
                     device_pixel_ratio: round2(window.devicePixelRatio),
                     quality_preset: g.quality_preset,
+                    // Irradiance probes: grid, rays, worker time of the last update.
+                    bounce_light: this.bounce?.stats() ?? null,
                 };
             },
             onFrame: (listener) => {
@@ -997,6 +1000,11 @@ export class Game {
             postFx: this.postFx,
             heights: this.world.heights,
             layers: () => this.manifest.layers,
+            setBounceView: (on) => {
+                this.bounce?.setView(on);
+                this.atmosphere.setLightsOff(on);
+            },
+            bounceActive: () => !!this.bounce?.active,
         });
 
         this.editor = new Editor(

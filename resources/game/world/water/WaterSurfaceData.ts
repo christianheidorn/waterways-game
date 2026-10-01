@@ -47,12 +47,26 @@ export class WaterSurfaceData {
         this.levelPixels = new Float32Array(n * n * 2);
         this.dataPixels = new Uint16Array(n * n * 4);
 
-        this.levelTexture = new THREE.DataTexture(this.levelPixels, n, n, THREE.RGFormat, THREE.FloatType);
-        this.levelTexture.minFilter = this.levelTexture.magFilter = THREE.NearestFilter;
+        this.levelTexture = new THREE.DataTexture(
+            this.levelPixels,
+            n,
+            n,
+            THREE.RGFormat,
+            THREE.FloatType,
+        );
+        this.levelTexture.minFilter = this.levelTexture.magFilter =
+            THREE.NearestFilter;
         this.levelTexture.generateMipmaps = false;
         this.levelTexture.name = 'Water level';
-        this.dataTexture = new THREE.DataTexture(this.dataPixels, n, n, THREE.RGBAFormat, THREE.HalfFloatType);
-        this.dataTexture.minFilter = this.dataTexture.magFilter = THREE.LinearFilter;
+        this.dataTexture = new THREE.DataTexture(
+            this.dataPixels,
+            n,
+            n,
+            THREE.RGBAFormat,
+            THREE.HalfFloatType,
+        );
+        this.dataTexture.minFilter = this.dataTexture.magFilter =
+            THREE.LinearFilter;
         this.dataTexture.generateMipmaps = false;
         this.dataTexture.name = 'Water data';
     }
@@ -101,7 +115,9 @@ export class WaterSurfaceData {
                         }
                     }
 
-                    h = Number.isFinite(lowest) ? lowest : this.terrain.get(c, r) - 2;
+                    h = Number.isFinite(lowest)
+                        ? lowest
+                        : this.terrain.get(c, r) - 2;
                 }
 
                 wet[(j - j0) * (i1 - i0 + 1) + (i - i0)] = w ? 1 : 0;
@@ -115,7 +131,9 @@ export class WaterSurfaceData {
                 return wet[(j - j0) * (i1 - i0 + 1) + (i - i0)] === 1;
             }
 
-            return isWet(hf.get(Math.min(n - 1, i) * s, Math.min(n - 1, j) * s));
+            return isWet(
+                hf.get(Math.min(n - 1, i) * s, Math.min(n - 1, j) * s),
+            );
         };
 
         for (let j = j0; j <= j1; j++) {
@@ -129,7 +147,11 @@ export class WaterSurfaceData {
                     const b = this.level[k + 1];
                     const c = this.level[k + n];
                     const d = this.level[k + n + 1];
-                    const any = wetAt(i, j) || wetAt(i + 1, j) || wetAt(i, j + 1) || wetAt(i + 1, j + 1);
+                    const any =
+                        wetAt(i, j) ||
+                        wetAt(i + 1, j) ||
+                        wetAt(i, j + 1) ||
+                        wetAt(i + 1, j + 1);
                     const spread = Math.max(a, b, c, d) - Math.min(a, b, c, d);
                     drawn = any && spread <= this.wallLimit ? 1 : 0;
                 }
@@ -150,7 +172,9 @@ export class WaterSurfaceData {
                 let fz = mag > 1e-5 && mag < 2 ? (gz / mag) * speed : 0;
 
                 if (riverFlow) {
-                    const g = Math.min(res - 1, j * s) * res + Math.min(res - 1, i * s);
+                    const g =
+                        Math.min(res - 1, j * s) * res +
+                        Math.min(res - 1, i * s);
                     const rx = riverFlow[g * 2];
                     const rz = riverFlow[g * 2 + 1];
                     const base = Math.hypot(rx, rz);
@@ -197,7 +221,13 @@ export class WaterSurfaceData {
                         const cc = c + dx;
                         const rr = r + dz;
 
-                        if (cc >= 0 && rr >= 0 && cc < res && rr < res && labels[rr * res + cc] > 0) {
+                        if (
+                            cc >= 0 &&
+                            rr >= 0 &&
+                            cc < res &&
+                            rr < res &&
+                            labels[rr * res + cc] > 0
+                        ) {
                             label = labels[rr * res + cc];
                             break;
                         }
@@ -217,7 +247,11 @@ export class WaterSurfaceData {
     }
 
     /** Flow (x, z, 0-1 speed) at a world position. */
-    flowAt(x: number, z: number, out: { x: number; z: number }): { x: number; z: number } {
+    flowAt(
+        x: number,
+        z: number,
+        out: { x: number; z: number },
+    ): { x: number; z: number } {
         out.x = this.bilinear(this.flow, x, z, 2, 0);
         out.z = this.bilinear(this.flow, x, z, 2, 1);
 
@@ -233,10 +267,22 @@ export class WaterSurfaceData {
         return i < 0 || j < 0 || i >= n || j >= n ? 0 : this.body[j * n + i];
     }
 
-    private bilinear(arr: Float32Array, x: number, z: number, stride: number, offset: number): number {
+    private bilinear(
+        arr: Float32Array,
+        x: number,
+        z: number,
+        stride: number,
+        offset: number,
+    ): number {
         const n = this.size;
-        const gx = Math.min(n - 1.0001, Math.max(0, (x + this.surface.half) / this.spacing));
-        const gz = Math.min(n - 1.0001, Math.max(0, (z + this.surface.half) / this.spacing));
+        const gx = Math.min(
+            n - 1.0001,
+            Math.max(0, (x + this.surface.half) / this.spacing),
+        );
+        const gz = Math.min(
+            n - 1.0001,
+            Math.max(0, (z + this.surface.half) / this.spacing),
+        );
         const i = Math.floor(gx);
         const j = Math.floor(gz);
         const fx = gx - i;
@@ -251,7 +297,7 @@ export class WaterSurfaceData {
 
     private upload(i0: number, j0: number, i1: number, j1: number): void {
         const n = this.size;
-        const half = THREE.DataUtils.toHalfFloat;
+        const half = (v: number) => THREE.DataUtils.toHalfFloat(v);
 
         for (let j = j0; j <= j1; j++) {
             for (let i = i0; i <= i1; i++) {

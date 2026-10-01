@@ -48,6 +48,11 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
     - Shorelines get animated foam (a bubbly lace with lines rolling in, broken into drifting patches), rapids
       white water, and shallow beds caustics.
     - An ocean ring extends to the horizon, and the view tints when the camera goes underwater.
+    - Water bodies (lakes, ponds, rivers, the sea) are found automatically and each has its own wind exposure,
+      fetch, wave height, choppiness, colours and clarity (Water › Bodies, MCP `edit_water_body`).
+    - Wind waves from a fetch-limited spectrum: a GPU FFT on WebGPU (choppy crests, whitecaps), a sum of the
+      strongest waves on WebGL 2; a fine mesh around the camera shows them up close. Crests glow in the sun,
+      catspaws follow the gusts, glints stay stable. See [Water bodies and waves](#water-bodies-and-waves).
 - **Atmosphere & weather.** Physical sky with lit clouds whose shadows drift over the land, stars and a moon;
   valley (height) fog with sunbeams; rain, snow, lightning with thunder, gusts that sweep across fields and
   canopies, and wet or snowy ground (see [Weather & sky](#weather--sky)). The sun
@@ -67,7 +72,7 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
 | Sculpt  | Sculpt (raise/lower), Smooth, Flatten (target pick, raise/lower-only), Ramp, Thermal erosion, Hydraulic erosion (droplets), Noise, Terrace |
 | Paint   | Paint/erase any of the 8 layers; _Auto paint_ re-applies the layer rules to the whole map; _Ground cover_ per layer (grows live)           |
 | Foliage | Paint (density-aware, rule-aware), Erase, Single placement, _Scatter_ (procedural forests, meadows, shoreline reeds), Clear                |
-| Water   | Lake (level picked from terrain or Ctrl+click, optional carving), River (follows terrain downhill), Erase                                  |
+| Water   | Lake (level picked from terrain or Ctrl+click, optional carving), River (follows terrain downhill), Erase, Bodies (per-body waves / look)  |
 | Place   | Player start (position + facing)                                                                                                           |
 | World   | Layer look, material, auto-paint rules, ground cover / biome; weather and environment; undo history; snapshots; new maps from templates    |
 
@@ -599,6 +604,44 @@ How it works (`resources/game/world/`):
   the river's width (fastest mid-stream; the end with the lower water is downstream), so flat stretches flow
   too; elsewhere the downhill surface gradient does. The normals and foam streaks (smeared along the current)
   are flow-mapped along it.
+
+## Water bodies and waves
+
+- **Bodies** (`world/water/bodySegmentation.ts`, `WaterBodies.ts`): connected components of the water grid,
+  split at level jumps (waterfalls), classified as sea / river / pond / lake, re-derived (debounced) after every
+  water edit. Ids stay stable through edits (seed point, then centroid matching; merges keep the larger body's
+  settings). Settings per body: wind exposure, fetch, wave height, choppiness, shallow / deep colour, clarity,
+  surf. Saved in `water_bodies.json`; on the GPU a 256×4 table texture holds each body's cascade weights,
+  colours and flags, looked up per pixel through the body row in the water data texture.
+- **Spectrum** (`spectrum.ts`): fetch-limited JONSWAP (peak frequency and Phillips constant from wind speed
+  and fetch, capped at a fully developed sea), Mitsuyasu-style directional spread, three cascades (192 m / 28 m
+  / 6 m tiles, contiguous wavenumber bands). The GPU runs one reference spectrum (weather wind, largest fetch);
+  each body's three cascade weights are √(its band energy / the reference's), so ponds lose swell but keep chop.
+  The spectrum is regenerated (one cascade per frame) when the smoothed wind changes by >12 % or 8°; the phases
+  are kept, so the sea state morphs instead of jumping.
+- **FFT** (`WaveFFT.ts`, WebGPU compute): spectrum evolution, then a radix-2 inverse FFT with one workgroup per
+  row / column (all 8 stages in workgroup memory: two dispatches for 3 cascades × 4 packed complex fields), then
+  unpacking into RGBA16F storage textures: displacement (x, y, z) and mipmapped derivatives (slopes, crest
+  compression, a persistent Jacobian for whitecaps that relaxes over `foamDecay` s). 8 dispatches per frame.
+- **Sum of waves** (WebGL 2, graphics `water_waves: simple`): the 22 strongest spectral components (with the
+  GPU's phases, energy of the rest folded in) as Gerstner waves in the vertex shader, plus the ripple texture
+  octaves.
+- **Geometry** (`fineMesh.ts`): the map's water chunks at the grid resolution plus a camera-centred mesh of
+  0.25 m quads (64², then three rings of doubling spacing to ±64 m, scaled up with camera height). Vertex
+  heights come from the level texture; cells the chunks don't draw are masked; the chunks give way inside the
+  fine mesh (with a small overlap). Ring borders are CDLOD-morphed onto the coarser grid, so displaced rings
+  meet without cracks; each cascade's displacement fades out where the mesh can no longer carry it.
+- **Shading** (`waterMaterial.ts`): subsurface glow on crests (shallow colour × sun, strongest looking towards
+  the sun), whitecaps from the Jacobian broken up by bubble noise, Toksvig-style roughness from the slope
+  variance of waves smaller than a pixel (stable glints), catspaws (the foliage's travelling gust field modulates
+  the chop cascade and the ripples), ripples that fade in a calm; refraction, absorption, planar reflection, foam,
+  river flow, rain ripples and caustics as before.
+- **CPU sampling** (`Water.sampleSurface(x, z)`): still level, wave height, normal, velocity (orbital + river
+  current), depth and the body, from the same dominant components and body weights (exact for the WebGL 2
+  surface, the long waves of the FFT surface). For swimming, buoyancy and splashes.
+- **Extension points**: `Water.addSurfaceLayer({ displacement, slope, foam, sample })` adds TSL displacement /
+  slope / foam sources with their CPU counterpart (beach surf, interaction ripples, wakes); body settings
+  (`surf`) and the depth / body / flow data textures are available to them through the layer context.
 
 ## Bounce light
 

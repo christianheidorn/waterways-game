@@ -57,9 +57,18 @@ export class WaveFFT {
     readonly derivatives: THREE.StorageTexture[] = [];
     private readonly h0 = instancedArray(CASCADES.length * N * N, 'vec4');
     private readonly h0Array: Float32Array;
-    private readonly bufferA = instancedArray(CASCADES.length * FIELDS * N * N, 'vec2');
-    private readonly bufferB = instancedArray(CASCADES.length * FIELDS * N * N, 'vec2');
-    private readonly foamState = instancedArray(CASCADES.length * N * N, 'float');
+    private readonly bufferA = instancedArray(
+        CASCADES.length * FIELDS * N * N,
+        'vec2',
+    );
+    private readonly bufferB = instancedArray(
+        CASCADES.length * FIELDS * N * N,
+        'vec2',
+    );
+    private readonly foamState = instancedArray(
+        CASCADES.length * N * N,
+        'float',
+    );
     private readonly time = uniform(0);
     private readonly dt = uniform(0);
     /** Whitecaps fade over about this many seconds. */
@@ -142,8 +151,16 @@ export class WaveFFT {
             const h0 = this.h0.element(uint(c * N * N).add(t));
             // h = h0(k) e^{-iωt} + conj(h0(-k)) e^{iωt} (travels along +k).
             const h = vec2(
-                h0.x.mul(cw).add(h0.y.mul(sw)).add(h0.z.mul(cw)).sub(h0.w.mul(sw)),
-                h0.y.mul(cw).sub(h0.x.mul(sw)).add(h0.z.mul(sw)).add(h0.w.mul(cw)),
+                h0.x
+                    .mul(cw)
+                    .add(h0.y.mul(sw))
+                    .add(h0.z.mul(cw))
+                    .sub(h0.w.mul(sw)),
+                h0.y
+                    .mul(cw)
+                    .sub(h0.x.mul(sw))
+                    .add(h0.z.mul(sw))
+                    .add(h0.w.mul(cw)),
             ).mul(select(kl.greaterThan(1e-5), float(1), float(0)));
             // i·h
             const ih = vec2(h.y.negate(), h.x);
@@ -157,7 +174,8 @@ export class WaveFFT {
             const dzz = h.mul(kz.mul(uz).negate());
             const dxz = h.mul(kx.mul(uz).negate());
             // A + i·B: the inverse transform returns A in the real part, B in the imaginary part.
-            const pack = (a: Node<'vec2'>, b: Node<'vec2'>) => vec2(a.x.sub(b.y), a.y.add(b.x));
+            const pack = (a: Node<'vec2'>, b: Node<'vec2'>) =>
+                vec2(a.x.sub(b.y), a.y.add(b.x));
             const base = uint(c * FIELDS * N * N).add(t);
             this.bufferA.element(base).assign(pack(dx, h));
             this.bufferA.element(base.add(N * N)).assign(pack(dz, dyx));
@@ -183,13 +201,22 @@ export class WaveFFT {
             const plane = shiftRight(line, uint(LOG_N));
             const inPlane = bitAnd(line, uint(N - 1));
             const address = vertical
-                ? plane.mul(N * N).add(lane.mul(N)).add(inPlane)
+                ? plane
+                      .mul(N * N)
+                      .add(lane.mul(N))
+                      .add(inPlane)
                 : line.mul(N).add(lane);
             // Bit-reversed load.
             let rev: Node<'uint'> = uint(0);
 
             for (let b = 0; b < LOG_N; b++) {
-                rev = bitOr(rev, shiftLeft(bitAnd(shiftRight(lane, uint(b)), uint(1)), uint(LOG_N - 1 - b)));
+                rev = bitOr(
+                    rev,
+                    shiftLeft(
+                        bitAnd(shiftRight(lane, uint(b)), uint(1)),
+                        uint(LOG_N - 1 - b),
+                    ),
+                );
             }
 
             ping.element(rev).assign(src.element(address));
@@ -208,7 +235,10 @@ export class WaveFFT {
                 const wi = sin(angle);
                 const pa = from.element(a);
                 const pb = from.element(a.add(half));
-                const tw = vec2(pb.x.mul(wr).sub(pb.y.mul(wi)), pb.x.mul(wi).add(pb.y.mul(wr)));
+                const tw = vec2(
+                    pb.x.mul(wr).sub(pb.y.mul(wi)),
+                    pb.x.mul(wi).add(pb.y.mul(wr)),
+                );
                 const upper = bitAnd(lane, uint(half)).equal(uint(0));
                 to.element(lane).assign(select(upper, pa.add(tw), pa.sub(tw)));
                 workgroupBarrier();
@@ -216,7 +246,12 @@ export class WaveFFT {
             }
 
             dst.element(address).assign(from.element(lane));
-        })().compute((lines > 65535 ? [65535, Math.ceil(lines / 65535), 1] : [lines, 1, 1]) as unknown as number, [N]);
+        })().compute(
+            (lines > 65535
+                ? [65535, Math.ceil(lines / 65535), 1]
+                : [lines, 1, 1]) as unknown as number,
+            [N],
+        );
     }
 
     /** Fields → textures (sign of the centred spectrum, persistent whitecap Jacobian). */
@@ -229,7 +264,11 @@ export class WaveFFT {
             const xi = bitAnd(t, uint(N - 1));
             const yi = shiftRight(t, uint(LOG_N));
             // The spectrum is centred (k = 0 at N/2): the transform carries a (-1)^(x+y) checkerboard.
-            const sign = select(bitAnd(xi.add(yi), uint(1)).equal(uint(0)), float(1), float(-1));
+            const sign = select(
+                bitAnd(xi.add(yi), uint(1)).equal(uint(0)),
+                float(1),
+                float(-1),
+            );
             const base = uint(c * FIELDS * N * N).add(t);
             const f0 = this.bufferA.element(base).mul(sign);
             const f1 = this.bufferA.element(base.add(N * N)).mul(sign);
@@ -238,10 +277,16 @@ export class WaveFFT {
             const dxx = f2.y;
             const dzz = f3.x;
             const dxz = f3.y;
-            const jacobian = float(1).add(dxx).mul(float(1).add(dzz)).sub(dxz.mul(dxz));
+            const jacobian = float(1)
+                .add(dxx)
+                .mul(float(1).add(dzz))
+                .sub(dxz.mul(dxz));
             // Whitecaps linger: the lowest Jacobian seen lately, relaxing back towards 1.
             const state = this.foamState.element(uint(c * N * N).add(t));
-            const relaxed = min(state.add(float(1).sub(state).mul(this.dt.div(this.foamDecay))), 1);
+            const relaxed = min(
+                state.add(float(1).sub(state).mul(this.dt.div(this.foamDecay))),
+                1,
+            );
             const foam = min(jacobian, relaxed).toVar();
             If(state.equal(0), () => {
                 // Fresh buffer.
@@ -251,7 +296,11 @@ export class WaveFFT {
             textureStore(disp, uvec2(xi, yi), vec4(f0.x, f0.y, f1.x, foam));
             // The fragment stage reads only this texture (texture binding limits): the mean horizontal
             // compression for the normals and the whitecap Jacobian ride along.
-            textureStore(deriv, uvec2(xi, yi), vec4(f1.y, f2.x, dxx.add(dzz).mul(0.5), foam));
+            textureStore(
+                deriv,
+                uvec2(xi, yi),
+                vec4(f1.y, f2.x, dxx.add(dzz).mul(0.5), foam),
+            );
         })().compute(N * N, [64]);
     }
 }

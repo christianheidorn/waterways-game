@@ -20,7 +20,10 @@ export type FineMeshLayout = {
  * and the displaced surface has no cracks. Vertex heights come from the water level texture in the shader;
  * where there is no water the fragments are discarded.
  */
-export function createFineMeshGeometry(levels = 4): { geometry: THREE.BufferGeometry; layout: FineMeshLayout } {
+export function createFineMeshGeometry(levels = 4): {
+    geometry: THREE.BufferGeometry;
+    layout: FineMeshLayout;
+} {
     const positions: number[] = [];
     const index: number[] = [];
     const half = QUADS / 2;
@@ -49,7 +52,11 @@ export function createFineMeshGeometry(levels = 4): { geometry: THREE.BufferGeom
                 const cj = j - half + 0.5;
 
                 // Rings leave out the area the finer level covers.
-                if (level > 0 && Math.abs(ci) < half / 2 && Math.abs(cj) < half / 2) {
+                if (
+                    level > 0 &&
+                    Math.abs(ci) < half / 2 &&
+                    Math.abs(cj) < half / 2
+                ) {
                     continue;
                 }
 
@@ -61,19 +68,33 @@ export function createFineMeshGeometry(levels = 4): { geometry: THREE.BufferGeom
     }
 
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute(
+        'position',
+        new THREE.Float32BufferAttribute(positions, 3),
+    );
     geometry.setAttribute(
         'normal',
         new THREE.Float32BufferAttribute(
-            Array.from({ length: positions.length }, (_, i) => (i % 3 === 1 ? 1 : 0)),
+            Array.from({ length: positions.length }, (_, i) =>
+                i % 3 === 1 ? 1 : 0,
+            ),
             3,
         ),
     );
-    geometry.setAttribute('waterFine', new THREE.Float32BufferAttribute(new Float32Array(positions.length / 3).fill(1), 1));
+    geometry.setAttribute(
+        'waterFine',
+        new THREE.Float32BufferAttribute(
+            new Float32Array(positions.length / 3).fill(1),
+            1,
+        ),
+    );
     geometry.setIndex(index);
     const coarsest = FINE_BASE_SPACING * 2 ** (levels - 1);
     const extent = half * coarsest;
-    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), extent * 1.5);
+    geometry.boundingSphere = new THREE.Sphere(
+        new THREE.Vector3(),
+        extent * 1.5,
+    );
 
     return { geometry, layout: { half: extent, coarsest } };
 }

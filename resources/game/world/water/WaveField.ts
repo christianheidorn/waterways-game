@@ -1,14 +1,29 @@
 import * as THREE from 'three/webgpu';
 import type { GameRenderer } from '../../core/renderer';
-import { CASCADES, cascadeSpectrum, cascadeWeights, dominantComponents, FFT_SIZE, OPEN_FETCH, windSpeed } from './spectrum';
-import type { CascadeSpectrum, SpectrumParams, WaveComponent } from './spectrum';
+import {
+    CASCADES,
+    cascadeSpectrum,
+    cascadeWeights,
+    dominantComponents,
+    FFT_SIZE,
+    OPEN_FETCH,
+    windSpeed,
+} from './spectrum';
+import type {
+    CascadeSpectrum,
+    SpectrumParams,
+    WaveComponent,
+} from './spectrum';
 import { WaveFFT } from './WaveFFT';
 import type { WaterBody } from './bodySegmentation';
 import { bodyFetch } from './bodySegmentation';
 
 /** Waves of the sum-of-waves surface (WebGL 2) and the CPU sampler, per cascade. */
 export const COMPONENTS_PER_CASCADE = [6, 8, 8] as const;
-export const COMPONENT_COUNT = COMPONENTS_PER_CASCADE.reduce((a, b) => a + b, 0);
+export const COMPONENT_COUNT = COMPONENTS_PER_CASCADE.reduce(
+    (a, b) => a + b,
+    0,
+);
 
 /** Waves calm down towards the shore: amplitude factor by water depth (m). Shared with the shader. */
 export function shoreFade(depth: number): number {
@@ -49,11 +64,20 @@ export class WaveField {
     readonly windDir = new THREE.Vector2(0.8, 0.6);
     private readonly windDirTarget = new THREE.Vector2(0.8, 0.6);
     private spectra: CascadeSpectrum[] = [];
-    private built: { wind: number; dir: THREE.Vector2; fetch: number } | null = null;
+    private built: { wind: number; dir: THREE.Vector2; fetch: number } | null =
+        null;
     /** Pending regeneration, one cascade per frame. */
-    private pending: { cascade: number; params: SpectrumParams; dir: [number, number]; out: CascadeSpectrum[] } | null = null;
+    private pending: {
+        cascade: number;
+        params: SpectrumParams;
+        dir: [number, number];
+        out: CascadeSpectrum[];
+    } | null = null;
     private maxFetch = 1000;
-    private readonly weightCache = new Map<WaterBody | null, [number, number, number]>();
+    private readonly weightCache = new Map<
+        WaterBody | null,
+        [number, number, number]
+    >();
     private time = 0;
 
     /** WebGPU: run the FFT (null: sum of sines only). */
@@ -107,7 +131,11 @@ export class WaveField {
                 this.pending = null;
             }
         } else if (this.needsRebuild()) {
-            this.built = { wind: this.wind, dir: this.windDir.clone(), fetch: this.maxFetch };
+            this.built = {
+                wind: this.wind,
+                dir: this.windDir.clone(),
+                fetch: this.maxFetch,
+            };
             this.pending = {
                 cascade: 0,
                 params: { wind: windSpeed(this.wind), fetch: this.maxFetch },
@@ -118,7 +146,13 @@ export class WaveField {
             // The very first spectrum is built at once (no flat water on load).
             if (!this.spectra.length) {
                 while (this.pending.cascade < CASCADES.length) {
-                    this.pending.out.push(cascadeSpectrum(this.pending.cascade, this.pending.params, this.pending.dir));
+                    this.pending.out.push(
+                        cascadeSpectrum(
+                            this.pending.cascade,
+                            this.pending.params,
+                            this.pending.dir,
+                        ),
+                    );
                     this.pending.cascade++;
                 }
 
@@ -140,17 +174,31 @@ export class WaveField {
      * Cascade weights of a body (null: the open sea outside the map) for the current wind: its own
      * fetch-limited sea state relative to the reference, × wind exposure × wave height setting.
      */
-    weights(body: WaterBody | null, heightScale: number): [number, number, number] {
+    weights(
+        body: WaterBody | null,
+        heightScale: number,
+    ): [number, number, number] {
         const cached = this.weightCache.get(body);
 
         if (cached) {
-            return cached.map((w) => w * heightScale) as [number, number, number];
+            return cached.map((w) => w * heightScale) as [
+                number,
+                number,
+                number,
+            ];
         }
 
         const exposure = body ? body.settings.wind_exposure : 1;
-        const fetch = body ? bodyFetch(body, this.windDir.x, this.windDir.y, OPEN_FETCH) : OPEN_FETCH;
-        const own: SpectrumParams = { wind: windSpeed(this.wind * exposure), fetch };
-        const w = cascadeWeights(own, this.reference).map((v) => v * (body ? body.settings.wave_height : 1)) as [number, number, number];
+        const fetch = body
+            ? bodyFetch(body, this.windDir.x, this.windDir.y, OPEN_FETCH)
+            : OPEN_FETCH;
+        const own: SpectrumParams = {
+            wind: windSpeed(this.wind * exposure),
+            fetch,
+        };
+        const w = cascadeWeights(own, this.reference).map(
+            (v) => v * (body ? body.settings.wave_height : 1),
+        ) as [number, number, number];
         this.weightCache.set(body, w);
 
         return w.map((v) => v * heightScale) as [number, number, number];
@@ -194,7 +242,9 @@ export class WaveField {
             for (const c of this.components) {
                 const a = c.amp * weights[c.cascade] * fade;
                 const k = Math.hypot(c.kx, c.kz);
-                const s = Math.sin(c.kx * px + c.kz * pz - c.omega * time + c.phase);
+                const s = Math.sin(
+                    c.kx * px + c.kz * pz - c.omega * time + c.phase,
+                );
                 dx -= (chop * a * c.kx * s) / k;
                 dz -= (chop * a * c.kz * s) / k;
             }
@@ -227,7 +277,9 @@ export class WaveField {
         }
 
         out.height = h;
-        out.normal.set(-sx / Math.max(0.2, jx), 1, -sz / Math.max(0.2, jz)).normalize();
+        out.normal
+            .set(-sx / Math.max(0.2, jx), 1, -sz / Math.max(0.2, jz))
+            .normalize();
 
         return out;
     }
@@ -244,13 +296,23 @@ export class WaveField {
             return true;
         }
 
-        const windChange = Math.abs(this.wind - b.wind) / Math.max(0.15, b.wind);
-        const angle = Math.acos(Math.min(1, Math.max(-1, this.windDir.dot(b.dir))));
+        const windChange =
+            Math.abs(this.wind - b.wind) / Math.max(0.15, b.wind);
+        const angle = Math.acos(
+            Math.min(1, Math.max(-1, this.windDir.dot(b.dir))),
+        );
 
-        return windChange > 0.12 || angle > 0.14 || Math.abs(Math.log(this.maxFetch / b.fetch)) > 0.2;
+        return (
+            windChange > 0.12 ||
+            angle > 0.14 ||
+            Math.abs(Math.log(this.maxFetch / b.fetch)) > 0.2
+        );
     }
 
-    private applySpectra(spectra: CascadeSpectrum[], params: SpectrumParams): void {
+    private applySpectra(
+        spectra: CascadeSpectrum[],
+        params: SpectrumParams,
+    ): void {
         this.spectra = spectra;
         this.reference = params;
         this.components = dominantComponents(spectra, COMPONENTS_PER_CASCADE);
@@ -263,8 +325,16 @@ export class WaveField {
             for (let y = 0; y < FFT_SIZE; y++) {
                 for (let x = 0; x < FFT_SIZE; x++) {
                     const i = (y * FFT_SIZE + x) * 4;
-                    const k2 = ((x - FFT_SIZE / 2) ** 2 + (y - FFT_SIZE / 2) ** 2) * dk * dk;
-                    mss += (s.h0[i] ** 2 + s.h0[i + 1] ** 2 + s.h0[i + 2] ** 2 + s.h0[i + 3] ** 2) * k2;
+                    const k2 =
+                        ((x - FFT_SIZE / 2) ** 2 + (y - FFT_SIZE / 2) ** 2) *
+                        dk *
+                        dk;
+                    mss +=
+                        (s.h0[i] ** 2 +
+                            s.h0[i + 1] ** 2 +
+                            s.h0[i + 2] ** 2 +
+                            s.h0[i + 3] ** 2) *
+                        k2;
                 }
             }
 

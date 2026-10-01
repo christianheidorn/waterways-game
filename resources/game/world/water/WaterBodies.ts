@@ -1,7 +1,19 @@
 import * as THREE from 'three/webgpu';
 import type { Heightfield } from '../Heightfield';
-import { bodyFetch, bodyName, matchBodies, sanitizeSettings, segmentWaterBodies, serializeBodies } from './bodySegmentation';
-import type { WaterBodiesFile, WaterBody, WaterBodyRecord, WaterBodySettings } from './bodySegmentation';
+import {
+    bodyFetch,
+    bodyName,
+    matchBodies,
+    sanitizeSettings,
+    segmentWaterBodies,
+    serializeBodies,
+} from './bodySegmentation';
+import type {
+    WaterBodiesFile,
+    WaterBody,
+    WaterBodyRecord,
+    WaterBodySettings,
+} from './bodySegmentation';
 
 /** Rows of the body table texture (row 0 = water outside any body: the open sea beyond the map). */
 export const BODY_ROWS = 256;
@@ -21,7 +33,9 @@ export const BODY_TABLE = {
 const KIND_CODE = { lake: 0, pond: 1, river: 2, sea: 3 } as const;
 
 /** Per-body cascade weights for the current wind (computed by the wave field). */
-export type BodyWaveWeights = (body: WaterBody | null) => [number, number, number];
+export type BodyWaveWeights = (
+    body: WaterBody | null,
+) => [number, number, number];
 
 /**
  * The map's water bodies: segmented from the water grid after every water edit (debounced), matched to
@@ -47,7 +61,13 @@ export class WaterBodies {
     ) {
         this.labels = new Int32Array(surface.resolution * surface.resolution);
         this.tableData = new Float32Array(BODY_ROWS * 4 * 4);
-        this.table = new THREE.DataTexture(this.tableData, BODY_ROWS, 4, THREE.RGBAFormat, THREE.FloatType);
+        this.table = new THREE.DataTexture(
+            this.tableData,
+            BODY_ROWS,
+            4,
+            THREE.RGBAFormat,
+            THREE.FloatType,
+        );
         this.table.minFilter = this.table.magFilter = THREE.NearestFilter;
         this.table.generateMipmaps = false;
         this.table.name = 'Water bodies';
@@ -55,22 +75,36 @@ export class WaterBodies {
 
     /** Stored ids and settings (water_bodies.json); applied on the next segmentation. */
     load(file: WaterBodiesFile | null): void {
-        this.records = Array.isArray(file?.bodies) ? file.bodies.filter((b) => typeof b?.id === 'string' && Array.isArray(b.seed)) : [];
+        this.records = Array.isArray(file?.bodies)
+            ? file.bodies.filter(
+                  (b) => typeof b?.id === 'string' && Array.isArray(b.seed),
+              )
+            : [];
+        // The stored ids win over any derived before the file arrived.
+        this.bodies = [];
     }
 
     /** Re-derives the bodies from the water grid, keeping ids and settings. */
-    segment(options: { riverFlow: Float32Array | null; seaLevel: number | null; wallLimit: number }): void {
+    segment(options: {
+        riverFlow: Float32Array | null;
+        seaLevel: number | null;
+        wallLimit: number;
+    }): void {
         const seg = segmentWaterBodies(this.surface, {
             terrain: this.terrain,
             riverFlow: options.riverFlow,
             seaLevel: options.seaLevel,
             wallLimit: options.wallLimit,
         });
-        const previous = this.bodies.length ? serializeBodies(this.bodies).bodies : this.records;
+        const previous = this.bodies.length
+            ? serializeBodies(this.bodies).bodies
+            : this.records;
         this.records = [];
         this.labels = seg.labels;
         // Biggest first: they get the table rows when there are more bodies than rows.
-        this.bodies = matchBodies(seg, this.surface, previous).sort((a, b) => b.area - a.area);
+        this.bodies = matchBodies(seg, this.surface, previous).sort(
+            (a, b) => b.area - a.area,
+        );
         this.onChange?.('segmented');
     }
 
@@ -104,7 +138,13 @@ export class WaterBodies {
                     const cc = c + dx;
                     const rr = r + dz;
 
-                    if (cc >= 0 && rr >= 0 && cc < res && rr < res && this.labels[rr * res + cc] > 0) {
+                    if (
+                        cc >= 0 &&
+                        rr >= 0 &&
+                        cc < res &&
+                        rr < res &&
+                        this.labels[rr * res + cc] > 0
+                    ) {
                         return this.byLabel(this.labels[rr * res + cc]) ?? null;
                     }
                 }
@@ -115,7 +155,10 @@ export class WaterBodies {
     }
 
     /** Changes a body's settings (validated); returns the body or null if there is none with that id. */
-    update(id: string, patch: Partial<Record<keyof WaterBodySettings, unknown>>): WaterBody | null {
+    update(
+        id: string,
+        patch: Partial<Record<keyof WaterBodySettings, unknown>>,
+    ): WaterBody | null {
         const body = this.get(id);
 
         if (!body) {
@@ -139,9 +182,16 @@ export class WaterBodies {
     }
 
     /** Writes the table texture: per-body wave weights for the current wind, colours, flags. */
-    writeTable(weights: BodyWaveWeights, defaults: { choppiness: number }): void {
+    writeTable(
+        weights: BodyWaveWeights,
+        defaults: { choppiness: number },
+    ): void {
         const d = this.tableData;
-        const set = (row: number, entry: number, v: [number, number, number, number]) => d.set(v, (entry * BODY_ROWS + row) * 4);
+        const set = (
+            row: number,
+            entry: number,
+            v: [number, number, number, number],
+        ) => d.set(v, (entry * BODY_ROWS + row) * 4);
         const color = new THREE.Color();
         const rgb = (hex: string | null): [number, number, number] => {
             if (!hex) {
@@ -155,7 +205,12 @@ export class WaterBodies {
 
         // Row 0: open water outside any body (the ocean beyond the map).
         const open = weights(null);
-        set(0, BODY_TABLE.waves, [open[0], open[1], open[2], defaults.choppiness]);
+        set(0, BODY_TABLE.waves, [
+            open[0],
+            open[1],
+            open[2],
+            defaults.choppiness,
+        ]);
         set(0, BODY_TABLE.shallow, [0, 0, 0, 0]);
         set(0, BODY_TABLE.deep, [0, 0, 0, -1]);
         set(0, BODY_TABLE.misc, [1, 1, KIND_CODE.sea, 0]);
@@ -164,10 +219,23 @@ export class WaterBodies {
             const row = i + 1;
             const s = b.settings;
             const w = weights(b);
-            set(row, BODY_TABLE.waves, [w[0], w[1], w[2], s.choppiness * defaults.choppiness]);
-            set(row, BODY_TABLE.shallow, [...rgb(s.shallow_color), s.shallow_color ? 1 : 0]);
+            set(row, BODY_TABLE.waves, [
+                w[0],
+                w[1],
+                w[2],
+                s.choppiness * defaults.choppiness,
+            ]);
+            set(row, BODY_TABLE.shallow, [
+                ...rgb(s.shallow_color),
+                s.shallow_color ? 1 : 0,
+            ]);
             set(row, BODY_TABLE.deep, [...rgb(s.deep_color), s.clarity ?? -1]);
-            set(row, BODY_TABLE.misc, [s.wind_exposure, s.surf ? 1 : 0, KIND_CODE[b.kind], b.id === this.selectedId ? 1 : 0]);
+            set(row, BODY_TABLE.misc, [
+                s.wind_exposure,
+                s.surf ? 1 : 0,
+                KIND_CODE[b.kind],
+                b.id === this.selectedId ? 1 : 0,
+            ]);
         });
         this.table.needsUpdate = true;
     }
@@ -178,7 +246,9 @@ export class WaterBodies {
     }
 
     serialize(): WaterBodiesFile {
-        return this.bodies.length || !this.records.length ? serializeBodies(this.bodies) : { version: 1, bodies: this.records };
+        return this.bodies.length || !this.records.length
+            ? serializeBodies(this.bodies)
+            : { version: 1, bodies: this.records };
     }
 
     /** Summary for agents / the editor list. */
@@ -195,8 +265,19 @@ export class WaterBodies {
             max_depth: r(body.max_depth),
             centroid: { x: r(body.centroid.x), z: r(body.centroid.z) },
             seed: { x: r(body.seed.x), z: r(body.seed.z) },
-            bounds: { x0: r(body.bounds.x0), z0: r(body.bounds.z0), x1: r(body.bounds.x1), z1: r(body.bounds.z1) },
-            ...(windDir ? { fetch_m: Math.round(bodyFetch(body, windDir.x, windDir.z, open)) } : {}),
+            bounds: {
+                x0: r(body.bounds.x0),
+                z0: r(body.bounds.z0),
+                x1: r(body.bounds.x1),
+                z1: r(body.bounds.z1),
+            },
+            ...(windDir
+                ? {
+                      fetch_m: Math.round(
+                          bodyFetch(body, windDir.x, windDir.z, open),
+                      ),
+                  }
+                : {}),
             settings: { ...body.settings },
         };
     }
@@ -216,7 +297,10 @@ export class WaterBodies {
 
             for (const b of this.bodies) {
                 const { gx, gz } = hf.toGrid(b.seed.x, b.seed.z);
-                const label = this.labels[Math.round(gz) * hf.resolution + Math.round(gx)];
+                const label =
+                    this.labels[
+                        Math.round(gz) * hf.resolution + Math.round(gx)
+                    ];
 
                 if (label > 0) {
                     map.set(label, b);

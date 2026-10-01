@@ -175,7 +175,7 @@ class WaterBodyToolsTest extends TestCase
 
     public function test_the_tool_is_registered_and_documented(): void
     {
-        $this->assertContains(EditWaterBody::class, (new \ReflectionClass(\App\Mcp\Servers\WaterwaysServer::class))->getDefaultProperties()['tools']);
+        $this->assertContains(EditWaterBody::class, (new \ReflectionClass(WaterwaysServer::class))->getDefaultProperties()['tools']);
         $this->assertStringContainsString('edit_water_body', (string) file_get_contents(base_path('docs/MCP.md')));
     }
 }

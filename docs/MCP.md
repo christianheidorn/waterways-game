@@ -144,6 +144,7 @@ headless Chrome-family browser on this machine that shows the map's editor (the 
 | `sculpt_terrain`                                                    | Live: raise / lower, set height, flatten, smooth, noise, terrace, landforms (`hill`: hills, massifs following an outline, ridges along paths; negative for basins, valleys, craters; profiles dome / peak / plateau with natural roughness), erosion (hydraulic, thermal), `grade` (road beds along a path)                                                                                                                                                            |
 | `paint_terrain`                                                     | Live: paint or erase a layer (slot or name) in a shape, optionally only on matching slope / height, with natural `breakup`. Painted layers grow their ground cover, so this plants biomes                                                                                                                                                                                                                                                                              |
 | `edit_water`                                                        | Live: `lake` floods a basin to a level (or `fill_to_rim`); if it would spill, it reports how high the basin holds and where it overflows. `river` carves a channel along a path, downhill from its first point. `erase` removes water                                                                                                                                                                                                                                  |
+| `edit_water_body`                                                   | Live: water bodies (lake / pond / river / sea, from the water, stable ids): `list` / `get` (by `id` or `point`) / `update` per-body settings: wind exposure, fetch, wave height, choppiness, colours, clarity, surf. Reads use the saved file when no editor is open                                                                                                                                                                                                   |
 | `edit_foliage`                                                      | Live: `scatter` types in a shape (their rules, density, groves) or `clear` placed foliage (e.g. for clearings or roads)                                                                                                                                                                                                                                                                                                                                                |
 | `list_requests`, `get_request`, `update_request`                    | Build requests made in the editor (see below): the note, the outline in world coordinates with its bounds, the user's screenshot and reference images, a map crop with the outline. `update_request` sets the status (`in_progress`, `needs_input`, `done`), leaves a message and attaches a result screenshot                                                                                                                                                         |
 | `place_props`, `remove_props`, `list_props`                         | Live: place props from the prop library at exact positions (rotation, scale, height offset) or scatter them in a shape (spacing, slope, water); remove by id or shape; list what is placed (no editor needed)                                                                                                                                                                                                                                                          |
@@ -216,6 +217,7 @@ deliberately do not get, with the reason. New UI ships with its MCP tool in the 
 | Foliage (3)         | Type settings (density, size, slope, altitude, distance, shadows, rotation, under water)                                                                                                                       | `save_foliage_type`                                                                                                              |
 | Water (4)           | Lake, River, Erase, water level, carve depth                                                                                                                                                                   | `edit_water`                                                                                                                     |
 | Water (4)           | River: draw a course (click points, Enter), select a river, drag / add (Shift+click) / remove (Ctrl+click) points, width, depth, banks, Delete                                                                 | `edit_water` `river`, `list_rivers`, `update_river`, `delete_river`                                                              |
+| Water (4)           | Bodies: click a body (or pick it in the list), name, kind, wind exposure, fetch (auto / m), wave height, choppiness, own colours, clarity, surf                                                                | `edit_water_body` `list` / `get` / `update`                                                                                      |
 | Place (5)           | Player start (click, facing the camera direction)                                                                                                                                                              | `update_map` `spawn` (`yaw`, `facing` or `look_at`)                                                                              |
 | Place (5)           | Props: Place (model, rotation, random rotation, size), Shift+click remove                                                                                                                                      | `place_props`, `remove_props`                                                                                                    |
 | Place (5)           | Props: Select & edit (drag, R / Shift+R, rotation, size, height above ground), Duplicate (Ctrl+D), Delete                                                                                                      | `update_props`; `place_props` with the same values; `remove_props`                                                               |
@@ -481,6 +483,55 @@ the project; on from Medium up, off on Low):
 
 `take_screenshot` / `take_photo` show all of it. Footprints need a character walking in snow (play or walk mode
 in an open editor); puddles fill over about a minute of rain (or set `wetness` for standing puddles at once).
+
+## Water bodies and waves
+
+The water is split into **bodies**: the connected pieces of the water grid (4-neighbours, split where the level
+jumps more than a wall, e.g. at a waterfall), classified automatically as `sea` (at sea level and touching the map
+edge), `river` (on a river spline, or a long sloping ribbon), `pond` (under 4000 m²) or `lake`. They are
+re-derived after every water edit; ids (`wb1`, `wb2`, …) stay stable: a body keeps its id while its seed point
+(its deepest sample) is still wet in it, else while its centroid stays inside it; when bodies merge the largest
+keeps its id and settings. Ids and settings are saved per map in `water_bodies.json` (asset `water_bodies`, saved
+with the water).
+
+`edit_water_body` (the editor's Water › Bodies tool, key 4):
+
+| Setting                        | Default                 | Range      | What it does                                                                                |
+| ------------------------------ | ----------------------- | ---------- | ------------------------------------------------------------------------------------------- |
+| `name`                         | ''                      |            | Display name ('' = "<Kind> <id>")                                                           |
+| `kind`                         | null                    | kinds      | Overrides the automatic kind (null = automatic)                                             |
+| `wind_exposure`                | 1 (river 0.5, pond 0.7) | 0-2        | How much of the wind reaches the water (sheltered by hills / trees: lower)                  |
+| `fetch`                        | null                    | 5-200000 m | Distance the wind blows over the water; null = the body's length along the wind (sea: open) |
+| `wave_height`                  | 1                       | 0-4 ×      | Scales the body's wind waves                                                                |
+| `choppiness`                   | 1                       | 0-2        | Horizontal sharpness of crests (0 = rolling sines)                                          |
+| `shallow_color` / `deep_color` | null                    | `#rrggbb`  | Own water colours (null = the environment's)                                                |
+| `clarity`                      | null                    | 0.3-40 m   | Own clarity (null = the environment's)                                                      |
+| `surf`                         | false (sea: true)       |            | Surf on the body's shores (used by the beaches phase)                                       |
+
+`get_map` lists the saved bodies (counts per kind, the largest). `list` / `get` in an open editor also report the
+current wind, each body's fetch along it and its significant wave height.
+
+**Waves.** One wind wave spectrum (fetch-limited JONSWAP with a directional spread, for the weather's wind and
+the largest fetch) in three cascades: swell (192 m tiles), wind waves (28 m) and chop (6 m). Each body scales the
+cascades by its own sea state (its fetch and its wind × exposure, relative to the reference) × `wave_height`, so a
+50 m pond only ripples while a 2 km lake builds ~0.2-0.5 m waves in a stiff breeze. On WebGPU a GPU FFT (256²
+per cascade, compute) gives displacement with horizontal choppiness, normals and whitecaps (from the Jacobian,
+lingering a few seconds); on WebGL 2, or with graphics `water_waves: "simple"` (Low preset), the spectrum's
+strongest 22 waves are summed instead. A camera-centred fine mesh (0.25 m quads near the camera, rings doubling
+out to ~64 m, CDLOD-morphed so rings meet without cracks) carries the displacement up close; farther water is the
+map's coarse chunks. Ripples and the chop follow the travelling gusts (catspaws) and fade in a calm; waves too
+small to see turn into surface roughness, so sun glints stay stable instead of sparkling.
+
+Environment fields (`update_environment`; the studio's Environment page, Waves section):
+
+| Field                                         | Default     | Range | What it does                                                                               |
+| --------------------------------------------- | ----------- | ----- | ------------------------------------------------------------------------------------------ |
+| `whitecaps`                                   | 1           | 0-2   | Foam where wind waves break (0 = none)                                                     |
+| `water_subsurface`                            | 1           | 0-3   | Sunlight glowing through thin wave crests                                                  |
+| `wave_height`                                 | 0.15        | 0-3 m | Now: the long ocean swell on the sea (wind waves come from the wind and each body's fetch) |
+| `wave_scale` / `wave_strength` / `wave_speed` | 8 / 0.4 / 1 |       | Size and steepness of the small ripple texture; speed of all waves                         |
+
+Graphics `water_waves` (Shading group; `fft` from Medium up, `simple` on Low).
 
 ## Bounce light
 

@@ -31,7 +31,10 @@ export const CASCADES: readonly Cascade[] = (() => {
     return lengths.map((length, i) => ({
         length,
         kMin: i === 0 ? 0.0001 : boundary(length),
-        kMax: i + 1 < lengths.length ? boundary(lengths[i + 1]) : (Math.PI * FFT_SIZE) / length,
+        kMax:
+            i + 1 < lengths.length
+                ? boundary(lengths[i + 1])
+                : (Math.PI * FFT_SIZE) / length,
     }));
 })();
 
@@ -96,7 +99,10 @@ export function dispersion(k: number): number {
  */
 export function spread(theta: number, omega: number, wp: number): number {
     const ratio = omega / wp;
-    const s = ratio < 1 ? 6.97 * Math.pow(ratio, 4.06) : 9.77 * Math.pow(ratio, -2.33);
+    const s =
+        ratio < 1
+            ? 6.97 * Math.pow(ratio, 4.06)
+            : 9.77 * Math.pow(ratio, -2.33);
     const sc = Math.min(20, Math.max(1.5, s));
     // Normalised cos^2s(θ/2); the 2s+1 gamma ratio is approximated (exact to ~1 % for s ≥ 1).
     const norm = Math.sqrt(sc / Math.PI) * (1 + 1 / (8 * sc)) * 0.5;
@@ -106,7 +112,11 @@ export function spread(theta: number, omega: number, wp: number): number {
 }
 
 /** Variance (m²) of the surface elevation between two wavenumbers (∫ S(ω) dω over the band). */
-export function bandEnergy(p: SpectrumParams, kMin: number, kMax: number): number {
+export function bandEnergy(
+    p: SpectrumParams,
+    kMin: number,
+    kMax: number,
+): number {
     const w0 = dispersion(Math.max(1e-4, kMin));
     const w1 = dispersion(kMax);
     const steps = 160;
@@ -133,7 +143,10 @@ export function significantHeight(p: SpectrumParams): number {
  * √(energy of the body's sea state in the band / energy of the reference sea in the band). A small pond
  * gets almost no swell or wind waves but keeps its chop.
  */
-export function cascadeWeights(body: SpectrumParams, reference: SpectrumParams): [number, number, number] {
+export function cascadeWeights(
+    body: SpectrumParams,
+    reference: SpectrumParams,
+): [number, number, number] {
     return CASCADES.map((c) => {
         const ref = bandEnergy(reference, c.kMin, c.kMax);
         const own = bandEnergy(body, c.kMin, c.kMax);
@@ -194,7 +207,8 @@ export function cascadeSpectrum(
             const dOmegaDk = GRAVITY / (2 * omega);
             const theta = Math.atan2(kz, kx) - windAngle;
             // S(kx, kz) = S(ω) · D(θ) · dω/dk / k.
-            const s = (jonswap(omega, p) * spread(theta, omega, wp) * dOmegaDk) / k;
+            const s =
+                (jonswap(omega, p) * spread(theta, omega, wp) * dOmegaDk) / k;
             // Very short ripples (below ~2 cm) damped.
             const damp = Math.exp(-k * k * 0.0001);
             // E|h0|² = S Δk² / 2: with its conjugate partner each k then carries S Δk² of variance.

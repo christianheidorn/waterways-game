@@ -435,7 +435,9 @@ export class EditorPanel {
                 }
 
                 if (s.waterTool === 'bodies') {
-                    this.body.append(waterBodiesSection(this.editor, this.refreshers));
+                    this.body.append(
+                        waterBodiesSection(this.editor, this.refreshers),
+                    );
                     break;
                 }
 

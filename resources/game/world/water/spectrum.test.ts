@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { bandEnergy, CASCADES, cascadeSpectrum, cascadeWeights, dominantComponents, OPEN_FETCH, peakOmega, significantHeight, spread } from './spectrum';
+import {
+    bandEnergy,
+    CASCADES,
+    cascadeSpectrum,
+    cascadeWeights,
+    dominantComponents,
+    OPEN_FETCH,
+    peakOmega,
+    significantHeight,
+    spread,
+} from './spectrum';
 
 describe('wave spectrum', () => {
     it('grows waves with wind and fetch (fetch-limited JONSWAP)', () => {
@@ -15,7 +25,9 @@ describe('wave spectrum', () => {
         expect(sea).toBeGreaterThan(0.9);
         expect(sea).toBeLessThan(2);
         // Short fetch → higher peak frequency (shorter waves).
-        expect(peakOmega({ wind: 8, fetch: 50 })).toBeGreaterThan(peakOmega({ wind: 8, fetch: 2000 }));
+        expect(peakOmega({ wind: 8, fetch: 50 })).toBeGreaterThan(
+            peakOmega({ wind: 8, fetch: 2000 }),
+        );
     });
 
     it('cascades cover one continuous band', () => {
@@ -30,7 +42,9 @@ describe('wave spectrum', () => {
             const n = 720;
 
             for (let i = 0; i < n; i++) {
-                sum += spread(-Math.PI + ((i + 0.5) / n) * Math.PI * 2, ratio, 1) * ((Math.PI * 2) / n);
+                sum +=
+                    spread(-Math.PI + ((i + 0.5) / n) * Math.PI * 2, ratio, 1) *
+                    ((Math.PI * 2) / n);
             }
 
             expect(sum).toBeGreaterThan(0.9);
@@ -40,7 +54,10 @@ describe('wave spectrum', () => {
 
     it('scales cascades per body: ponds lose swell but keep chop', () => {
         const reference = { wind: 8, fetch: OPEN_FETCH };
-        const [swell, wind, chop] = cascadeWeights({ wind: 8, fetch: 40 }, reference);
+        const [swell, wind, chop] = cascadeWeights(
+            { wind: 8, fetch: 40 },
+            reference,
+        );
         expect(swell).toBeLessThan(0.05);
         expect(wind).toBeLessThan(0.5);
         expect(chop).toBeGreaterThan(0.5);

@@ -10,15 +10,31 @@ import { createFineMeshGeometry } from './water/fineMesh';
 import type { FineMeshLayout } from './water/fineMesh';
 import { bandEnergy, CASCADES, OPEN_FETCH } from './water/spectrum';
 import { BODY_TABLE, WaterBodies } from './water/WaterBodies';
-import { createSharedNodes, createWaterMaterial, createWaterUniforms } from './water/waterMaterial';
-import type { WaterMaterial, WaterSharedNodes, WaterSurfaceLayer } from './water/waterMaterial';
+import {
+    createSharedNodes,
+    createWaterMaterial,
+    createWaterUniforms,
+} from './water/waterMaterial';
+import type {
+    WaterMaterial,
+    WaterSharedNodes,
+    WaterSurfaceLayer,
+} from './water/waterMaterial';
 import { WaterSurfaceData } from './water/WaterSurfaceData';
 import { shoreFade, WaveField } from './water/WaveField';
 import type { WaveSample } from './water/WaveField';
 import type { WaterBody } from './water/bodySegmentation';
 
-export type { WaterSurfaceLayer, WaterLayerContext } from './water/waterMaterial';
-export type { WaterBody, WaterBodySettings, WaterBodyKind, WaterBodiesFile } from './water/bodySegmentation';
+export type {
+    WaterSurfaceLayer,
+    WaterLayerContext,
+} from './water/waterMaterial';
+export type {
+    WaterBody,
+    WaterBodySettings,
+    WaterBodyKind,
+    WaterBodiesFile,
+} from './water/bodySegmentation';
 
 const CHUNK_CELLS = 64;
 
@@ -111,7 +127,9 @@ export class Water {
             this.tableDirty = true;
 
             if (reason === 'segmented') {
-                this.data.setBodies(this.bodies.labels, (label) => this.bodies.rowOfLabel(label));
+                this.data.setBodies(this.bodies.labels, (label) =>
+                    this.bodies.rowOfLabel(label),
+                );
             }
 
             this.onBodiesChanged?.(reason);
@@ -136,12 +154,21 @@ export class Water {
 
         for (let cz = 0; cz < this.chunksPerSide; cz++) {
             for (let cx = 0; cx < this.chunksPerSide; cx++) {
-                this.chunks.push({ col0: cx * CHUNK_CELLS, row0: cz * CHUNK_CELLS, mesh: null });
+                this.chunks.push({
+                    col0: cx * CHUNK_CELLS,
+                    row0: cz * CHUNK_CELLS,
+                    mesh: null,
+                });
             }
         }
 
         this.computeRiverFlow(rivers);
-        this.rebuildRect({ x0: 0, z0: 0, x1: surface.resolution - 1, z1: surface.resolution - 1 });
+        this.rebuildRect({
+            x0: 0,
+            z0: 0,
+            x1: surface.resolution - 1,
+            z1: surface.resolution - 1,
+        });
         this.segmentBodies();
     }
 
@@ -192,7 +219,10 @@ export class Water {
     }
 
     private applyMode(): void {
-        const backendFft = !!this.renderer && !!(this.renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend;
+        const backendFft =
+            !!this.renderer &&
+            !!(this.renderer.backend as { isWebGPUBackend?: boolean })
+                .isWebGPUBackend;
         const mode: WaveMode = backendFft && this.fftAllowed ? 'fft' : 'simple';
 
         if (mode === this.mode && (mode === 'fft') === !!this.waves.fft) {
@@ -204,7 +234,10 @@ export class Water {
         this.rebuildMaterial();
     }
 
-    private createMaterial(): { material: WaterMaterial; reflection: THREE.TextureNode } {
+    private createMaterial(): {
+        material: WaterMaterial;
+        reflection: THREE.TextureNode;
+    } {
         return createWaterMaterial({
             u: this.u,
             shared: this.shared,
@@ -229,7 +262,10 @@ export class Water {
         }
 
         this.group.traverse((o) => {
-            if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).material === old) {
+            if (
+                (o as THREE.Mesh).isMesh &&
+                (o as THREE.Mesh).material === old
+            ) {
                 (o as THREE.Mesh).material = material;
             }
         });
@@ -386,7 +422,12 @@ export class Water {
     // ------------------------------------------------------------------ weather & lighting
 
     /** Rain ripples (0-1), current (gusting) wind strength and direction the wind blows towards. */
-    setWeather(rain: number, windStrength: number, windX: number, windZ: number): void {
+    setWeather(
+        rain: number,
+        windStrength: number,
+        windX: number,
+        windZ: number,
+    ): void {
         this.u.rain.value = rain;
         this.u.wind.value = windStrength;
         const len = Math.hypot(windX, windZ);
@@ -412,7 +453,10 @@ export class Water {
 
     applyEnvironment(env: EnvironmentSettings): void {
         const u = this.u;
-        const seaChanged = !this.env || this.env.ocean_enabled !== env.ocean_enabled || this.env.sea_level !== env.sea_level;
+        const seaChanged =
+            !this.env ||
+            this.env.ocean_enabled !== env.ocean_enabled ||
+            this.env.sea_level !== env.sea_level;
         this.env = env;
         u.shallow.value.set(env.water_shallow_color);
         u.deep.value.set(env.water_deep_color);
@@ -433,7 +477,11 @@ export class Water {
         u.whitecaps.value = env.whitecaps ?? 1;
         u.subsurface.value = env.water_subsurface ?? 1;
         this.material.envMapIntensity = env.water_reflectivity;
-        this.waves.setWind(env.wind_strength, u.windDir.value.x, u.windDir.value.y);
+        this.waves.setWind(
+            env.wind_strength,
+            u.windDir.value.x,
+            u.windDir.value.y,
+        );
         this.tableDirty = true;
         this.setOcean(env.ocean_enabled, env.sea_level);
 
@@ -446,7 +494,13 @@ export class Water {
      * Connect (or disconnect) the planar reflection of the nearest water level. `matrix` maps world
      * positions to reflection texture UVs (top-left origin).
      */
-    setReflection(reflection: { texture: THREE.Texture; matrix: THREE.Matrix4; level: number } | null): void {
+    setReflection(
+        reflection: {
+            texture: THREE.Texture;
+            matrix: THREE.Matrix4;
+            level: number;
+        } | null,
+    ): void {
         this.u.hasReflection.value = reflection ? 1 : 0;
 
         if (reflection) {
@@ -479,7 +533,10 @@ export class Water {
         dir.normalize();
 
         for (const d of [15, 40, 80, 150, 300, 600, 1200]) {
-            const level = this.levelAt(camera.position.x + dir.x * d, camera.position.z + dir.z * d);
+            const level = this.levelAt(
+                camera.position.x + dir.x * d,
+                camera.position.z + dir.z * d,
+            );
 
             if (level !== null) {
                 return level;
@@ -536,7 +593,11 @@ export class Water {
      * body's weights: exact for the WebGL 2 surface, a close approximation of the FFT surface (its long
      * waves match; the fine chop is left out). Extra surface layers add their own `sample`.
      */
-    sampleSurface(x: number, z: number, out?: WaterSurfaceSample): WaterSurfaceSample | null {
+    sampleSurface(
+        x: number,
+        z: number,
+        out?: WaterSurfaceSample,
+    ): WaterSurfaceSample | null {
         const level = this.levelAt(x, z);
 
         if (level === null) {
@@ -556,12 +617,32 @@ export class Water {
         const row = inside ? this.data.bodyRowAt(x, z) : 0;
         const body = inside ? this.bodies.at(x, z) : null;
         const table = this.bodies.table.image.data as Float32Array;
-        const at = (entry: number, c: number) => table[(entry * 256 + row) * 4 + c];
-        const weights: [number, number, number] = [at(BODY_TABLE.waves, 0), at(BODY_TABLE.waves, 1), at(BODY_TABLE.waves, 2)];
-        const edge = Math.min(1, Math.max(0, (this.surface.half - Math.max(Math.abs(x), Math.abs(z))) / 60));
-        const fade = shoreFade(depth) * (inside ? edge * edge * (3 - 2 * edge) : 0);
+        const at = (entry: number, c: number) =>
+            table[(entry * 256 + row) * 4 + c];
+        const weights: [number, number, number] = [
+            at(BODY_TABLE.waves, 0),
+            at(BODY_TABLE.waves, 1),
+            at(BODY_TABLE.waves, 2),
+        ];
+        const edge = Math.min(
+            1,
+            Math.max(
+                0,
+                (this.surface.half - Math.max(Math.abs(x), Math.abs(z))) / 60,
+            ),
+        );
+        const fade =
+            shoreFade(depth) * (inside ? edge * edge * (3 - 2 * edge) : 0);
         const sample = this.waveSample;
-        this.waves.sample(x, z, weights, at(BODY_TABLE.waves, 3), fade, sample, this.u.time.value * (this.env?.wave_speed ?? 1));
+        this.waves.sample(
+            x,
+            z,
+            weights,
+            at(BODY_TABLE.waves, 3),
+            fade,
+            sample,
+            this.u.time.value * (this.env?.wave_speed ?? 1),
+        );
         const layer = this.layerSample;
         layer.height = 0;
         layer.slopeX = 0;
@@ -577,9 +658,15 @@ export class Water {
         result.body = body;
         result.height = level + sample.height + layer.height;
         result.normal
-            .set(sample.normal.x / sample.normal.y - layer.slopeX, 1, sample.normal.z / sample.normal.y - layer.slopeZ)
+            .set(
+                sample.normal.x / sample.normal.y - layer.slopeX,
+                1,
+                sample.normal.z / sample.normal.y - layer.slopeZ,
+            )
             .normalize();
-        const flow = inside ? this.data.flowAt(x, z, this.flowSample) : { x: 0, z: 0 };
+        const flow = inside
+            ? this.data.flowAt(x, z, this.flowSample)
+            : { x: 0, z: 0 };
         // River current: the shader's flow speeds (0-1) are ~1.5 m/s at full speed.
         const current = 1.5 * (this.env?.flow_speed ?? 1);
         result.velocity
@@ -590,12 +677,23 @@ export class Water {
         return result;
     }
 
-    private readonly waveSample: WaveSample = { height: 0, normal: new THREE.Vector3(), velocity: new THREE.Vector3() };
-    private readonly layerSample = { height: 0, slopeX: 0, slopeZ: 0, velocity: new THREE.Vector3() };
+    private readonly waveSample: WaveSample = {
+        height: 0,
+        normal: new THREE.Vector3(),
+        velocity: new THREE.Vector3(),
+    };
+    private readonly layerSample = {
+        height: 0,
+        slopeX: 0,
+        slopeZ: 0,
+        velocity: new THREE.Vector3(),
+    };
     private readonly flowSample = { x: 0, z: 0 };
 
     /** Bodies listing for agents and the editor. */
-    describeBodies(): (ReturnType<WaterBodies['describe']> & { waves: ReturnType<Water['describeWaves']> })[] {
+    describeBodies(): (ReturnType<WaterBodies['describe']> & {
+        waves: ReturnType<Water['describeWaves']>;
+    })[] {
         const dir = { x: this.waves.windDir.x, z: this.waves.windDir.y };
 
         return this.bodies.bodies.map((b) => ({
@@ -605,12 +703,21 @@ export class Water {
     }
 
     /** Current sea state of a body: significant wave height and peak wavelength (for agents). */
-    describeWaves(body: WaterBody): { significant_height_m: number; cascade_weights: number[] } {
+    describeWaves(body: WaterBody): {
+        significant_height_m: number;
+        cascade_weights: number[];
+    } {
         const w = this.waves.weights(body, 1);
-        const variance = CASCADES.reduce((sum, c, i) => sum + bandEnergy(this.waves.reference, c.kMin, c.kMax) * w[i] * w[i], 0);
+        const variance = CASCADES.reduce(
+            (sum, c, i) =>
+                sum +
+                bandEnergy(this.waves.reference, c.kMin, c.kMax) * w[i] * w[i],
+            0,
+        );
 
         return {
-            significant_height_m: Math.round(4 * Math.sqrt(variance) * 100) / 100,
+            significant_height_m:
+                Math.round(4 * Math.sqrt(variance) * 100) / 100,
             cascade_weights: w.map((v) => Math.round(v * 100) / 100),
         };
     }
@@ -649,7 +756,8 @@ export class Water {
     }
 
     private scheduleSegmentation(delay = 0.4): void {
-        this.segmentIn = this.segmentIn >= 0 ? Math.min(this.segmentIn, delay) : delay;
+        this.segmentIn =
+            this.segmentIn >= 0 ? Math.min(this.segmentIn, delay) : delay;
     }
 
     private segmentBodies(): void {
@@ -657,13 +765,16 @@ export class Water {
         this.bodies.segment({
             riverFlow: this.riverFlow,
             seaLevel: this.env?.ocean_enabled ? this.env.sea_level : null,
-            wallLimit: Math.max(1.5, this.surface.cell * this.step * 0.5),
+            wallLimit: Math.max(4, this.surface.cell * 1.5),
         });
         let maxFetch = 50;
         const dir = this.waves.windDir;
 
         for (const b of this.bodies.bodies) {
-            maxFetch = Math.max(maxFetch, this.bodies.fetch(b, dir.x, dir.y, OPEN_FETCH));
+            maxFetch = Math.max(
+                maxFetch,
+                this.bodies.fetch(b, dir.x, dir.y, OPEN_FETCH),
+            );
         }
 
         this.waves.setMaxFetch(this.ocean ? OPEN_FETCH : maxFetch);
@@ -672,10 +783,14 @@ export class Water {
     private writeTable(): void {
         this.tableDirty = false;
         this.tableVersion = this.waves.version;
-        this.bodies.writeTable((b) => this.waves.weights(b, 1), { choppiness: 1 });
+        this.bodies.writeTable((b) => this.waves.weights(b, 1), {
+            choppiness: 1,
+        });
         const ref = this.waves.reference;
         this.u.slopeVar.value.fromArray(this.waves.slopeVariance);
-        this.u.heightStd.value.fromArray(CASCADES.map((c) => Math.sqrt(bandEnergy(ref, c.kMin, c.kMax))));
+        this.u.heightStd.value.fromArray(
+            CASCADES.map((c) => Math.sqrt(bandEnergy(ref, c.kMin, c.kMax))),
+        );
     }
 
     private uploadComponents(): void {
@@ -711,13 +826,18 @@ export class Water {
             return;
         }
 
-        if (!Number.isFinite(height) || height > 300 || !this.chunks.some((c) => c.mesh)) {
+        if (
+            !Number.isFinite(height) ||
+            height > 300 ||
+            !this.chunks.some((c) => c.mesh)
+        ) {
             this.hideFine();
 
             return;
         }
 
-        const scale = 2 ** Math.max(0, Math.ceil(Math.log2(Math.max(1, height / 12))));
+        const scale =
+            2 ** Math.max(0, Math.ceil(Math.log2(Math.max(1, height / 12))));
         const snap = this.fineLayout.coarsest * 2 * scale;
         const cx = Math.round(p.x / snap) * snap;
         const cz = Math.round(p.z / snap) * snap;
@@ -786,7 +906,14 @@ export class Water {
             for (let side = 0; side < 4; side++) {
                 for (let i = 0; i < perSide; i++) {
                     const t = -1 + (2 * i) / perSide;
-                    const [x, z] = side === 0 ? [t * r, -r] : side === 1 ? [r, t * r] : side === 2 ? [-t * r, r] : [-r, -t * r];
+                    const [x, z] =
+                        side === 0
+                            ? [t * r, -r]
+                            : side === 1
+                              ? [r, t * r]
+                              : side === 2
+                                ? [-t * r, r]
+                                : [-r, -t * r];
                     positions.push(x, 0, z);
                 }
             }
@@ -808,15 +935,26 @@ export class Water {
         }
 
         const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute(
+            'position',
+            new THREE.Float32BufferAttribute(positions, 3),
+        );
         geometry.setAttribute(
             'normal',
             new THREE.Float32BufferAttribute(
-                Array.from({ length: positions.length }, (_, i) => (i % 3 === 1 ? 1 : 0)),
+                Array.from({ length: positions.length }, (_, i) =>
+                    i % 3 === 1 ? 1 : 0,
+                ),
                 3,
             ),
         );
-        geometry.setAttribute('waterFine', new THREE.Float32BufferAttribute(new Float32Array(positions.length / 3), 1));
+        geometry.setAttribute(
+            'waterFine',
+            new THREE.Float32BufferAttribute(
+                new Float32Array(positions.length / 3),
+                1,
+            ),
+        );
         geometry.setIndex(index);
         fixWinding(geometry);
 
@@ -865,8 +1003,14 @@ export class Water {
         }
 
         const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geometry.setAttribute('waterFine', new THREE.BufferAttribute(new Float32Array(n * n), 1));
+        geometry.setAttribute(
+            'position',
+            new THREE.BufferAttribute(positions, 3),
+        );
+        geometry.setAttribute(
+            'waterFine',
+            new THREE.BufferAttribute(new Float32Array(n * n), 1),
+        );
         geometry.setIndex(index);
         geometry.computeVertexNormals();
         geometry.computeBoundingSphere();

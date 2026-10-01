@@ -373,7 +373,13 @@ export const SCALABILITY_GROUPS: ScalabilityGroup[] = [
         ue: 'sg.ShadingQuality',
         description:
             'Water refraction and reflections, FFT wind waves, caustics on shallow beds, screen-space reflections on wet and glossy ground, bounce light.',
-        keys: ['water_quality', 'water_waves', 'caustics', 'ssr', 'bounce_light_quality'],
+        keys: [
+            'water_quality',
+            'water_waves',
+            'caustics',
+            'ssr',
+            'bounce_light_quality',
+        ],
     },
     {
         key: 'resolution',

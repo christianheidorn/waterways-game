@@ -15,7 +15,12 @@ import { NO_WATER } from '../../shared/types';
 
 export type WaterBodyKind = 'lake' | 'pond' | 'river' | 'sea';
 
-export const WATER_BODY_KINDS: readonly WaterBodyKind[] = ['lake', 'pond', 'river', 'sea'];
+export const WATER_BODY_KINDS: readonly WaterBodyKind[] = [
+    'lake',
+    'pond',
+    'river',
+    'sea',
+];
 
 /** Per-body settings (what the editor's Bodies tool and MCP `edit_water_body` change). */
 export type WaterBodySettings = {
@@ -113,7 +118,7 @@ export type SegmentOptions = {
     riverFlow?: Float32Array | null;
     /** Sea level when the ocean is on (bodies at that level touching the map edge are the sea). */
     seaLevel?: number | null;
-    /** Neighbours whose levels differ by more are not connected (a waterfall splits two bodies). */
+    /** Neighbours whose levels differ by more are not connected (a tall waterfall splits two bodies; steep rapids don't). */
     wallLimit?: number;
 };
 
@@ -132,12 +137,15 @@ export const POND_AREA = 4000;
  * Connected components of the water grid (4-neighbourhood, split where levels jump by more than
  * `wallLimit`), with their statistics and an automatic kind.
  */
-export function segmentWaterBodies(grid: GridLike, options: SegmentOptions = {}): Segmentation {
+export function segmentWaterBodies(
+    grid: GridLike,
+    options: SegmentOptions = {},
+): Segmentation {
     const res = grid.resolution;
     const data = grid.data;
     const labels = new Int32Array(res * res);
     const stack = new Int32Array(res * res);
-    const wallLimit = options.wallLimit ?? Math.max(1.5, grid.cell);
+    const wallLimit = options.wallLimit ?? Math.max(4, grid.cell * 1.5);
     const terrain = options.terrain ?? null;
     const flow = options.riverFlow ?? null;
     const cellArea = grid.cell * grid.cell;
@@ -168,6 +176,7 @@ export function segmentWaterBodies(grid: GridLike, options: SegmentOptions = {})
         let r0 = res;
         let r1 = 0;
         let riverSamples = 0;
+        let rim = 0;
 
         while (top > 0) {
             const i = stack[--top];
@@ -201,17 +210,40 @@ export function segmentWaterBodies(grid: GridLike, options: SegmentOptions = {})
                 riverSamples++;
             }
 
+            let open = false;
+
             for (let k = 0; k < 4; k++) {
-                if ((k === 0 && c === 0) || (k === 1 && c === res - 1) || (k === 2 && r === 0) || (k === 3 && r === res - 1)) {
+                if (
+                    (k === 0 && c === 0) ||
+                    (k === 1 && c === res - 1) ||
+                    (k === 2 && r === 0) ||
+                    (k === 3 && r === res - 1)
+                ) {
                     continue;
                 }
 
-                const j = k === 0 ? i - 1 : k === 1 ? i + 1 : k === 2 ? i - res : i + res;
+                const j =
+                    k === 0
+                        ? i - 1
+                        : k === 1
+                          ? i + 1
+                          : k === 2
+                            ? i - res
+                            : i + res;
 
-                if (labels[j] === 0 && isWet(data[j]) && Math.abs(data[j] - v) <= wallLimit) {
+                if (!isWet(data[j])) {
+                    open = true;
+                } else if (
+                    labels[j] === 0 &&
+                    Math.abs(data[j] - v) <= wallLimit
+                ) {
                     labels[j] = label;
                     stack[top++] = j;
                 }
+            }
+
+            if (open) {
+                rim++;
             }
         }
 
@@ -228,7 +260,10 @@ export function segmentWaterBodies(grid: GridLike, options: SegmentOptions = {})
         const seedR = Math.floor(seed / res);
         const seedC = seed - seedR * res;
         const stats = {
-            seed: { x: seedC * grid.cell - grid.half, z: seedR * grid.cell - grid.half },
+            seed: {
+                x: seedC * grid.cell - grid.half,
+                z: seedR * grid.cell - grid.half,
+            },
             centroid: { x: cx, z: cz },
             area,
             samples: n,
@@ -247,7 +282,13 @@ export function segmentWaterBodies(grid: GridLike, options: SegmentOptions = {})
         };
         bodies.push({
             ...stats,
-            auto_kind: classify(stats, riverSamples / n, options.seaLevel ?? null, (res - 1) * (res - 1) * cellArea),
+            auto_kind: classify(
+                stats,
+                riverSamples / n,
+                options.seaLevel ?? null,
+                (res - 1) * (res - 1) * cellArea,
+                rim / n,
+            ),
         });
     }
 
@@ -280,14 +321,24 @@ export function classify(
     riverShare: number,
     seaLevel: number | null,
     mapArea: number,
+    /** Share of the samples on its shore (narrow water: most of them). */
+    shoreShare = 0,
 ): WaterBodyKind {
-    if (s.edge && ((seaLevel !== null && Math.abs(s.level - seaLevel) < 0.75) || s.area > mapArea * 0.2)) {
+    if (
+        s.edge &&
+        ((seaLevel !== null && Math.abs(s.level - seaLevel) < 0.75) ||
+            s.area > mapArea * 0.2)
+    ) {
         return 'sea';
     }
 
     const slope = s.level_max - s.level_min;
 
-    if (riverShare > 0.5 || (elongation(s.cov) < 0.18 && slope > 0.6)) {
+    // On a river spline, a long sloping ribbon, or narrow water that runs downhill.
+    if (
+        riverShare > 0.5 ||
+        (slope > 0.6 && (elongation(s.cov) < 0.18 || shoreShare > 0.45))
+    ) {
         return 'river';
     }
 
@@ -298,7 +349,12 @@ export function classify(
  * Fetch (m) of a body for a wind blowing along (dx, dz): its length along the wind, from the spread of
  * its samples (a uniform strip of length L has σ² = L²/12). The sea is open.
  */
-export function bodyFetch(body: Pick<WaterBody, 'kind' | 'cov' | 'settings'>, dx: number, dz: number, open: number): number {
+export function bodyFetch(
+    body: Pick<WaterBody, 'kind' | 'cov' | 'settings'>,
+    dx: number,
+    dz: number,
+    open: number,
+): number {
     if (body.settings.fetch !== null && body.settings.fetch > 0) {
         return body.settings.fetch;
     }
@@ -310,29 +366,65 @@ export function bodyFetch(body: Pick<WaterBody, 'kind' | 'cov' | 'settings'>, dx
     const len = Math.hypot(dx, dz) || 1;
     const ux = dx / len;
     const uz = dz / len;
-    const variance = ux * ux * body.cov.xx + 2 * ux * uz * body.cov.xz + uz * uz * body.cov.zz;
+    const variance =
+        ux * ux * body.cov.xx +
+        2 * ux * uz * body.cov.xz +
+        uz * uz * body.cov.zz;
 
     return Math.max(5, Math.sqrt(12 * Math.max(0, variance)));
 }
 
 /** Settings from a stored record (anything missing or invalid falls back to the defaults). */
-export function sanitizeSettings(input: Partial<Record<keyof WaterBodySettings, unknown>>, base: WaterBodySettings): WaterBodySettings {
+export function sanitizeSettings(
+    input: Partial<Record<keyof WaterBodySettings, unknown>>,
+    base: WaterBodySettings,
+): WaterBodySettings {
     const num = (v: unknown, min: number, max: number, fallback: number) =>
-        typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : fallback;
+        typeof v === 'number' && Number.isFinite(v)
+            ? Math.min(max, Math.max(min, v))
+            : fallback;
     const color = (v: unknown, fallback: string | null) =>
-        v === null ? null : typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : fallback;
+        v === null
+            ? null
+            : typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v)
+              ? v.toLowerCase()
+              : fallback;
     const kind = input.kind;
 
     return {
-        name: typeof input.name === 'string' ? input.name.slice(0, 80) : base.name,
-        kind: kind === null ? null : WATER_BODY_KINDS.includes(kind as WaterBodyKind) ? (kind as WaterBodyKind) : base.kind,
+        name:
+            typeof input.name === 'string'
+                ? input.name.slice(0, 80)
+                : base.name,
+        kind:
+            kind === null
+                ? null
+                : WATER_BODY_KINDS.includes(kind as WaterBodyKind)
+                  ? (kind as WaterBodyKind)
+                  : base.kind,
         wind_exposure: num(input.wind_exposure, 0, 2, base.wind_exposure),
-        fetch: input.fetch === null ? null : typeof input.fetch === 'number' ? num(input.fetch, 5, 200_000, 0) : base.fetch,
+        fetch:
+            input.fetch === null
+                ? null
+                : typeof input.fetch === 'number'
+                  ? num(input.fetch, 5, 200_000, 0)
+                  : base.fetch,
         wave_height: num(input.wave_height, 0, 4, base.wave_height),
         choppiness: num(input.choppiness, 0, 2, base.choppiness),
-        shallow_color: 'shallow_color' in input ? color(input.shallow_color, base.shallow_color) : base.shallow_color,
-        deep_color: 'deep_color' in input ? color(input.deep_color, base.deep_color) : base.deep_color,
-        clarity: input.clarity === null ? null : typeof input.clarity === 'number' ? num(input.clarity, 0.3, 40, 5) : base.clarity,
+        shallow_color:
+            'shallow_color' in input
+                ? color(input.shallow_color, base.shallow_color)
+                : base.shallow_color,
+        deep_color:
+            'deep_color' in input
+                ? color(input.deep_color, base.deep_color)
+                : base.deep_color,
+        clarity:
+            input.clarity === null
+                ? null
+                : typeof input.clarity === 'number'
+                  ? num(input.clarity, 0.3, 40, 5)
+                  : base.clarity,
         surf: typeof input.surf === 'boolean' ? input.surf : base.surf,
     };
 }
@@ -354,7 +446,9 @@ export function matchBodies(
         const c = Math.round((x + grid.half) / grid.cell);
         const r = Math.round((z + grid.half) / grid.cell);
 
-        return c < 0 || r < 0 || c >= res || r >= res ? 0 : seg.labels[r * res + c];
+        return c < 0 || r < 0 || c >= res || r >= res
+            ? 0
+            : seg.labels[r * res + c];
     };
     const claims = new Map<number, WaterBodyRecord[]>();
     const unclaimed: WaterBodyRecord[] = [];
@@ -377,7 +471,13 @@ export function matchBodies(
         seg.bodies.forEach((b, i) => {
             const label = i + 1;
 
-            if (claims.has(label) || cx < b.bounds.x0 || cx > b.bounds.x1 || cz < b.bounds.z0 || cz > b.bounds.z1) {
+            if (
+                claims.has(label) ||
+                cx < b.bounds.x0 ||
+                cx > b.bounds.x1 ||
+                cz < b.bounds.z0 ||
+                cz > b.bounds.z1
+            ) {
                 return;
             }
 
@@ -394,14 +494,25 @@ export function matchBodies(
         }
     }
 
-    let next = 1 + previous.reduce((m, p) => Math.max(m, Number(/^wb(\d+)$/.exec(p.id)?.[1] ?? 0)), 0);
+    let next =
+        1 +
+        previous.reduce(
+            (m, p) => Math.max(m, Number(/^wb(\d+)$/.exec(p.id)?.[1] ?? 0)),
+            0,
+        );
 
     return seg.bodies.map((b, i) => {
         const owners = claims.get(i + 1) ?? [];
-        const owner = owners.reduce<WaterBodyRecord | null>((best, p) => (!best || (p.area ?? 0) > (best.area ?? 0) ? p : best), null);
-        const settings = owner ? sanitizeSettings(owner, defaultSettingsFor(b.auto_kind)) : defaultSettingsFor(b.auto_kind);
+        const owner = owners.reduce<WaterBodyRecord | null>(
+            (best, p) => (!best || (p.area ?? 0) > (best.area ?? 0) ? p : best),
+            null,
+        );
+        const settings = owner
+            ? sanitizeSettings(owner, defaultSettingsFor(b.auto_kind))
+            : defaultSettingsFor(b.auto_kind);
         // Keep the old seed while it is still wet in this body (stable through small edits).
-        const keepSeed = owner && labelAt(owner.seed[0], owner.seed[1]) === i + 1;
+        const keepSeed =
+            owner && labelAt(owner.seed[0], owner.seed[1]) === i + 1;
 
         return {
             ...b,
@@ -432,6 +543,11 @@ export function serializeBodies(bodies: readonly WaterBody[]): WaterBodiesFile {
 }
 
 /** Display name: the user's, else "<Kind> <id>". */
-export function bodyName(b: Pick<WaterBody, 'id' | 'kind' | 'settings'>): string {
-    return b.settings.name || `${b.kind[0].toUpperCase()}${b.kind.slice(1)} ${b.id}`;
+export function bodyName(
+    b: Pick<WaterBody, 'id' | 'kind' | 'settings'>,
+): string {
+    return (
+        b.settings.name ||
+        `${b.kind[0].toUpperCase()}${b.kind.slice(1)} ${b.id}`
+    );
 }

@@ -19,6 +19,9 @@ import type { GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import type { FoliageKind } from '../shared/types';
 import { LOD_BUDGETS, lodIndexOf } from '../world/FoliageLod';
+import { basePivot, bleedEdgeColor, extractCardMatte } from './cardMatte';
+import type { RawImage } from './cardMatte';
+import { describeCoverage, measureCoverage } from '../util/alphaCoverage';
 
 export type BakeSource =
     /** .gltf (external .bin / textures resolved relative to url) or .glb */
@@ -51,6 +54,8 @@ export type BakeMeta = {
     lod_distances: number[];
     /** Far LOD: 'octahedral' impostor (current bakes); absent for rocks, cards and older bakes. */
     impostor?: 'octahedral';
+    /** Problems the bake worked around (e.g. an impostor left out after failing its alpha check). */
+    warnings?: string[];
 };
 
 export type BakeResult = {
@@ -144,13 +149,13 @@ export async function bakeFoliageAsset(
 
 // ------------------------------------------------------------------ shared helpers
 
-type RawImage = { data: Uint8ClampedArray; width: number; height: number };
-
 /** Bake-wide resources, disposed together at the end. */
 class BakeContext {
     readonly geometries = new Set<THREE.BufferGeometry>();
     readonly materials = new Set<THREE.Material>();
     readonly textures = new Set<THREE.Texture>();
+    /** Problems found while baking (reported with the bake, see BakeMeta.warnings). */
+    readonly warnings: string[] = [];
     /** Textures exported through our own PNG encoder (keeps colour under transparent pixels). */
     readonly rawTextures = new Map<THREE.Texture, RawImage>();
     private renderer: THREE.WebGLRenderer | null = null;
@@ -433,11 +438,23 @@ async function bakeModel(
             }
         }
 
+        let hasImpostor = false;
+
         if (impostor) {
             report('Rendering impostor', 0);
-            lodGroups.push(
-                renderOctahedralImpostor(lod0, ctx, `LOD${lodGroups.length}`),
+            const far = renderOctahedralImpostor(
+                lod0,
+                ctx,
+                `LOD${lodGroups.length}`,
             );
+
+            // An impostor that failed its coverage check is left out: the last mesh LOD is drawn
+            // out to the cull distance instead (never a black box).
+            if (far) {
+                lodGroups.push(far);
+                hasImpostor = true;
+            }
+
             report('Rendering impostor', 1);
             await tick();
         }
@@ -456,7 +473,8 @@ async function bakeModel(
             source_triangles: sourceTriangles,
             texture_size: 0,
             lod_distances: lodDistances.slice(0, lodGroups.length),
-            ...(impostor ? { impostor: 'octahedral' as const } : {}),
+            ...(hasImpostor ? { impostor: 'octahedral' as const } : {}),
+            ...(ctx.warnings.length ? { warnings: ctx.warnings.slice() } : {}),
         };
 
         report('Exporting GLB', 0);
@@ -1706,7 +1724,8 @@ uniform sampler2D map;
 uniform float hasMap;
 uniform vec3 diffuse;
 uniform float alphaTest;
-uniform float normals;
+// 0 = albedo, 1 = normal + depth, 2 = coverage mask (white).
+uniform float mode;
 
 void main() {
     vec4 texel = hasMap > 0.5 ? texture2D(map, vUv) : vec4(1.0);
@@ -1716,9 +1735,11 @@ void main() {
     }
 
     // Leaves keep their geometry normal on back faces (as in game).
-    gl_FragColor = normals > 0.5
-        ? vec4(normalize(vNormal) * 0.5 + 0.5, vDepth)
-        : vec4(texel.rgb * diffuse * vColor, 1.0);
+    gl_FragColor = mode > 1.5
+        ? vec4(1.0)
+        : mode > 0.5
+          ? vec4(normalize(vNormal) * 0.5 + 0.5, vDepth)
+          : vec4(texel.rgb * diffuse * vColor, 1.0);
 }
 `;
 
@@ -1734,7 +1755,7 @@ function renderOctahedralImpostor(
     model: THREE.Object3D,
     ctx: BakeContext,
     name: string,
-): THREE.Group {
+): THREE.Group | null {
     const box = new THREE.Box3().setFromObject(model);
     const center = box.getCenter(new THREE.Vector3());
     let radius = 0;
@@ -1768,18 +1789,21 @@ function renderOctahedralImpostor(
         colorSpace: THREE.SRGBColorSpace,
     });
     const normalTarget = new THREE.WebGLRenderTarget(size * ss, size * ss);
+    // Coverage from a white-on-black mask in the colour channels: it doesn't depend on the read-back
+    // keeping alpha (premultiplied / RGB-only paths on some GPUs and browsers).
+    const maskTarget = new THREE.WebGLRenderTarget(size * ss, size * ss);
     const uniforms = {
         viewDir: { value: new THREE.Vector3() },
         center: { value: center },
         radius: { value: radius },
     };
-    const made = new Map<THREE.Material, [THREE.Material, THREE.Material]>();
-    const pair = (source: THREE.Material): [THREE.Material, THREE.Material] => {
+    const made = new Map<THREE.Material, THREE.Material[]>();
+    const pair = (source: THREE.Material): THREE.Material[] => {
         let materials = made.get(source);
 
         if (!materials) {
             const m = source as THREE.MeshStandardMaterial;
-            const make = (normals: boolean) => {
+            const make = (mode: number) => {
                 const material = new THREE.ShaderMaterial({
                     vertexShader: OCTA_VERTEX,
                     fragmentShader: OCTA_FRAGMENT,
@@ -1795,14 +1819,14 @@ function renderOctahedralImpostor(
                             ).clone(),
                         },
                         alphaTest: { value: m.alphaTest || 0.5 },
-                        normals: { value: normals ? 1 : 0 },
+                        mode: { value: mode },
                     },
                 });
                 ctx.materials.add(material);
 
                 return material;
             };
-            materials = [make(false), make(true)];
+            materials = [make(0), make(1), make(2)];
             made.set(source, materials);
         }
 
@@ -1811,6 +1835,7 @@ function renderOctahedralImpostor(
     const scene = new THREE.Scene();
     const albedoMeshes: THREE.Mesh[] = [];
     const normalMeshes: THREE.Mesh[] = [];
+    const maskMeshes: THREE.Mesh[] = [];
     model.traverse((obj) => {
         const mesh = obj as THREE.Mesh;
 
@@ -1822,7 +1847,11 @@ function renderOctahedralImpostor(
             ? mesh.material
             : [mesh.material];
 
-        for (const [k, list] of [albedoMeshes, normalMeshes].entries()) {
+        for (const [k, list] of [
+            albedoMeshes,
+            normalMeshes,
+            maskMeshes,
+        ].entries()) {
             const clone = mesh.clone();
             const materials = sources.map((s) => pair(s)[k]);
             clone.material = Array.isArray(mesh.material)
@@ -1890,10 +1919,30 @@ function renderOctahedralImpostor(
     };
     const albedoPixels = read(target, albedoMeshes);
     const normalPixels = read(normalTarget, normalMeshes);
+    const maskPixels = read(maskTarget, maskMeshes);
     renderer.setRenderTarget(null);
     renderer.autoClear = previousAutoClear;
     target.dispose();
     normalTarget.dispose();
+    maskTarget.dispose();
+
+    // The albedo's own alpha should match the mask; where it doesn't (alpha read back as 1 around
+    // the model), this platform lost alpha somewhere between the target and the read-back.
+    let maskEmpty = 0;
+    let alphaLost = 0;
+
+    for (let i = 0; i < maskPixels.length; i += 4) {
+        if (maskPixels[i] < 8) {
+            maskEmpty++;
+            alphaLost += albedoPixels[i + 3] > 128 ? 1 : 0;
+        }
+    }
+
+    if (maskEmpty > 0 && alphaLost > maskEmpty * 0.5) {
+        ctx.warnings.push(
+            'impostor capture: the read-back lost alpha on this GPU / browser (coverage taken from a mask pass)',
+        );
+    }
 
     // Downsample (coverage-weighted box filter) and flip to top-down rows.
     const albedo = new Uint8ClampedArray(size * size * 4);
@@ -1910,7 +1959,7 @@ function renderOctahedralImpostor(
                 for (let sx = 0; sx < ss; sx++) {
                     const glRow = (size - 1 - y) * ss + (ss - 1 - sy);
                     const o = (glRow * srcW + x * ss + sx) * 4;
-                    const w = albedoPixels[o + 3];
+                    const w = maskPixels[o];
 
                     if (w === 0) {
                         continue;
@@ -1945,6 +1994,17 @@ function renderOctahedralImpostor(
             albedo[o + 3] = alpha;
             normal[o + 3] = alpha;
         }
+    }
+
+    // Every view must be a cut-out (a silhouette inside the bounding sphere), never an opaque box.
+    const coverage = measureCoverage(albedo, size, size, 'octahedral', n, n);
+
+    if (!coverage.ok) {
+        ctx.warnings.push(
+            `impostor left out: ${describeCoverage(coverage)}; the last mesh LOD is drawn to the cull distance instead`,
+        );
+
+        return null;
     }
 
     const albedoRaw: RawImage = { data: albedo, width: size, height: size };
@@ -2622,22 +2682,7 @@ async function bakeCard(
 
         report('Removing background', 0);
 
-        const keyed = !!source.keyBackground || !hasMeaningfulAlpha(image);
-
-        if (keyed) {
-            keyBackground(image, parseHexColor(source.keyColor));
-        }
-
-        await tick();
-        // Cut the rim off the matte so no background-tinted halo survives (thin blades are kept).
-        chokeMatte(image, keyed);
-        const trimmed = trimToAlpha(image);
-
-        if (!trimmed) {
-            throw new Error('The image is empty after removing the background');
-        }
-
-        image = trimmed;
+        image = extractCardMatte(image, source).image;
         const pivotU = basePivot(image);
         const scale = Math.min(
             1,
@@ -2740,757 +2785,4 @@ async function bakeCard(
     } finally {
         ctx.dispose();
     }
-}
-
-function hasMeaningfulAlpha(image: RawImage): boolean {
-    const { width: w, height: h, data } = image;
-    let transparent = 0;
-    let border = 0;
-
-    for (let x = 0; x < w; x++) {
-        for (const y of [0, h - 1]) {
-            border++;
-
-            if (data[(y * w + x) * 4 + 3] < 128) {
-                transparent++;
-            }
-        }
-    }
-
-    for (let y = 0; y < h; y++) {
-        for (const x of [0, w - 1]) {
-            border++;
-
-            if (data[(y * w + x) * 4 + 3] < 128) {
-                transparent++;
-            }
-        }
-    }
-
-    return transparent / border > 0.5;
-}
-
-function parseHexColor(
-    hex: string | undefined,
-): [number, number, number] | null {
-    const m = hex?.trim().match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
-
-    if (!m) {
-        return null;
-    }
-
-    const v =
-        m[1].length === 3
-            ? m[1]
-                  .split('')
-                  .map((c) => c + c)
-                  .join('')
-            : m[1];
-
-    return [
-        parseInt(v.slice(0, 2), 16),
-        parseInt(v.slice(2, 4), 16),
-        parseInt(v.slice(4, 6), 16),
-    ];
-}
-
-function smooth01(e0: number, e1: number, x: number): number {
-    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
-
-    return t * t * (3 - 2 * t);
-}
-
-/**
- * Breadth-first colour propagation: every pixel reached from the `known` set (in `mask`, when
- * given) takes the average `rgb` of its already-known 8-neighbours, layer by layer.
- * Returns the layer each pixel was reached in (0 = known, -1 = not reached).
- */
-function propagateColor(
-    w: number,
-    h: number,
-    rgb: Float32Array,
-    known: Uint8Array,
-    maxLayers: number,
-    mask?: Uint8Array,
-): Int32Array {
-    const n = w * h;
-    const layerOf = new Int32Array(n).fill(-1);
-    let layer: number[] = [];
-    const visit = (i: number, into: number[]) => {
-        const x = i % w;
-        const y = (i / w) | 0;
-
-        for (let dy = -1; dy <= 1; dy++) {
-            const ny = y + dy;
-
-            if (ny < 0 || ny >= h) {
-                continue;
-            }
-
-            for (let dx = -1; dx <= 1; dx++) {
-                const nx = x + dx;
-
-                if (nx < 0 || nx >= w) {
-                    continue;
-                }
-
-                const j = ny * w + nx;
-
-                if (layerOf[j] === -1 && (!mask || mask[j])) {
-                    layerOf[j] = -2;
-                    into.push(j);
-                }
-            }
-        }
-    };
-
-    for (let i = 0; i < n; i++) {
-        if (known[i]) {
-            layerOf[i] = 0;
-        }
-    }
-
-    for (let i = 0; i < n; i++) {
-        if (known[i]) {
-            visit(i, layer);
-        }
-    }
-
-    for (let pass = 1; layer.length && pass <= maxLayers; pass++) {
-        const fill = new Float32Array(layer.length * 3);
-
-        for (let k = 0; k < layer.length; k++) {
-            const i = layer[k];
-            const x = i % w;
-            const y = (i / w) | 0;
-            let r = 0;
-            let g = 0;
-            let b = 0;
-            let c = 0;
-
-            for (let dy = -1; dy <= 1; dy++) {
-                const ny = y + dy;
-
-                if (ny < 0 || ny >= h) {
-                    continue;
-                }
-
-                for (let dx = -1; dx <= 1; dx++) {
-                    const nx = x + dx;
-                    const j = ny * w + nx;
-
-                    if (nx >= 0 && nx < w && layerOf[j] >= 0) {
-                        r += rgb[j * 3];
-                        g += rgb[j * 3 + 1];
-                        b += rgb[j * 3 + 2];
-                        c++;
-                    }
-                }
-            }
-
-            fill[k * 3] = r / c;
-            fill[k * 3 + 1] = g / c;
-            fill[k * 3 + 2] = b / c;
-        }
-
-        for (let k = 0; k < layer.length; k++) {
-            const i = layer[k];
-            rgb[i * 3] = fill[k * 3];
-            rgb[i * 3 + 1] = fill[k * 3 + 1];
-            rgb[i * 3 + 2] = fill[k * 3 + 2];
-            layerOf[i] = pass;
-        }
-
-        const next: number[] = [];
-
-        for (const i of layer) {
-            visit(i, next);
-        }
-
-        layer = next;
-    }
-
-    for (const i of layer) {
-        layerOf[i] = -1;
-    }
-
-    return layerOf;
-}
-
-/**
- * Removes a flat background colour (magenta, cyan, white, …) — `key` when given, else sampled
- * from the image border. Background-like regions connected to the border — or large enclosed
- * ones (gaps between branches) — become transparent. In a band along the cut-out edge, alpha is
- * re-estimated by un-mixing each pixel between the key and the nearby solid plant colour, the
- * foreground colour is recovered (F = (C − (1 − a)·B) / a) and remaining key spill is removed.
- */
-function keyBackground(
-    image: RawImage,
-    key: [number, number, number] | null,
-): void {
-    const { width: w, height: h, data } = image;
-    const n = w * h;
-    const rs: number[] = [];
-    const gs: number[] = [];
-    const bs: number[] = [];
-    const sample = (x: number, y: number) => {
-        const o = (y * w + x) * 4;
-
-        if (data[o + 3] >= 128) {
-            rs.push(data[o]);
-            gs.push(data[o + 1]);
-            bs.push(data[o + 2]);
-        }
-    };
-    const ring = Math.max(1, Math.round(Math.min(w, h) * 0.01));
-
-    for (let k = 0; k < ring; k++) {
-        for (let x = 0; x < w; x++) {
-            sample(x, k);
-            sample(x, h - 1 - k);
-        }
-
-        for (let y = 0; y < h; y++) {
-            sample(k, y);
-            sample(w - 1 - k, y);
-        }
-    }
-
-    if (!rs.length) {
-        return;
-    }
-
-    const median = (list: number[]) => {
-        const sorted = list.slice().sort((a, b) => a - b);
-
-        return sorted[sorted.length >> 1];
-    };
-    const detected = [median(rs), median(gs), median(bs)];
-    const far = (c: number[]) =>
-        Math.hypot(c[0] - detected[0], c[1] - detected[1], c[2] - detected[2]);
-    // Trust the requested key unless the image plainly came back with another background.
-    const bg = key && far(key) < 90 ? key : detected;
-    // Noise of the border (JPEG artefacts, gradients) widens the tolerance.
-    let variance = 0;
-    let samples = 0;
-
-    for (let i = 0; i < rs.length; i++) {
-        const d2 =
-            (rs[i] - bg[0]) ** 2 + (gs[i] - bg[1]) ** 2 + (bs[i] - bg[2]) ** 2;
-
-        // Plant pixels touching the border are not background noise.
-        if (d2 < 90 * 90) {
-            variance += d2;
-            samples++;
-        }
-    }
-
-    const noise = samples ? Math.sqrt(variance / samples) : 0;
-    const tolerance = Math.min(70, Math.max(26, noise * 2.5));
-    const feather = 42;
-    const dist = new Float32Array(n);
-
-    for (let i = 0; i < n; i++) {
-        const o = i * 4;
-        dist[i] = Math.sqrt(
-            (data[o] - bg[0]) ** 2 +
-                (data[o + 1] - bg[1]) ** 2 +
-                (data[o + 2] - bg[2]) ** 2,
-        );
-    }
-
-    // Connected regions of background-like pixels.
-    const limit = tolerance + feather;
-    const region = new Int32Array(n).fill(-1);
-    const keyRegion: boolean[] = [];
-    const lum = (r: number, g: number, b: number) =>
-        0.2126 * r + 0.7152 * g + 0.0722 * b;
-    const magentaKey = bg[0] > 150 && bg[2] > 150 && bg[1] < 110;
-    const cyanKey = bg[1] > 150 && bg[2] > 150 && bg[0] < 110;
-    const whiteKey =
-        lum(bg[0], bg[1], bg[2]) > 190 &&
-        Math.max(...bg) - Math.min(...bg) < 40;
-    // Saturated keys (magenta, cyan) don't occur in plants: every enclosed pocket of key colour
-    // (gaps between leaflets) is background. Otherwise only large pockets or near-exact key
-    // colour are, so white blossoms on a white background survive.
-    const saturatedKey = magentaKey || cyanKey;
-    const minArea = Math.max(48, n * 0.0008);
-    const stack: number[] = [];
-
-    for (let start = 0; start < n; start++) {
-        if (
-            region[start] >= 0 ||
-            dist[start] >= limit ||
-            data[start * 4 + 3] < 8
-        ) {
-            continue;
-        }
-
-        const id = keyRegion.length;
-        let area = 0;
-        let touchesBorder = false;
-        let core = 0;
-        region[start] = id;
-        stack.push(start);
-
-        while (stack.length) {
-            const i = stack.pop()!;
-            area++;
-            core += dist[i] < tolerance ? 1 : 0;
-            const x = i % w;
-            const y = (i / w) | 0;
-
-            if (x === 0 || y === 0 || x === w - 1 || y === h - 1) {
-                touchesBorder = true;
-            }
-
-            const neighbours = [
-                x > 0 ? i - 1 : -1,
-                x < w - 1 ? i + 1 : -1,
-                y > 0 ? i - w : -1,
-                y < h - 1 ? i + w : -1,
-            ];
-
-            for (const j of neighbours) {
-                if (
-                    j >= 0 &&
-                    region[j] < 0 &&
-                    dist[j] < limit &&
-                    data[j * 4 + 3] >= 8
-                ) {
-                    region[j] = id;
-                    stack.push(j);
-                }
-            }
-        }
-
-        keyRegion.push(
-            touchesBorder ||
-                area >= minArea ||
-                saturatedKey ||
-                core >= area * 0.3,
-        );
-    }
-
-    const isKey = new Uint8Array(n);
-
-    for (let i = 0; i < n; i++) {
-        const id = region[i];
-        isKey[i] = id >= 0 && keyRegion[id] ? 1 : 0;
-    }
-
-    // Edge band: everything within `radius` px of a keyed pixel; beyond it the plant is "solid".
-    const radius = Math.max(3, Math.round(Math.max(w, h) / 400));
-    const band = new Uint8Array(n);
-    const solid = new Uint8Array(n);
-    {
-        const reach = new Int32Array(n).fill(-1);
-        let front: number[] = [];
-
-        for (let i = 0; i < n; i++) {
-            if (isKey[i]) {
-                reach[i] = 0;
-                front.push(i);
-            }
-        }
-
-        for (let step = 1; step <= radius && front.length; step++) {
-            const next: number[] = [];
-
-            for (const i of front) {
-                const x = i % w;
-                const y = (i / w) | 0;
-
-                for (let dy = -1; dy <= 1; dy++) {
-                    for (let dx = -1; dx <= 1; dx++) {
-                        const nx = x + dx;
-                        const ny = y + dy;
-                        const j = ny * w + nx;
-
-                        if (
-                            nx >= 0 &&
-                            ny >= 0 &&
-                            nx < w &&
-                            ny < h &&
-                            reach[j] < 0
-                        ) {
-                            reach[j] = step;
-                            next.push(j);
-                        }
-                    }
-                }
-            }
-
-            front = next;
-        }
-
-        for (let i = 0; i < n; i++) {
-            band[i] = reach[i] >= 0 ? 1 : 0;
-
-            if (data[i * 4 + 3] < 128) {
-                continue;
-            }
-
-            if (reach[i] < 0) {
-                solid[i] = 1;
-                continue;
-            }
-
-            // Inside the band (thin fronds are all band): a pixel not touching the background
-            // that is the most plant-like of its neighbourhood counts as pure plant colour.
-            if (isKey[i] || dist[i] < limit) {
-                continue;
-            }
-
-            const x = i % w;
-            const y = (i / w) | 0;
-            let pure = true;
-
-            for (let dy = -1; dy <= 1 && pure; dy++) {
-                for (let dx = -1; dx <= 1; dx++) {
-                    const nx = x + dx;
-                    const ny = y + dy;
-
-                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
-                        continue;
-                    }
-
-                    const j = ny * w + nx;
-
-                    if (isKey[j] || dist[i] < dist[j] * 0.85) {
-                        pure = false;
-                        break;
-                    }
-                }
-            }
-
-            solid[i] = pure ? 1 : 0;
-        }
-    }
-
-    // Local plant colour for every band pixel, grown in from the solid interior.
-    const local = new Float32Array(n * 3);
-
-    for (let i = 0; i < n; i++) {
-        local[i * 3] = data[i * 4];
-        local[i * 3 + 1] = data[i * 4 + 1];
-        local[i * 3 + 2] = data[i * 4 + 2];
-    }
-
-    const localLayer = propagateColor(w, h, local, solid, radius * 4 + 4, band);
-    for (let i = 0; i < n; i++) {
-        if (!band[i]) {
-            continue;
-        }
-
-        const o = i * 4;
-
-        if (isKey[i] && dist[i] < tolerance) {
-            data[o + 3] = 0;
-            continue;
-        }
-
-        const cr = data[o];
-        const cg = data[o + 1];
-        const cb = data[o + 2];
-        // Distance-based fallback (plant colour close to the key, or no solid plant nearby).
-        let alpha = isKey[i]
-            ? smooth01(tolerance, tolerance + feather, dist[i])
-            : 1;
-        let fr = localLayer[i] >= 0 ? local[i * 3] : cr;
-        let fg = localLayer[i] >= 0 ? local[i * 3 + 1] : cg;
-        let fb = localLayer[i] >= 0 ? local[i * 3 + 2] : cb;
-        const vr = fr - bg[0];
-        const vg = fg - bg[1];
-        const vb = fb - bg[2];
-        const len2 = vr * vr + vg * vg + vb * vb;
-
-        if (localLayer[i] >= 0 && len2 > 60 * 60) {
-            // Project the pixel onto the key → plant line; colour off that line is real detail
-            // (a highlight, a blossom), not a mix with the background.
-            const pr = cr - bg[0];
-            const pg = cg - bg[1];
-            const pb = cb - bg[2];
-            const t = Math.min(
-                1,
-                Math.max(0, (pr * vr + pg * vg + pb * vb) / len2),
-            );
-            const off = Math.hypot(pr - t * vr, pg - t * vg, pb - t * vb);
-            alpha = t + (1 - t) * smooth01(24, 70, off);
-        }
-
-        if (alpha <= 0.03) {
-            data[o + 3] = 0;
-            continue;
-        }
-
-        // Decontaminate: recover the foreground colour from the mix with the key.
-        const a = Math.max(alpha, 0.08);
-        fr = Math.min(255, Math.max(0, (cr - (1 - a) * bg[0]) / a));
-        fg = Math.min(255, Math.max(0, (cg - (1 - a) * bg[1]) / a));
-        fb = Math.min(255, Math.max(0, (cb - (1 - a) * bg[2]) / a));
-
-        // Despill whatever key tint is left.
-        if (magentaKey) {
-            const spill = Math.min(fr, fb) - fg;
-
-            if (spill > 0) {
-                fr -= spill;
-                fb -= spill;
-            }
-        } else if (cyanKey) {
-            const spill = Math.min(fg, fb) - fr;
-
-            if (spill > 0) {
-                fg -= spill;
-                fb -= spill;
-            }
-        } else if (whiteKey && localLayer[i] >= 0) {
-            // Brightness lift: an edge pixel shouldn't be lighter than the plant next to it.
-            const cap =
-                lum(local[i * 3], local[i * 3 + 1], local[i * 3 + 2]) * 1.12 +
-                6;
-            const l = lum(fr, fg, fb);
-
-            if (l > cap) {
-                const k = cap / l;
-                fr *= k;
-                fg *= k;
-                fb *= k;
-            }
-        }
-
-        data[o] = fr;
-        data[o + 1] = fg;
-        data[o + 2] = fb;
-        data[o + 3] = Math.min(data[o + 3], Math.round(alpha * 255));
-    }
-
-    // Keyed pixels outside the band (can only be deep background) are fully transparent.
-    for (let i = 0; i < n; i++) {
-        if (isKey[i] && !band[i]) {
-            data[i * 4 + 3] = 0;
-        }
-    }
-}
-
-/**
- * Matte choke: erodes the rim of the alpha matte by ~1 px (scaled with the image) where the
- * plant is thick enough, then tightens the soft edge, so no background-tinted halo survives.
- * Features up to ~4 px across (thin fronds, grass blades) are not eroded, only tightened.
- * Without `erodeOpaque`, fully opaque rim pixels are kept (images that came with real alpha).
- */
-function chokeMatte(image: RawImage, erodeOpaque: boolean): void {
-    const { width: w, height: h, data } = image;
-    const n = w * h;
-    const r = Math.max(1, Math.round(Math.max(w, h) / 1024));
-    const cap = r + 3;
-    // Chebyshev distance (in px) to the nearest background pixel, capped.
-    const d = new Uint8Array(n).fill(cap);
-    let front: number[] = [];
-
-    for (let i = 0; i < n; i++) {
-        if (data[i * 4 + 3] < 20) {
-            d[i] = 0;
-            front.push(i);
-        }
-    }
-
-    for (let step = 1; step < cap && front.length; step++) {
-        const next: number[] = [];
-
-        for (const i of front) {
-            const x = i % w;
-            const y = (i / w) | 0;
-
-            for (let dy = -1; dy <= 1; dy++) {
-                for (let dx = -1; dx <= 1; dx++) {
-                    const nx = x + dx;
-                    const ny = y + dy;
-                    const j = ny * w + nx;
-
-                    if (nx >= 0 && ny >= 0 && nx < w && ny < h && d[j] > step) {
-                        d[j] = step;
-                        next.push(j);
-                    }
-                }
-            }
-        }
-
-        front = next;
-    }
-
-    const out = new Uint8ClampedArray(n);
-    const win = r + 1;
-
-    for (let i = 0; i < n; i++) {
-        let a = data[i * 4 + 3] / 255;
-        out[i] = data[i * 4 + 3];
-
-        if (d[i] === 0 || d[i] > r + 1) {
-            continue;
-        }
-
-        if (d[i] <= r && (erodeOpaque || a < 0.98)) {
-            // Thickness: deepest pixel within reach. Thin features stay whole.
-            const x = i % w;
-            const y = (i / w) | 0;
-            let depth = 0;
-
-            for (let dy = -win; dy <= win; dy++) {
-                const ny = y + dy;
-
-                if (ny < 0 || ny >= h) {
-                    continue;
-                }
-
-                for (let dx = -win; dx <= win; dx++) {
-                    const nx = x + dx;
-
-                    if (nx >= 0 && nx < w) {
-                        depth = Math.max(depth, d[ny * w + nx]);
-                    }
-                }
-            }
-
-            if (depth >= r + 2) {
-                a *= d[i] / (r + 1);
-            }
-        }
-
-        if (a < 1) {
-            a = smooth01(0.15, 0.85, a);
-        }
-
-        out[i] = Math.round(a * 255);
-    }
-
-    for (let i = 0; i < n; i++) {
-        data[i * 4 + 3] = out[i];
-    }
-}
-
-/**
- * Edge colour bleed: every pixel below ~95 % alpha takes the average colour of the solidly
- * opaque plant pixels a few px away, so light (or key-tinted) edge colour can't show through
- * bilinear filtering and mip-maps. Visible pixels further from any solid pixel (thin blades)
- * keep their own colour; fully transparent texels are then padded from everything visible.
- */
-function bleedEdgeColor(image: RawImage, reach = 3): void {
-    const { width: w, height: h, data } = image;
-    const n = w * h;
-    let maxAlpha = 0;
-
-    for (let i = 0; i < n; i++) {
-        maxAlpha = Math.max(maxAlpha, data[i * 4 + 3]);
-    }
-
-    if (maxAlpha === 0) {
-        return;
-    }
-
-    const solidAlpha = Math.min(242, maxAlpha * 0.95);
-    const rgb = new Float32Array(n * 3);
-    const known = new Uint8Array(n);
-
-    for (let i = 0; i < n; i++) {
-        rgb[i * 3] = data[i * 4];
-        rgb[i * 3 + 1] = data[i * 4 + 1];
-        rgb[i * 3 + 2] = data[i * 4 + 2];
-        known[i] = data[i * 4 + 3] >= solidAlpha ? 1 : 0;
-    }
-
-    // 1. Near solid pixels: replace edge colour by the solid neighbourhood's.
-    const first = propagateColor(w, h, rgb, known, reach);
-
-    // 2. Everything else: pad from all pixels that now have a trusted colour.
-    for (let i = 0; i < n; i++) {
-        if (first[i] >= 0) {
-            known[i] = 1;
-        } else if (data[i * 4 + 3] >= 128) {
-            known[i] = 1;
-            rgb[i * 3] = data[i * 4];
-            rgb[i * 3 + 1] = data[i * 4 + 1];
-            rgb[i * 3 + 2] = data[i * 4 + 2];
-        } else {
-            known[i] = 0;
-        }
-    }
-
-    propagateColor(w, h, rgb, known, 1 << 16);
-
-    for (let i = 0; i < n; i++) {
-        if (data[i * 4 + 3] < solidAlpha) {
-            data[i * 4] = rgb[i * 3];
-            data[i * 4 + 1] = rgb[i * 3 + 1];
-            data[i * 4 + 2] = rgb[i * 3 + 2];
-        }
-    }
-}
-
-function trimToAlpha(image: RawImage): RawImage | null {
-    const { width: w, height: h, data } = image;
-    let x0 = w;
-    let y0 = h;
-    let x1 = -1;
-    let y1 = -1;
-
-    for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-            if (data[(y * w + x) * 4 + 3] > 24) {
-                x0 = Math.min(x0, x);
-                x1 = Math.max(x1, x);
-                y0 = Math.min(y0, y);
-                y1 = Math.max(y1, y);
-            }
-        }
-    }
-
-    if (x1 < 0) {
-        return null;
-    }
-
-    // One pixel of padding so edge filtering doesn't clamp into the plant.
-    x0 = Math.max(0, x0 - 1);
-    y0 = Math.max(0, y0 - 1);
-    x1 = Math.min(w - 1, x1 + 1);
-    y1 = Math.min(h - 1, y1 + 1);
-    const tw = x1 - x0 + 1;
-    const th = y1 - y0 + 1;
-    const out = new Uint8ClampedArray(tw * th * 4);
-
-    for (let y = 0; y < th; y++) {
-        out.set(
-            data.subarray(
-                ((y + y0) * w + x0) * 4,
-                ((y + y0) * w + x0 + tw) * 4,
-            ),
-            y * tw * 4,
-        );
-    }
-
-    return { data: out, width: tw, height: th };
-}
-
-/** Horizontal position (0..1) of the plant's base: opaque-pixel centroid of the bottom rows. */
-function basePivot(image: RawImage): number {
-    const { width: w, height: h, data } = image;
-    const rows = Math.max(2, Math.round(h * 0.04));
-    let sum = 0;
-    let count = 0;
-
-    for (let y = h - 1; y >= 0 && y >= h - rows * 4; y--) {
-        for (let x = 0; x < w; x++) {
-            if (data[(y * w + x) * 4 + 3] > 128) {
-                sum += x;
-                count++;
-            }
-        }
-
-        if (count > 0 && y <= h - rows) {
-            break;
-        }
-    }
-
-    return count ? (sum / count + 0.5) / w : 0.5;
 }

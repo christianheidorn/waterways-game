@@ -306,13 +306,21 @@ export class Game {
                 this.discarding = true;
                 window.location.reload();
             },
-            editorState: () => ({
-                tool_group: this.editor.state.group,
-                paint_layer_slot: this.editor.state.paintLayer,
-                walking: this.walking,
-                roads: this.world.splines.roads.length,
-                rivers: this.world.splines.rivers.length,
-            }),
+            editorState: () => {
+                const foliageWarnings = this.world.foliage.loadWarnings();
+
+                return {
+                    tool_group: this.editor.state.group,
+                    paint_layer_slot: this.editor.state.paintLayer,
+                    walking: this.walking,
+                    roads: this.world.splines.roads.length,
+                    rivers: this.world.splines.rivers.length,
+                    // e.g. a far LOD skipped because its cut-out texture is opaque on this GPU.
+                    ...(foliageWarnings.length
+                        ? { foliage_warnings: foliageWarnings }
+                        : {}),
+                };
+            },
             walk: (on, at) => {
                 if (on && this.walking && at) {
                     this.setWalking(false);
@@ -1473,7 +1481,14 @@ export class Game {
             this.mode === 'play' || this.walking ? this.player : null,
         );
         this.world.foliage.update(dt, this.camera);
-        this.world.props.updateView(this.camera);
+        const sunShadows = this.atmosphere.sunShadows;
+        this.world.props.updateView(this.camera, {
+            shadowCaster: sunShadows.casterTest(),
+            shadowRevision: sunShadows.casterRevision,
+            reflectionLevel: this.reflection.enabled
+                ? this.reflectionLevel
+                : null,
+        });
 
         const waterLevel = this.world.water.levelAt(
             this.camera.position.x,

@@ -104,6 +104,11 @@ class FoliageAssetApiController extends Controller
             'lod_distances' => $list('lod_distances', 0, 1, 6),
             // Far LOD kind: octahedral impostor (older bakes: crossed cards, no key).
             'impostor' => ($raw['impostor'] ?? null) === 'octahedral' ? 'octahedral' : null,
+            // Problems the bake worked around (e.g. an impostor left out after its alpha check).
+            'warnings' => array_values(array_map(
+                fn ($w) => Str::limit(trim($w), 300),
+                array_slice(array_filter(is_array($raw['warnings'] ?? null) ? $raw['warnings'] : [], fn ($w) => is_string($w) && trim($w) !== ''), 0, 8),
+            )),
         ], fn ($v) => $v !== null && $v !== []);
     }
 }

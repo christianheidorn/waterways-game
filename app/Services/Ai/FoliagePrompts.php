@@ -52,8 +52,10 @@ class FoliagePrompts
         $subject = self::KIND_HINTS[$kind->value];
         $look = self::styleWords($style);
         $colour = $keyColor === '#00ffff' ? 'pure cyan (#00FFFF)' : 'pure magenta (#FF00FF)';
+        // Models that "support" transparency sometimes paint a backdrop anyway (a dark vignette, a
+        // gradient): ask for nothing behind the plant. The baker keys any backdrop that slips through.
         $background = $transparent
-            ? 'transparent background'
+            ? 'transparent background (no backdrop, no vignette, no gradient, no frame behind the plant)'
             : "isolated on a perfectly flat, uniform {$colour} chroma-key background with nothing else in the image; the plant itself contains no {$colour}";
 
         return trim("{$subject}: {$userPrompt}. {$look}. Game foliage sprite: the complete plant is fully visible and centred, "

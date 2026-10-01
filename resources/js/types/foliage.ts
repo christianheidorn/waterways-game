@@ -39,6 +39,8 @@ export type FoliageAssetStudio = FoliageAssetRef & {
         texture_size?: number;
         lod_distances?: number[];
         model_bytes?: number;
+        /** Problems the last bake worked around (e.g. an impostor left out after its alpha check). */
+        warnings?: string[];
     };
     status: FoliageAssetStatus;
     status_message: string | null;

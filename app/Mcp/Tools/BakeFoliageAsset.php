@@ -33,8 +33,12 @@ class BakeFoliageAsset extends WaterwaysTool
             'foliage_asset' => GetAssetStatus::foliageSummary($asset->refresh()),
             'editor_map' => $result['editor_map'],
             'next' => match ($asset->status) {
-                'ready' => 'Ready: use it with save_foliage_type foliage_asset_id '.$asset->id.'.',
-                'failed' => 'Optimising failed; the model may be broken or too heavy. Try another model.',
+                'ready' => ($asset->meta['warnings'] ?? []) !== []
+                    ? 'Ready with warnings (see foliage_asset.bake_warnings): use it with save_foliage_type foliage_asset_id '.$asset->id.', or re-bake / replace the source if a LOD was left out.'
+                    : 'Ready: use it with save_foliage_type foliage_asset_id '.$asset->id.'.',
+                'failed' => str_contains((string) $asset->status_message, 'background could not be removed')
+                    ? 'Optimising failed: the card image\'s background could not be cut out (see foliage_asset.message). Generate it again (asking for a flat magenta background) or upload a PNG with transparency.'
+                    : 'Optimising failed; the model may be broken or too heavy. Try another model.',
                 default => 'Still optimising: poll get_asset_status in a few seconds.',
             },
         ]);

@@ -971,7 +971,7 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
             .div(reflClip.w)
             .add(
                 vec2(normal.x, normal.y.negate()).mul(
-                    u.refraction.mul(0.02).add(0.012),
+                    u.refraction.mul(0.03).add(0.03),
                 ),
             ),
         0.001,

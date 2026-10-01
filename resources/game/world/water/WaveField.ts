@@ -95,12 +95,20 @@ export class WaveField {
     }
 
     /** Weather wind (strength 0-2, gusting) and the direction it blows towards. */
-    setWind(strength: number, dirX: number, dirZ: number): void {
+    setWind(strength: number, dirX: number, dirZ: number, snap = false): void {
         this.windTarget = Math.max(0, strength);
+
+        if (snap) {
+            this.wind = this.windTarget;
+        }
         const len = Math.hypot(dirX, dirZ);
 
         if (len > 1e-4) {
             this.windDirTarget.set(dirX / len, dirZ / len);
+
+            if (snap) {
+                this.windDir.copy(this.windDirTarget);
+            }
         }
     }
 

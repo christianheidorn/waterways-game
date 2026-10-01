@@ -481,6 +481,7 @@ export class Water {
             env.wind_strength,
             u.windDir.value.x,
             u.windDir.value.y,
+            true,
         );
         this.tableDirty = true;
         this.setOcean(env.ocean_enabled, env.sea_level);

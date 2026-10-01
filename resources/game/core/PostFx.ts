@@ -493,14 +493,10 @@ export class PostFx {
 
         // ---- under water (skipped above the surface)
         if (e.underwater && e.underwaterInput) {
-            const input = e.underwaterInput;
+            // Not bypassed while above water: a bypass would hand consumers the input's texture of that
+            // moment, which on the first frames is not the one its pass renders into (black frames).
             const state = this.underwaterState;
-            e.underwater.pass.setBypass(
-                state ? null : input.value,
-                state
-                    ? null
-                    : (input as unknown as { passNode: THREE.Node }).passNode,
-            );
+            e.underwater.active.value = state ? 1 : 0;
 
             if (state) {
                 e.underwater.set(state);

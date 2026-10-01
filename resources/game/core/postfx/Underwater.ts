@@ -72,7 +72,7 @@ export type UnderwaterState = {
  *   the surface and back to the eye.
  *
  * The surface itself from below (Snell's window, total internal reflection) is drawn by the water
- * material (see waterMaterial.ts, back faces). Bypassed (no draw) while the camera is above water.
+ * material (see waterMaterial.ts, back faces). Above water it only copies its input (`active` 0).
  */
 export class Underwater {
     readonly pass = new ScreenPass('Underwater');
@@ -85,6 +85,8 @@ export class Underwater {
     readonly sunDir = uniform(new THREE.Vector3(0, 1, 0));
     /** Caustics: x intensity, y cell size, z depth reached, w enabled. */
     readonly caustics = uniform(new THREE.Vector4(0.8, 2.5, 8, 1));
+    /** 0 while the camera is above water: the pass only copies its input. */
+    readonly active = uniform(0);
 
     constructor(
         readonly quality: UnderwaterQuality,
@@ -113,7 +115,9 @@ export class Underwater {
                 dirWorld.mul(f.near.div(dirView.z.negate().max(1e-3))),
             );
             const lens = nearPoint.y.sub(waveAt(nearPoint.xz)).toVar();
-            const under = smoothstep(0.003, -0.003, lens).toVar();
+            const under = smoothstep(0.003, -0.003, lens)
+                .mul(this.active)
+                .toVar();
             const above = input.sample(vUv).rgb;
             const result = above.toVar();
 
@@ -217,7 +221,7 @@ export class Underwater {
 
             // The meniscus: a thin dark line where the surface crosses the lens.
             const line = exp(lens.div(0.004).pow(2).negate());
-            result.mulAssign(float(1).sub(line.mul(0.45)));
+            result.mulAssign(float(1).sub(line.mul(0.45).mul(this.active)));
 
             return vec4(result, 1);
         })() as Vec4Node;

@@ -1752,7 +1752,9 @@ export class Game {
                 ((light.r + light.g + light.b) / 3) * Math.max(0, sun.y) * 0.5;
             const tint = look.shallow.clone().lerp(look.deep, 0.55);
             const fog = tint.clone().multiplyScalar(ambient * 0.35);
-            water.setViewFromBelow(above < 2, fog);
+            // Back faces only while the lens can reach below the surface (choppy wave backs seen from
+            // above would otherwise draw their undersides).
+            water.setViewFromBelow(above < lens + 0.25, fog);
 
             if (pass && above < lens) {
                 const n = sample.normal;

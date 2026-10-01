@@ -23,6 +23,7 @@ import {
     texture,
     textureLoad,
     uniform,
+    uniformArray,
     vec2,
     vec3,
 } from 'three/tsl';
@@ -133,7 +134,11 @@ export class Surf {
     readonly strength: Float32Array;
     readonly textureA: THREE.DataTexture;
     readonly textureB: THREE.DataTexture;
-    readonly table: THREE.DataTexture;
+    /** Per body row (height, period, dirX, dirZ): a uniform array (the materials are at their texture limit). */
+    readonly table = uniformArray(
+        Array.from({ length: BODY_ROWS }, () => new THREE.Vector4()),
+        'vec4',
+    );
     readonly u = {
         time: uniform(0),
         mapHalf: uniform(1),
@@ -142,7 +147,6 @@ export class Surf {
     };
     private readonly pixelsA: Uint16Array;
     private readonly pixelsB: Float32Array;
-    private readonly tableData = new Float32Array(BODY_ROWS * 4);
     /** Per table row: (height, period, dirX, dirZ) and surf flag (CPU copies). */
     private rows: {
         height: number;
@@ -188,16 +192,6 @@ export class Surf {
         this.textureB.minFilter = this.textureB.magFilter = THREE.NearestFilter;
         this.textureB.generateMipmaps = false;
         this.textureB.name = 'Shore level';
-        this.table = new THREE.DataTexture(
-            this.tableData,
-            BODY_ROWS,
-            1,
-            THREE.RGBAFormat,
-            THREE.FloatType,
-        );
-        this.table.minFilter = this.table.magFilter = THREE.NearestFilter;
-        this.table.generateMipmaps = false;
-        this.table.name = 'Surf bodies';
         this.u.mapHalf.value = surface.half;
         this.u.size.value = n;
         this.u.spacing.value = data.spacing;
@@ -272,17 +266,18 @@ export class Surf {
         bodies: readonly WaterBody[],
         wind: { strength: number; x: number; z: number },
     ): void {
-        this.tableData.fill(0);
+        const rows = this.table.array as THREE.Vector4[];
+
+        for (const v of rows) {
+            v.set(0, 0, 0, 0);
+        }
+
         this.rows = [];
         bodies.slice(0, BODY_ROWS - 1).forEach((b, i) => {
             const s = bodySurf(b, wind);
             this.rows[i + 1] = { ...s, surf: b.settings.surf };
-            this.tableData.set(
-                [s.height, s.period, s.dirX, s.dirZ],
-                (i + 1) * 4,
-            );
+            rows[i + 1].set(s.height, s.period, s.dirX, s.dirZ);
         });
-        this.table.needsUpdate = true;
     }
 
     /** Fraction of the shoreline samples (|dist| < one sample) with surf, e.g. for agents. */
@@ -556,7 +551,9 @@ export class Surf {
             mix(tap(0, 1), tap(1, 1), f.x),
             f.y,
         );
-        const t = textureLoad(this.table, ivec2(int(row), int(0)));
+        const t = this.table.element(
+            int(clamp(floor(row.add(0.5)), 0, BODY_ROWS - 1)),
+        ) as unknown as Node<'vec4'>;
         const dir = normalize(vec2(a.y, a.z).add(vec2(1e-5, 0))) as Vec2;
         const facing = smoothstep(
             -0.2,
@@ -827,6 +824,5 @@ export class Surf {
     dispose(): void {
         this.textureA.dispose();
         this.textureB.dispose();
-        this.table.dispose();
     }
 }

@@ -61,10 +61,16 @@ export function shoreTravelTime(d: number, period: number, slope: number) {
 }
 
 /** Wave-group factor (sets of bigger waves travelling in with the crests). */
-export function waveGroup(time: number, tau: number, period: number, along: number) {
+export function waveGroup(
+    time: number,
+    tau: number,
+    period: number,
+    along: number,
+) {
     return (
         0.72 +
-        0.28 * Math.sin((2 * Math.PI * (time + tau)) / (6.3 * period) + 4 * along)
+        0.28 *
+            Math.sin((2 * Math.PI * (time + tau)) / (6.3 * period) + 4 * along)
     );
 }
 

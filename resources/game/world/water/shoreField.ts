@@ -111,8 +111,82 @@ export class ShoreField {
         };
     }
 
+    /**
+     * The beach slope sets the travel time of the crests (τ ∝ 1/√slope): seed to seed noise would
+     * break the crest lines up, so it is averaged over ~±12 m (separable box blur over the samples
+     * that have a shore).
+     */
+    private smoothSlope(out: {
+        i0: number;
+        j0: number;
+        i1: number;
+        j1: number;
+    }): void {
+        const n = this.size;
+        const r = Math.max(1, Math.round(12 / this.spacing));
+        const w = out.i1 - out.i0 + 1;
+        const h = out.j1 - out.j0 + 1;
+        const tmp = new Float32Array(w * h);
+        const has = (g: number) => this.wetIndex[g] >= 0;
+
+        for (let j = 0; j < h; j++) {
+            for (let i = 0; i < w; i++) {
+                let sum = 0;
+                let count = 0;
+
+                for (let d = -r; d <= r; d++) {
+                    const ii = out.i0 + i + d;
+
+                    if (ii >= 0 && ii < n) {
+                        const g = (out.j0 + j) * n + ii;
+
+                        if (has(g)) {
+                            sum += this.slope[g];
+                            count++;
+                        }
+                    }
+                }
+
+                tmp[j * w + i] = count ? sum / count : 1;
+            }
+        }
+
+        for (let j = 0; j < h; j++) {
+            for (let i = 0; i < w; i++) {
+                const g = (out.j0 + j) * n + out.i0 + i;
+
+                if (!has(g)) {
+                    continue;
+                }
+
+                let sum = 0;
+                let count = 0;
+
+                for (let d = -r; d <= r; d++) {
+                    const jj = j + d;
+
+                    if (
+                        jj >= 0 &&
+                        jj < h &&
+                        has((out.j0 + jj) * n + out.i0 + i)
+                    ) {
+                        sum += tmp[jj * w + i];
+                        count++;
+                    }
+                }
+
+                this.slope[g] = count ? sum / count : this.slope[g];
+            }
+        }
+    }
+
     /** Recomputes the field after a water / terrain / surf paint edit of `rect` (full-res grid; all if absent). */
-    update(rect?: GridRect): { i0: number; j0: number; i1: number; j1: number } {
+    update(rect?: GridRect): {
+        i0: number;
+        j0: number;
+        i1: number;
+        j1: number;
+    } {
         const n = this.size;
         const out = this.affected(rect);
         const reach = Math.ceil(SHORE_REACH / this.spacing) + 2;
@@ -163,21 +237,33 @@ export class ShoreField {
             const ja = (a - ia) / w;
             const ga = (wj0 + ja) * n + wi0 + ia;
             const level = this.data.level[ga];
-            const depth = Math.max(0, level - this.terrain.sample(px(ia), pz(ja)));
+            const depth = Math.max(
+                0,
+                level - this.terrain.sample(px(ia), pz(ja)),
+            );
             const ib = b % w;
             const jb = (b - ib) / w;
             const above = this.terrain.sample(px(ib), pz(jb)) - level;
             const t =
-                above > 0 ? Math.min(1, Math.max(0, depth / (depth + above))) : 0.5;
+                above > 0
+                    ? Math.min(1, Math.max(0, depth / (depth + above)))
+                    : 0.5;
             const x = px(ia) + ax * sp * t;
             const z = pz(ja) + az * sp * t;
             // Beach slope across the shoreline and out over the surf zone.
-            const T = (d: number) => this.terrain.sample(x + ax * d, z + az * d);
+            const T = (d: number) =>
+                this.terrain.sample(x + ax * d, z + az * d);
             const local = Math.abs(T(3) - T(-3)) / 6;
             const seaward = Math.max(0, level - T(-14)) / 14;
             const slope = local * 0.6 + seaward * 0.4;
-            const c = Math.min(res - 1, Math.max(0, Math.round((x + half) / this.surface.cell)));
-            const r = Math.min(res - 1, Math.max(0, Math.round((z + half) / this.surface.cell)));
+            const c = Math.min(
+                res - 1,
+                Math.max(0, Math.round((x + half) / this.surface.cell)),
+            );
+            const r = Math.min(
+                res - 1,
+                Math.max(0, Math.round((z + half) / this.surface.cell)),
+            );
             const painted = paintedStrength(this.mask[r * res + c]);
             const id = seeds.length / 8;
             seeds.push(x, z, ax, az, level, slope, ga, painted ?? -1);
@@ -281,8 +367,12 @@ export class ShoreField {
                 let dz = (seeds[o + 1] - pz(j - wj0)) * sign;
                 const len = Math.hypot(dx, dz);
                 const blend = Math.min(1, len / (sp * 1.5));
-                dx = (len > 1e-4 ? dx / len : 0) * blend + seeds[o + 2] * (1 - blend);
-                dz = (len > 1e-4 ? dz / len : 0) * blend + seeds[o + 3] * (1 - blend);
+                dx =
+                    (len > 1e-4 ? dx / len : 0) * blend +
+                    seeds[o + 2] * (1 - blend);
+                dz =
+                    (len > 1e-4 ? dz / len : 0) * blend +
+                    seeds[o + 3] * (1 - blend);
                 const dl = Math.hypot(dx, dz) || 1;
                 this.dist[g] = sign * d;
                 this.dirX[g] = dx / dl;
@@ -293,6 +383,8 @@ export class ShoreField {
                 this.paint[g] = seeds[o + 7];
             }
         }
+
+        this.smoothSlope(out);
 
         return out;
     }

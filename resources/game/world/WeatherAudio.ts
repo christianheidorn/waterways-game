@@ -136,7 +136,11 @@ export class WeatherAudio {
 
         if (Math.abs(c - this.lastSurfCrash) > 0.01) {
             this.lastSurfCrash = c;
-            this.surfCrashGain.gain.setTargetAtTime(c * 0.2, ctx.currentTime, 0.12);
+            this.surfCrashGain.gain.setTargetAtTime(
+                c * 0.2,
+                ctx.currentTime,
+                0.12,
+            );
             this.surfFilter.frequency.setTargetAtTime(
                 700 + crash * 1300,
                 ctx.currentTime,

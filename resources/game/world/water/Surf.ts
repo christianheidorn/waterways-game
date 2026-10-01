@@ -106,7 +106,10 @@ export function directionWeight(
         return 1;
     }
 
-    const t = Math.min(1, Math.max(0, (dirX * shoreX + dirZ * shoreZ + 0.2) / 0.8));
+    const t = Math.min(
+        1,
+        Math.max(0, (dirX * shoreX + dirZ * shoreZ + 0.2) / 0.8),
+    );
 
     return 0.2 + 0.8 * t * t * (3 - 2 * t);
 }
@@ -141,7 +144,13 @@ export class Surf {
     private readonly pixelsB: Float32Array;
     private readonly tableData = new Float32Array(BODY_ROWS * 4);
     /** Per table row: (height, period, dirX, dirZ) and surf flag (CPU copies). */
-    private rows: { height: number; period: number; dirX: number; dirZ: number; surf: boolean }[] = [];
+    private rows: {
+        height: number;
+        period: number;
+        dirX: number;
+        dirZ: number;
+        surf: boolean;
+    }[] = [];
     private time = 0;
     private activityAt = { x: NaN, z: NaN, t: -1 };
     private activityValue = { level: 0, distance: Infinity, crash: 0 };
@@ -282,7 +291,11 @@ export class Surf {
         let shore = 0;
 
         for (let k = 0; k < f.dist.length; k++) {
-            if (f.dist[k] > 0 && f.dist[k] <= f.spacing && this.strength[k] > 0.05) {
+            if (
+                f.dist[k] > 0 &&
+                f.dist[k] <= f.spacing &&
+                this.strength[k] > 0.05
+            ) {
                 shore++;
             }
         }
@@ -343,8 +356,8 @@ export class Surf {
             strength:
                 bil(this.strength) *
                 directionWeight(params.dirX, params.dirZ, dirX, dirZ),
-            level: f.level[k],
-            slope: f.slope[k],
+            level: bil(f.level),
+            slope: bil(f.slope),
             params,
         };
     }
@@ -372,7 +385,14 @@ export class Surf {
             period: Math.max(1, s.params.period),
             slope: s.slope,
         };
-        const w = surfWave(s.dist, depth, this.time, alongshore(x, z), p, SHORE_REACH);
+        const w = surfWave(
+            s.dist,
+            depth,
+            this.time,
+            alongshore(x, z),
+            p,
+            SHORE_REACH,
+        );
         out.height += w.eta;
         // The distance shrinks along the travel direction.
         out.slopeX -= w.detaDd * s.dirX;
@@ -388,7 +408,10 @@ export class Surf {
      * within ~120 m and their distance, the nearest such shore, and a crash pulse (0-1) while its
      * waves break. Rescanned at most every 0.25 s or 4 m.
      */
-    activity(x: number, z: number): { level: number; distance: number; crash: number } {
+    activity(
+        x: number,
+        z: number,
+    ): { level: number; distance: number; crash: number } {
         const a = this.activityAt;
 
         if (
@@ -413,8 +436,16 @@ export class Surf {
         let nearest = Infinity;
         let nearestK = -1;
 
-        for (let j = Math.max(0, cj - r); j <= Math.min(n - 1, cj + r); j += stride) {
-            for (let i = Math.max(0, ci - r); i <= Math.min(n - 1, ci + r); i += stride) {
+        for (
+            let j = Math.max(0, cj - r);
+            j <= Math.min(n - 1, cj + r);
+            j += stride
+        ) {
+            for (
+                let i = Math.max(0, ci - r);
+                i <= Math.min(n - 1, ci + r);
+                i += stride
+            ) {
                 const k = j * n + i;
                 const d = f.dist[k];
 
@@ -429,7 +460,10 @@ export class Surf {
                     continue;
                 }
 
-                const dist = Math.hypot(i * f.spacing - half - x, j * f.spacing - half - z);
+                const dist = Math.hypot(
+                    i * f.spacing - half - x,
+                    j * f.spacing - half - z,
+                );
 
                 if (dist > radius) {
                     continue;
@@ -457,7 +491,8 @@ export class Surf {
             const j = (nearestK - i) / n;
             const sx = i * f.spacing - half;
             const sz = j * f.spacing - half;
-            const params = this.rows[Math.round(this.pixelsB[nearestK * 4 + 2])];
+            const params =
+                this.rows[Math.round(this.pixelsB[nearestK * 4 + 2])];
             const u = surfPhase(0, this.time, alongshore(sx, sz), {
                 height: params.height,
                 period: Math.max(1, params.period),
@@ -479,17 +514,55 @@ export class Surf {
 
     // ------------------------------------------------------------------ GPU
 
+    /** Node graphs per position node (the material asks several times for the same pixel). */
+    private readonly shoreCache = new WeakMap<
+        object,
+        ReturnType<Surf['buildShoreNodes']>
+    >();
+
     /** Shore field and body surf at a world position (nodes). */
     private shoreNodes(xz: Vec2) {
+        let nodes = this.shoreCache.get(xz);
+
+        if (!nodes) {
+            nodes = this.buildShoreNodes(xz);
+            this.shoreCache.set(xz, nodes);
+        }
+
+        return nodes;
+    }
+
+    private buildShoreNodes(xz: Vec2) {
         const u = this.u;
         const g = xz.add(u.mapHalf).div(u.spacing);
         const inside = max(abs(xz.x), abs(xz.y)).lessThan(u.mapHalf);
-        const a = texture(this.textureA, g.add(0.5).div(u.size)).level(float(0));
+        const a = texture(this.textureA, g.add(0.5).div(u.size)).level(
+            float(0),
+        );
         const gi = clamp(floor(g.add(0.5)), 0, u.size.sub(1));
-        const b = textureLoad(this.textureB, ivec2(int(gi.x), int(gi.y)));
-        const t = textureLoad(this.table, ivec2(int(b.z), int(0)));
+        const row = textureLoad(this.textureB, ivec2(int(gi.x), int(gi.y))).z;
+        // Level and slope bilinear (Float32 is not filterable everywhere): the crests' travel time
+        // depends on the slope, a nearest lookup would step their phase.
+        const gc = clamp(g, 0, u.size.sub(1.001));
+        const i0 = floor(gc);
+        const f = gc.sub(i0);
+        const tap = (dx: number, dz: number) =>
+            textureLoad(
+                this.textureB,
+                ivec2(int(i0.x).add(int(dx)), int(i0.y).add(int(dz))),
+            ).xy;
+        const b = mix(
+            mix(tap(0, 0), tap(1, 0), f.x),
+            mix(tap(0, 1), tap(1, 1), f.x),
+            f.y,
+        );
+        const t = textureLoad(this.table, ivec2(int(row), int(0)));
         const dir = normalize(vec2(a.y, a.z).add(vec2(1e-5, 0))) as Vec2;
-        const facing = smoothstep(-0.2, 0.6, t.z.mul(dir.x).add(t.w.mul(dir.y)));
+        const facing = smoothstep(
+            -0.2,
+            0.6,
+            t.z.mul(dir.x).add(t.w.mul(dir.y)),
+        );
         const dirWeight = select(
             length(vec2(t.z, t.w)).greaterThan(0.5),
             facing.mul(0.8).add(0.2),
@@ -538,9 +611,7 @@ export class Surf {
             sqrt(d.div(m.mul(GRAVITY))).mul(2),
             c0.mul(2).div(m.mul(GRAVITY)).add(d.sub(sStar).div(c0)),
         );
-        const u = fract(
-            time.add(tau).div(sh.period).add(along.mul(0.12)),
-        );
+        const u = fract(time.add(tau).div(sh.period).add(along.mul(0.12)));
         const h = clamp(min(depth, d.mul(m)), 0.02, 1e4);
         const ks = clamp(pow(c0.mul(c0).div(GRAVITY).div(h), 0.25), 1, 2.2);
         const group = sin(
@@ -561,7 +632,12 @@ export class Surf {
         const height = min(hu, h.mul(BREAKER));
         const pw = smoothstep(0.3, 1, ratio).mul(2).add(1);
         const peak = pow(
-            max(cos(u.mul(Math.PI * 2)).mul(0.5).add(0.5), 1e-4),
+            max(
+                cos(u.mul(Math.PI * 2))
+                    .mul(0.5)
+                    .add(0.5),
+                1e-4,
+            ),
             pw,
         ).sub(float(0.5).div(pow(pw, 0.6)));
         const bore = select(
@@ -586,9 +662,12 @@ export class Surf {
             xz.mul(0.31).add(dir.mul(t.mul(0.05))),
             t.mul(0.3),
         );
-        const b = causticPattern(xz.mul(0.83).sub(dir.mul(t.mul(0.08))), t.mul(0.45).add(3.1));
+        const b = causticPattern(
+            xz.mul(0.83).sub(dir.mul(t.mul(0.08))),
+            t.mul(0.45).add(3.1),
+        );
 
-        return clamp(max(a, b.mul(0.8)).mul(1.8), 0, 1);
+        return clamp(max(a, b.mul(0.8)).mul(1.2), 0, 1);
     }
 
     /** The water surface layer (shoaling, breaking surf). */
@@ -608,7 +687,11 @@ export class Surf {
             displacement: (ctx) => {
                 const { sh, w } = wave(ctx, 0);
 
-                return vec3(0, select(sh.dist.greaterThan(0), w.eta, float(0)), 0);
+                return vec3(
+                    0,
+                    select(sh.dist.greaterThan(0), w.eta, float(0)),
+                    0,
+                );
             },
             slope: (ctx) => {
                 const delta = 0.3;
@@ -616,24 +699,31 @@ export class Surf {
                 const b = wave(ctx, -delta);
                 const deta = a.w.eta.sub(b.w.eta).div(delta * 2);
 
-                return a.sh.dir.mul(deta.negate()).mul(
-                    select(a.sh.dist.greaterThan(0), float(1), float(0)),
-                );
+                return a.sh.dir
+                    .mul(deta.negate())
+                    .mul(select(a.sh.dist.greaterThan(0), float(1), float(0)));
             },
+            // The surf's own foam replaces the still-water shore foam (which spreads wide on gentle beaches).
+            shoreFoam: (ctx) =>
+                float(1).sub(
+                    smoothstep(0, 0.3, this.shoreNodes(ctx.xz).strength).mul(
+                        0.85,
+                    ),
+                ),
             foam: (ctx) => {
                 const { sh, w } = wave(ctx, 0);
                 const lace = this.laceNode(ctx.xz, sh.dir);
                 const crest = max(
-                    smoothstep(1 - BORE_FRONT * 2, 1 - BORE_FRONT * 0.5, w.u),
-                    smoothstep(0.1, 0.02, w.u),
-                );
+                    smoothstep(1 - BORE_FRONT * 1.5, 1 - BORE_FRONT * 0.4, w.u),
+                    smoothstep(0.06, 0.01, w.u),
+                ).mul(lace.mul(0.5).add(0.5));
                 const trail = exp(w.u.mul(-3.2));
                 const zone = smoothstep(0.5, 1, w.ratio);
 
                 return clamp(
                     w.breaking
-                        .mul(crest.mul(0.95).add(trail.mul(lace).mul(0.75)))
-                        .add(zone.mul(lace).mul(0.18)),
+                        .mul(crest.mul(0.9).add(trail.mul(lace).mul(0.55)))
+                        .add(zone.mul(lace).mul(0.08)),
                     0,
                     1,
                 )
@@ -654,7 +744,10 @@ export class Surf {
         const c0 = sh.period.mul(GRAVITY / (2 * Math.PI));
         const l0 = c0.mul(sh.period);
         const group = sin(
-            time.mul((2 * Math.PI) / 6.3).div(sh.period).add(along.mul(4)),
+            time
+                .mul((2 * Math.PI) / 6.3)
+                .div(sh.period)
+                .add(along.mul(4)),
         )
             .mul(0.28)
             .add(0.72);
@@ -681,7 +774,10 @@ export class Surf {
             .mul(smoothstep(0.035, 0.006, film))
             .mul(uprush);
         const lace = this.laceNode(xz, sh.dir);
-        const bubbles = sheet.mul(lace).mul(smoothstep(0.65, 0, u)).mul(0.75);
+        const bubbles = sheet
+            .mul(lace)
+            .mul(smoothstep(0.65, 0, u))
+            .mul(0.45);
         const foam = max(edge.mul(0.85).mul(near), bubbles).mul(
             smoothstep(0.02, 0.08, runup),
         );
@@ -693,11 +789,15 @@ export class Surf {
         const since = fract(u.sub(uncovered)).mul(sh.period);
         const reached = smoothstep(1.02, 0.95, below);
         const gloss = max(
-            select(film.greaterThan(0), float(1), exp(since.negate().div(sh.period.mul(0.4)))).mul(reached),
+            select(
+                film.greaterThan(0),
+                float(1),
+                exp(since.negate().div(sh.period.mul(0.4))),
+            ).mul(reached),
             sheet,
         ).mul(near);
         const damp = smoothstep(typical.mul(1.5), typical.mul(0.2), hz)
-            .mul(0.7)
+            .mul(0.85)
             .mul(near);
         const wet = max(damp, gloss);
 

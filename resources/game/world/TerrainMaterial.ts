@@ -1100,16 +1100,16 @@ function terrainSurface(
     // (a film of water: dark, mirror-smooth, flat) and its foam edge and bubbles.
     if (shoreEffects) {
         const fx = shoreEffects(wpos);
-        albedo.mulAssign(mix(1, 0.6, fx.wet));
-        rough.assign(mix(rough, 0.16, fx.gloss.mul(0.9)));
+        albedo.mulAssign(mix(vec3(1), vec3(0.5, 0.52, 0.55), fx.wet));
+        rough.assign(mix(rough, 0.3, fx.gloss.mul(0.85)));
         albedo.assign(
             mix(albedo, albedo.mul(vec3(0.5, 0.6, 0.66)), fx.sheet.mul(0.7)),
         );
-        rough.assign(mix(rough, 0.04, fx.sheet));
+        rough.assign(mix(rough, 0.07, fx.sheet));
         nrm.assign(normalize(mix(nrm, N, max(fx.sheet, fx.gloss.mul(0.4)))));
         albedo.assign(mix(albedo, vec3(0.9, 0.92, 0.93), fx.foam));
         rough.assign(mix(rough, 0.65, fx.foam));
-        puddle.assign(max(puddle, fx.sheet.mul(fx.foam.oneMinus()).mul(0.8)));
+        puddle.assign(max(puddle, fx.sheet.mul(fx.foam.oneMinus()).mul(0.35)));
     }
 
     // Snow settles on flatter ground first; thinner near water.

@@ -114,7 +114,8 @@ describe('surf model', () => {
 
     it('slows the crests down towards the shore', () => {
         const near = shoreTravelTime(10, 8, 0.03) - shoreTravelTime(0, 8, 0.03);
-        const far = shoreTravelTime(110, 8, 0.03) - shoreTravelTime(100, 8, 0.03);
+        const far =
+            shoreTravelTime(110, 8, 0.03) - shoreTravelTime(100, 8, 0.03);
 
         expect(near).toBeGreaterThan(far * 2);
     });

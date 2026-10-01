@@ -873,7 +873,9 @@ export class Game {
         water.surf.loadMask(
             assets.surf
                 ? new Uint8Array(
-                      await this.api.binary(assets.surf).catch(() => new ArrayBuffer(0)),
+                      await this.api
+                          .binary(assets.surf)
+                          .catch(() => new ArrayBuffer(0)),
                   )
                 : null,
         );

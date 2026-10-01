@@ -147,6 +147,8 @@ export type WaterSurfaceLayer = {
     slope?: (ctx: WaterLayerContext) => Node<'vec2'>;
     /** Foam coverage (0-1), combined with the rest by max. */
     foam?: (ctx: WaterLayerContext) => Node<'float'>;
+    /** Multiplier (0-1) of the built-in shore foam, where the layer brings its own (e.g. surf). */
+    shoreFoam?: (ctx: WaterLayerContext) => Node<'float'>;
     /** CPU: add this layer's height / slope / velocity at a world position. */
     sample?: (
         x: number,
@@ -786,8 +788,17 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
         }
     }
 
+    let shoreFoamScale: Node<'float'> = float(1);
+
+    for (const layer of o.layers) {
+        if (layer.shoreFoam) {
+            shoreFoamScale = shoreFoamScale.mul(layer.shoreFoam(ctx));
+        }
+    }
+
     const foam = clamp(
         shoreFoam
+            .mul(shoreFoamScale)
             .add(rapids)
             .add(streaks)
             .mul(u.foamIntensity)

@@ -141,7 +141,7 @@ const CAMERA_CUT = 25;
 /** Ground cover tiles the editor worker grows at a time (WebGL 2 fallback). */
 const MAX_COVER_JOBS = 24;
 /** Character trail: a new point every this many metres; bent grass recovers over TRAIL_RECOVER s. */
-const TRAIL_SPACING = 0.45;
+const TRAIL_SPACING = 0.6;
 const TRAIL_RECOVER = 2.5;
 /** Gust fronts travel downwind at (GUST_BASE + GUST_PER_WIND × wind strength) × gust speed m/s. */
 const GUST_BASE = 3;
@@ -1439,29 +1439,31 @@ export class Foliage {
 
         const p = this.interaction ? this.interactor : null;
 
-        if (p) {
-            const head = trail[0];
-            const moved = head
-                ? Math.hypot(head.x - p.x, head.z - p.z) > TRAIL_SPACING
-                : true;
-
-            if (moved) {
-                trail.unshift(new THREE.Vector4(p.x, p.y, p.z, 0));
-                trail.length = Math.min(trail.length, INTERACTORS);
-            } else {
-                // Standing (or still within the spacing): the newest point follows the feet.
-                head.set(p.x, p.y, p.z, 0);
-            }
+        // Footsteps left behind: a point every TRAIL_SPACING metres (the feet themselves are slot 0).
+        if (
+            p &&
+            (!trail.length ||
+                Math.hypot(trail[0].x - p.x, trail[0].z - p.z) > TRAIL_SPACING)
+        ) {
+            trail.unshift(new THREE.Vector4(p.x, p.y, p.z, 0));
+            trail.length = Math.min(trail.length, INTERACTORS - 1);
         }
 
-        this.writeTrail();
+        this.writeTrail(p);
     }
 
-    private writeTrail(): void {
+    /** Slot 0: where the character stands (full push); then the trail, newest first, recovering. */
+    private writeTrail(feet: THREE.Vector3 | null = null): void {
         const values = this.globals.interactors.array as THREE.Vector4[];
 
-        for (let i = 0; i < INTERACTORS; i++) {
-            const point = this.trail[i];
+        if (feet) {
+            values[0].set(feet.x, feet.y, feet.z, 1);
+        } else {
+            values[0].set(0, -1e6, 0, 0);
+        }
+
+        for (let i = 1; i < INTERACTORS; i++) {
+            const point = this.trail[i - 1];
 
             if (point) {
                 const k = 1 - point.w / TRAIL_RECOVER;

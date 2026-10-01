@@ -89,6 +89,26 @@ class WeatherEnvironmentTest extends TestCase
         $this->assertSame(15.5, $env['time_of_day']);
     }
 
+    public function test_gusts_cloud_shadows_and_fog_shafts_are_saved_and_range_checked(): void
+    {
+        $map = Map::factory()->create();
+
+        $this->put("/maps/{$map->slug}/environment", [
+            'gust_strength' => 1.2, 'gust_scale' => 120, 'gust_speed' => 0.5, 'cloud_shadow_strength' => 0.3, 'fog_shaft_intensity' => 1.6,
+        ])->assertSessionHasNoErrors()->assertRedirect();
+
+        $env = $map->fresh()->resolvedEnvironment();
+        $this->assertSame(1.2, $env['gust_strength']);
+        $this->assertSame(120.0, $env['gust_scale']);
+        $this->assertSame(0.5, $env['gust_speed']);
+        $this->assertSame(0.3, $env['cloud_shadow_strength']);
+        $this->assertSame(1.6, $env['fog_shaft_intensity']);
+
+        $this->put("/maps/{$map->slug}/environment", [
+            'gust_strength' => -0.1, 'gust_scale' => 1000, 'gust_speed' => 9, 'cloud_shadow_strength' => 2, 'fog_shaft_intensity' => -1,
+        ])->assertSessionHasErrors(['gust_strength', 'gust_scale', 'gust_speed', 'cloud_shadow_strength', 'fog_shaft_intensity']);
+    }
+
     public function test_weather_values_are_range_checked(): void
     {
         $map = Map::factory()->create();

@@ -36,6 +36,9 @@ class GraphicsSettingsTest extends TestCase
         $this->assertSame('high', $defaults['effects_quality']);
         $this->assertSame('medium', $defaults['cloud_quality']);
         $this->assertSame('medium', $defaults['ao_quality']);
+        $this->assertTrue($defaults['lod_crossfade']);
+        $this->assertTrue($defaults['grass_interaction']);
+        $this->assertTrue($defaults['cloud_shadows']);
         $this->assertArrayHasKey('bloom_intensity', $defaults);
         // Legacy switch stays for compatibility.
         $this->assertArrayHasKey('antialias', $defaults);
@@ -86,6 +89,8 @@ class GraphicsSettingsTest extends TestCase
             ['effects_quality' => 'cinematic'],
             ['cloud_quality' => 'epic'],
             ['ao_quality' => 'ultra'],
+            ['lod_crossfade' => 'dithered'],
+            ['cloud_shadows' => 'some'],
         ] as $invalid) {
             $this->put('/settings/game/graphics', $invalid)->assertSessionHasErrors(array_key_first($invalid));
         }

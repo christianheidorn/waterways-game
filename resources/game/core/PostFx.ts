@@ -429,11 +429,29 @@ export class PostFx {
                     vis *
                     horizon *
                     ((0.6 *
-                        look.godRayIntensity *
                         (night ? 0.35 : 1) *
-                        (1 + Math.min(0.75, look.fogDensity / 0.001)) *
                         (1 - light.darkness * 0.6)) /
                         baseExposure);
+                // Sky around the light, stronger in haze; and the sunlit fog (see GodRays), which
+                // grows with the fog density (weather included) and valley fog around the camera.
+                const fog = light.fog.density;
+                const valley = light.valleyFogAt?.(camera.position) ?? 0;
+                e.godRays.skyWeight.value =
+                    look.godRayIntensity *
+                    (1 + Math.min(0.75, look.fogDensity / 0.001));
+                const fogginess = Math.min(
+                    1.5,
+                    fog / 0.0005 + valley / 0.01,
+                );
+                e.godRays.fogWeight.value =
+                    0.7 *
+                    look.fogShaftIntensity *
+                    THREE.MathUtils.smoothstep(fogginess, 0.05, 1) *
+                    Math.max(0.35, Math.min(1.2, fogginess));
+                e.godRays.fogMedium.value = Math.min(
+                    0.04,
+                    Math.max(0.003, fog * 30 + valley * 0.5),
+                );
                 const c = light.sun.color;
                 e.composite.rayColor.value.set(
                     (0.4 + 0.6 * c.r) * k,
@@ -622,7 +640,8 @@ export class PostFx {
             bloom: !!g.bloom && (g.bloom_intensity ?? 0.12) > 0.001,
             autoExposure: !!g.auto_exposure,
             godRays:
-                (g.god_rays ?? 'off') !== 'off' && look.godRayIntensity > 0.001
+                (g.god_rays ?? 'off') !== 'off' &&
+                (look.godRayIntensity > 0.001 || look.fogShaftIntensity > 0.001)
                     ? g.god_rays
                     : 'off',
             contact: !!g.contact_shadows,
@@ -788,7 +807,13 @@ export class PostFx {
         let godRays: GodRays | null = null;
 
         if (s.godRays !== 'off') {
-            godRays = new GodRays(s.godRays, frame, sceneColor);
+            const light = this.light;
+            godRays = new GodRays(
+                s.godRays,
+                frame,
+                sceneColor,
+                light?.cloudLight ? (p) => light.cloudLight!(p) : null,
+            );
             owned.push(...godRays.passes);
             names.push(`Light shafts ${s.godRays}`);
         }

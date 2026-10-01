@@ -24,6 +24,7 @@ export const DEFAULT_LOOK: Look = {
     filmGrain: 0,
     letterbox: 0,
     fogDensity: 0.0002,
+    fogShaftIntensity: 0.8,
 };
 
 const num = (v: unknown, fallback: number): number =>
@@ -60,5 +61,6 @@ export function lookFromEnvironment(env: Partial<EnvironmentSettings>): Look {
         filmGrain: num(env.film_grain, d.filmGrain),
         letterbox: num(env.letterbox, d.letterbox),
         fogDensity: num(env.fog_density, d.fogDensity),
+        fogShaftIntensity: num(env.fog_shaft_intensity, d.fogShaftIntensity),
     };
 }

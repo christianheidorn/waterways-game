@@ -120,6 +120,7 @@ export class Atmosphere {
     private readonly cloudShadow = {
         lightDir: uniform(new THREE.Vector3(0, 1, 0)),
         strength: uniform(0),
+        base: uniform(0),
     };
     private cloudShadowsEnabled = true;
     private env: EnvironmentSettings | null = null;
@@ -233,6 +234,7 @@ export class Atmosphere {
     /** Lowest ground (or sea) level: valley fog is measured from here. */
     setTerrainBase(height: number): void {
         this.terrainBase = height;
+        this.cloudShadow.base.value = height;
         this.lightingDirty = true;
     }
 
@@ -258,6 +260,27 @@ export class Atmosphere {
         this.sky.setCloudQuality(quality);
         this.envSky.setCloudQuality(quality === 'off' ? 'off' : 'low');
         this.envDirty = true;
+    }
+
+    /** Light left under the clouds at a world position (light shafts from cloud gaps). */
+    cloudLight(position: THREE.Node<'vec3'>): THREE.Node<'float'> {
+        return cloudShadowNode(this.sky, this.cloudShadow, position);
+    }
+
+    /** Valley fog density (1/m) at a position: its base density below the fog top, 0 above. */
+    valleyFogAt(position: THREE.Vector3): number {
+        const c = this.current;
+
+        if (this.underwater || c.heightFogHeight <= 0.5) {
+            return 0;
+        }
+
+        const above = position.y - this.terrainBase;
+
+        return (
+            c.heightFogDensity *
+            Math.exp(-Math.max(0, above) * (3.2 / Math.max(1, c.heightFogHeight)))
+        );
     }
 
     /** Drifting cloud shadows (graphics cloud_shadows); their strength is per map. */

@@ -39,7 +39,7 @@ type Float = THREE.Node<'float'>;
  * at this height (clouds keep their place as the camera moves), and the cloud shadows are the same
  * field projected along the light onto the ground.
  */
-export const CLOUD_HEIGHT = 1500;
+export const CLOUD_HEIGHT = 500;
 /** Cloud-plane units per metre on that plane (the sky's uv = xz / y × 0.9). */
 const CLOUD_UV_PER_M = 0.9 / CLOUD_HEIGHT;
 type Vec2 = THREE.Node<'vec2'>;
@@ -755,6 +755,8 @@ export type CloudShadowInputs = {
     lightDir: THREE.UniformNode<'vec3', THREE.Vector3>;
     /** 0-1 darkness under a cloud (environment strength × graphics switch × light up); 0 skips it. */
     strength: THREE.UniformNode<'float', number>;
+    /** Ground level (m) the cloud layer's height is measured from (lowest point of the map). */
+    base: THREE.UniformNode<'float', number>;
 };
 
 /**
@@ -778,7 +780,10 @@ export function cloudShadowNode(
                 .and(u.cloudCoverage.greaterThan(0.001)),
             () => {
                 const l = inputs.lightDir;
-                const up = max(float(CLOUD_HEIGHT).sub(position.y.sub(cameraPosition.y)), 0);
+                const up = max(
+                    inputs.base.add(CLOUD_HEIGHT).sub(position.y),
+                    0,
+                );
                 const onPlane = position.xz.add(
                     l.xz.div(max(l.y, 0.12)).mul(up),
                 );
@@ -797,9 +802,11 @@ export function cloudShadowNode(
                     1,
                 ).toVar();
                 const threshold = float(1).sub(cov);
+                // Firmer edges than the sky's opacity ramp: a cloud blocks the sun well before its
+                // thin fringe turns opaque in the sky.
                 const mask = smoothstep(
-                    threshold.sub(u.cloudSoftness.mul(0.2)),
-                    threshold.add(u.cloudSoftness),
+                    threshold.sub(0.02),
+                    threshold.add(u.cloudSoftness.mul(0.35)).add(0.04),
                     n,
                 );
                 light.assign(float(1).sub(mask.mul(inputs.strength)));

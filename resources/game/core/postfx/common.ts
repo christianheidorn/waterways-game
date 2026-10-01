@@ -32,6 +32,12 @@ export type LightSource = {
     readonly nightAmount: number;
     /** Overcast / storm darkness 0-1. */
     readonly darkness: number;
+    /** Distance fog (blended weather density included). */
+    readonly fog: { readonly density: number };
+    /** Valley fog at the camera (1/m; 0 above it or without valley fog). */
+    valleyFogAt?(position: THREE.Vector3): number;
+    /** Light left under the clouds at a world position (for light shafts from cloud gaps). */
+    cloudLight?(position: Vec3Node): THREE.Node<'float'>;
 };
 
 /** Artistic post-processing values (EnvironmentSettings "Camera & look"), with defaults filled in. */
@@ -54,6 +60,8 @@ export type Look = {
     filmGrain: number;
     letterbox: number;
     fogDensity: number;
+    /** Sunbeams in fog and haze (0-2). */
+    fogShaftIntensity: number;
 };
 
 /**

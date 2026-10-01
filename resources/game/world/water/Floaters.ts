@@ -122,11 +122,7 @@ export class Floaters {
      * Per frame. `focus`: where the camera / player is (only nearby bodies are simulated); `pusher`:
      * the character while it walks or swims (null in the editor).
      */
-    update(
-        dt: number,
-        focus: THREE.Vector3,
-        pusher: FloatPusher | null,
-    ): void {
+    update(dt: number, focus: THREE.Vector3, pusher: FloatPusher | null): void {
         this.sync();
 
         if (!this.floaters.size || dt <= 0) {
@@ -186,7 +182,8 @@ export class Floaters {
 
     /** Snapshot for get_editor_state / control_player. */
     describe(): FloaterState[] {
-        const deg = (r: number) => Math.round(THREE.MathUtils.radToDeg(r) * 10) / 10;
+        const deg = (r: number) =>
+            Math.round(THREE.MathUtils.radToDeg(r) * 10) / 10;
         const r2 = (v: number) => Math.round(v * 100) / 100;
 
         return [...this.floaters.entries()].map(([id, f]) => {
@@ -224,7 +221,10 @@ export class Floaters {
         for (const p of this.props.list()) {
             const ref = this.props.modelRef(p.model);
             const buoyancy = ref?.buoyancy;
-            const box = buoyancy?.mode === 'float' ? this.props.modelBounds(p.model) : null;
+            const box =
+                buoyancy?.mode === 'float'
+                    ? this.props.modelBounds(p.model)
+                    : null;
 
             if (!buoyancy || !box) {
                 continue;
@@ -273,7 +273,7 @@ export class Floaters {
             seen.add(p.id);
         }
 
-        for (const id of [...this.floaters.keys()]) {
+        for (const id of this.floaters.keys()) {
             if (!seen.has(id)) {
                 this.floaters.delete(id);
                 this.props.setPose(id, null);

@@ -1051,7 +1051,11 @@ function terrainSurface(
     // Under water the bed has no sun glint of its own (water against wet sediment barely reflects):
     // the wet gloss fades out below the first few centimetres.
     rough.assign(
-        mix(rough, 0.75, smoothstep(0.02, 0.12, ground.y.mul(WATER_DEPTH_RANGE))),
+        mix(
+            rough,
+            0.75,
+            smoothstep(0.02, 0.12, ground.y.mul(WATER_DEPTH_RANGE)),
+        ),
     );
 
     // Weather: rain-soaked ground (porous darkening, glossy).

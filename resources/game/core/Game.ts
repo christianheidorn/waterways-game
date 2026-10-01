@@ -421,13 +421,17 @@ export class Game {
                         head_depth_m:
                             surface === null
                                 ? 0
-                                : Math.round(Math.max(0, surface - head) * 100) /
-                                  100,
+                                : Math.round(
+                                      Math.max(0, surface - head) * 100,
+                                  ) / 100,
                         climbing: p.climbing,
                     };
                 },
                 floating: () => {
-                    const p = this.mode === 'play' ? this.player.position : this.camera.position;
+                    const p =
+                        this.mode === 'play'
+                            ? this.player.position
+                            : this.camera.position;
 
                     return this.floaters
                         .describe()
@@ -1761,15 +1765,19 @@ export class Game {
                     fogColor: fog,
                     shaftColor: light
                         .clone()
-                        .multiply(look.shallow.clone().lerp(new THREE.Color(1, 1, 1), 0.5))
+                        .multiply(
+                            look.shallow
+                                .clone()
+                                .lerp(new THREE.Color(1, 1, 1), 0.5),
+                        )
                         .multiplyScalar(0.05),
                     sunDir: sun.clone(),
                     caustics: {
                         intensity:
                             this.manifest.settings.graphics.caustics === false
                                 ? 0
-                                : (this.manifest.environment.caustics_intensity ??
-                                  0.8),
+                                : (this.manifest.environment
+                                      .caustics_intensity ?? 0.8),
                         scale: this.manifest.environment.caustics_scale ?? 2.5,
                         depth:
                             (this.manifest.environment.caustics_depth ?? 4) * 2,

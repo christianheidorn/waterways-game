@@ -472,7 +472,9 @@ export class Water {
      * with a share of it. Wind strength 1 is a fresh breeze of about 8 m/s.
      */
     windVelocity(): THREE.Vector2 {
-        return this.u.windDir.value.clone().multiplyScalar(this.u.wind.value * 8);
+        return this.u.windDir.value
+            .clone()
+            .multiplyScalar(this.u.wind.value * 8);
     }
 
     /** Travelling gusts (the foliage's gust field): strength, 1 / patch size and the field's downwind offset. */
@@ -690,11 +692,17 @@ export class Water {
     dataNode(xz: THREE.Node<'vec2'>): THREE.Node<'vec3'> {
         const u = this.u;
         const grid = xz.add(u.mapHalf).div(u.dataSpacing);
-        const d = texture(this.data.dataTexture, grid.add(0.5).div(u.dataSize))
-            .level(float(0));
+        const d = texture(
+            this.data.dataTexture,
+            grid.add(0.5).div(u.dataSize),
+        ).level(float(0));
         const inside = max(abs(xz.x), abs(xz.y)).lessThan(u.mapHalf);
 
-        return select(inside, vec3(d.x.max(0), d.y, d.z), vec3(0)) as THREE.Node<'vec3'>;
+        return select(
+            inside,
+            vec3(d.x.max(0), d.y, d.z),
+            vec3(0),
+        ) as THREE.Node<'vec3'>;
     }
 
     /** Water surface height at a world position (still level, no waves), or null when dry. */

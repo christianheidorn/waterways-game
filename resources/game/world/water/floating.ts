@@ -145,8 +145,7 @@ export function stepFloat(
     }
 
     const h = (p: ProbeResult) => (p ? p.height : centre.height - 0.05);
-    const surface =
-        (centre.height * 2 + h(px) + h(nx) + h(pz) + h(nz)) / 6;
+    const surface = (centre.height * 2 + h(px) + h(nx) + h(pz) + h(nz)) / 6;
     const d = draft(b);
     const bed = centre.height - centre.depth;
     // Too shallow to float: it sits on the bed (and tilts with it less).
@@ -200,10 +199,8 @@ export function stepFloat(
         fz = (flowZ + o.windZ * WINDAGE * above * 2 - b.vz) * drag;
     } else {
         // Moored: a spring to the anchor; the waves still sway it a little.
-        fx =
-            (b.anchorX - b.x) * 3 - b.vx * 2.5 + (flowX - b.vx) * 0.3;
-        fz =
-            (b.anchorZ - b.z) * 3 - b.vz * 2.5 + (flowZ - b.vz) * 0.3;
+        fx = (b.anchorX - b.x) * 3 - b.vx * 2.5 + (flowX - b.vx) * 0.3;
+        fz = (b.anchorZ - b.z) * 3 - b.vz * 2.5 + (flowZ - b.vz) * 0.3;
     }
 
     // Shore: footprint points over land or shallower than the draft push the body away from them.
@@ -232,11 +229,8 @@ export function stepFloat(
     b.z += b.vz * dt;
 
     // Turning: shear in the flow across the footprint, or back to the anchor's heading when moored.
-    const shear =
-        (vz(px) - vz(nx)) / (2 * ax) - (vx(pz) - vx(nz)) / (2 * az);
-    const yawTarget = o.drift
-        ? 0
-        : wrapAngle(b.anchorYaw - b.yaw) * 2;
+    const shear = (vz(px) - vz(nx)) / (2 * ax) - (vx(pz) - vx(nz)) / (2 * az);
+    const yawTarget = o.drift ? 0 : wrapAngle(b.anchorYaw - b.yaw) * 2;
     b.yawRate += (shear * 0.25 + yawTarget - b.yawRate * 1.2) * dt;
     b.yaw += b.yawRate * dt;
 

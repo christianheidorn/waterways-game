@@ -178,7 +178,11 @@ export class WeatherAudio {
             ctx.currentTime,
             0.06,
         );
-        this.underGain.gain.setTargetAtTime(amount * 0.35, ctx.currentTime, 0.2);
+        this.underGain.gain.setTargetAtTime(
+            amount * 0.35,
+            ctx.currentTime,
+            0.2,
+        );
     }
 
     /**

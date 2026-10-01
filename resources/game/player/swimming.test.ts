@@ -41,7 +41,9 @@ describe('swimming', () => {
     it('swims only where the water is deep enough, with hysteresis', () => {
         const float = floatDepth(H);
         // Chest-deep: standing.
-        expect(shouldSwim(10, 10, 10 - float * 0.7, 10 - float * 0.7, H, false)).toBe(false);
+        expect(
+            shouldSwim(10, 10, 10 - float * 0.7, 10 - float * 0.7, H, false),
+        ).toBe(false);
         // Deep water, feet below the surface: swimming.
         expect(shouldSwim(10, 10, 5, 10 - float, H, false)).toBe(true);
         // Getting shallower: keeps swimming a little longer than it started…
@@ -49,18 +51,25 @@ describe('swimming', () => {
         expect(shouldSwim(10, 10, edge, 10 - float, H, false)).toBe(false);
         expect(shouldSwim(10, 10, edge, 10 - float, H, true)).toBe(true);
         // …and stands up once it is clearly shallow.
-        expect(shouldSwim(10, 10, 10 - float * 0.7, 10 - float, H, true)).toBe(false);
+        expect(shouldSwim(10, 10, 10 - float * 0.7, 10 - float, H, true)).toBe(
+            false,
+        );
         // Airborne above the water (jumping in) is not swimming yet; dry land never.
         expect(shouldSwim(10, 10, 5, 10.2, H, false)).toBe(false);
         expect(shouldSwim(null, 0, 0, 0, H, false)).toBe(false);
     });
 
     it('floats on the surface and follows the waves', () => {
-        const still = settle(10 - floatDepth(H) - 1, () => 10 - floatDepth(H), 4);
+        const still = settle(
+            10 - floatDepth(H) - 1,
+            () => 10 - floatDepth(H),
+            4,
+        );
         expect(still.y).toBeCloseTo(10 - floatDepth(H), 2);
 
         // A wave of ±0.3 m every 4 s: the swimmer rides it with most of the amplitude.
-        const wave = (t: number) => 10 - floatDepth(H) + 0.3 * Math.sin((t * Math.PI * 2) / 4);
+        const wave = (t: number) =>
+            10 - floatDepth(H) + 0.3 * Math.sin((t * Math.PI * 2) / 4);
         const ride = settle(wave(0), wave, 12);
         expect(ride.max - ride.min).toBeGreaterThan(0.45);
         expect(ride.max - ride.min).toBeLessThan(0.75);
@@ -81,7 +90,13 @@ describe('swimming', () => {
 
     it('swims where the camera looks under water, level at the surface', () => {
         const out = { x: 0, y: 0, z: 0 };
-        const controls = { forward: 1, strafe: 0, up: false, down: false, sprint: false };
+        const controls = {
+            forward: 1,
+            strafe: 0,
+            up: false,
+            down: false,
+            sprint: false,
+        };
         // Camera yaw 0 looks towards −z; pitched 45° down.
         swimVelocity(controls, 0, -Math.PI / 4, true, 2, out);
         expect(out.z).toBeLessThan(-1);
@@ -92,10 +107,24 @@ describe('swimming', () => {
         expect(out.y).toBe(0);
         expect(out.z).toBeCloseTo(-2, 5);
         // Diving key alone: straight down; sprint is faster.
-        swimVelocity({ ...controls, forward: 0, down: true }, 0, 0, true, 2, out);
+        swimVelocity(
+            { ...controls, forward: 0, down: true },
+            0,
+            0,
+            true,
+            2,
+            out,
+        );
         expect(out.y).toBeLessThan(0);
         expect(Math.hypot(out.x, out.z)).toBeCloseTo(0, 5);
-        swimVelocity({ ...controls, sprint: true }, Math.PI / 2, 0, false, 2, out);
+        swimVelocity(
+            { ...controls, sprint: true },
+            Math.PI / 2,
+            0,
+            false,
+            2,
+            out,
+        );
         expect(out.x).toBeCloseTo(-3.2, 5);
     });
 
@@ -122,7 +151,9 @@ describe('swimming', () => {
         const surface = 10;
         const feet = surface - floatDepth(H);
         expect(climbTarget(surface + 0.5, surface, feet)).toBe(surface + 0.5);
-        expect(climbTarget(surface + CLIMB_MAX + 0.1, surface, feet)).toBeNull();
+        expect(
+            climbTarget(surface + CLIMB_MAX + 0.1, surface, feet),
+        ).toBeNull();
         // Bed under water: wading out, not climbing.
         expect(climbTarget(surface - 0.6, surface, feet)).toBeNull();
         const start = climbEase(0);

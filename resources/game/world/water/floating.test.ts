@@ -77,7 +77,12 @@ describe('floating props', () => {
 
     it('tilts with the slope of a wave under it (multi-point sampling)', () => {
         // Water rising towards +x with a slope of 0.15.
-        const slope: WaterProbe = (x) => ({ height: 10 + x * 0.15, vx: 0, vz: 0, depth: 5 });
+        const slope: WaterProbe = (x) => ({
+            height: 10 + x * 0.15,
+            vx: 0,
+            vz: 0,
+            depth: 5,
+        });
         const b = log();
         run(b, slope, 5);
         // The +x end is raised: positive roll about the local z axis (yaw 0: local x = world x).
@@ -148,7 +153,14 @@ describe('floating props', () => {
 
     it('stays on the ground where there is no water', () => {
         const b = log();
-        expect(stepFloat(b, 1 / 60, () => null, { drift: true, windX: 0, windZ: 0, groundAt: () => 3 })).toBe(false);
+        expect(
+            stepFloat(b, 1 / 60, () => null, {
+                drift: true,
+                windX: 0,
+                windZ: 0,
+                groundAt: () => 3,
+            }),
+        ).toBe(false);
         expect(b.y).toBe(3);
         expect(b.grounded).toBe(true);
     });

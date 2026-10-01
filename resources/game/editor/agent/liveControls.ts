@@ -400,7 +400,8 @@ async function dive(
     }
 
     const depth = Math.min(30, Math.max(0.5, Number(payload.depth) || 2));
-    const limit = Math.min(30, Math.max(1, Number(payload.timeout) || 10)) * 1000;
+    const limit =
+        Math.min(30, Math.max(1, Number(payload.timeout) || 10)) * 1000;
     const start = performance.now();
     let outcome: 'reached' | 'bottom' | 'timeout' | 'out_of_breath' = 'timeout';
     let lastY = host.position().y;
@@ -451,7 +452,8 @@ async function surface(
     host: PlayerHost,
     payload: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-    const limit = Math.min(30, Math.max(1, Number(payload.timeout) || 15)) * 1000;
+    const limit =
+        Math.min(30, Math.max(1, Number(payload.timeout) || 15)) * 1000;
     const start = performance.now();
     let outcome: 'surfaced' | 'timeout' = 'timeout';
 

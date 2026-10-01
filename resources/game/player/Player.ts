@@ -134,7 +134,8 @@ export class Player {
         const water = env.waterLevelAt(x, z);
 
         if (water !== null && water > this.position.y) {
-            this.position.y = water - floatDepth(this.settings.character_height);
+            this.position.y =
+                water - floatDepth(this.settings.character_height);
         }
 
         this.velocity.set(0, 0, 0);

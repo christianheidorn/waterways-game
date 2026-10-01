@@ -265,8 +265,11 @@ export class Splashes {
                 const rise = 0.25 + Math.min(0.5, p.size * 12);
                 p.vy += (rise - p.vy) * Math.min(1, dt * 3);
                 const drag = Math.exp(-dt * 2);
-                p.vx = p.vx * drag + Math.sin(p.age * 11 + p.size * 900) * 0.4 * dt;
-                p.vz = p.vz * drag + Math.cos(p.age * 9 + p.size * 700) * 0.4 * dt;
+                p.vx =
+                    p.vx * drag +
+                    Math.sin(p.age * 11 + p.size * 900) * 0.4 * dt;
+                p.vz =
+                    p.vz * drag + Math.cos(p.age * 9 + p.size * 700) * 0.4 * dt;
                 p.x += p.vx * dt;
                 p.y += p.vy * dt;
                 p.z += p.vz * dt;

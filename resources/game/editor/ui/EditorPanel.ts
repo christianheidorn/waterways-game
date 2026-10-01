@@ -1033,7 +1033,11 @@ export class EditorPanel {
             this.editor.notify();
         };
         const current = () =>
-            b ?? { mode: 'float' as const, density: 0.5, drift: 'none' as const };
+            b ?? {
+                mode: 'float' as const,
+                density: 0.5,
+                drift: 'none' as const,
+            };
         const floats = toggle(
             'Floats on water (all copies of this model)',
             !!b,

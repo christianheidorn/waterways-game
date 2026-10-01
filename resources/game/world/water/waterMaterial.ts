@@ -954,7 +954,9 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
         cameraViewMatrix,
     );
     // Back faces (the surface seen from below) face down, towards the camera.
-    const normalBelow = worldNormal.negate().transformDirection(cameraViewMatrix);
+    const normalBelow = worldNormal
+        .negate()
+        .transformDirection(cameraViewMatrix);
     material.normalNode = select(frontFacing, normal, normalBelow);
     // Screen-space distortion from the waves: the normal's deviation from flat water (in view space).
     // (The whole view normal would add a constant shift — at grazing angles its y is ~1 — which pulled
@@ -1135,7 +1137,9 @@ export function horizonSafe(
 ): Node<'vec3'> {
     return Fn(() => {
         const r = reflect(viewDir.negate(), n).toVar();
-        const lifted = normalize(viewDir.add(normalize(vec3(r.x, max(r.y, 0.04), r.z))));
+        const lifted = normalize(
+            viewDir.add(normalize(vec3(r.x, max(r.y, 0.04), r.z))),
+        );
 
         return select(r.y.lessThan(0.04), lifted, n);
     })() as Node<'vec3'>;

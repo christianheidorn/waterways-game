@@ -742,6 +742,52 @@ land on the same frame.
   over ~90 s, the top first.
 - **MCP**: `control_player` `walk_to` wades, `state` reports `water` (wading, depth, wet, wet line); `splash`
   previews an impact at a point; `get_editor_state` reports `water_interaction` (incl. the ripple field).
+- **Subsurface glow vs. layers**: the crests' sunlit glow follows the wind waves and swell only; layer bumps
+  (ripples, bow waves) no longer count as crests (on a calm pond a wading character's bow wave used to light up
+  as an orange patch at its feet). Reflections are kept above the horizon, so steep slopes never mirror the
+  environment's ground.
+
+## Swimming, underwater and floating
+
+- **Swimming** (`player/swimming.ts`, `Player.ts`): water deeper than ~90 % of the floating depth (feet 0.64 ×
+  the character's height below the surface; hysteresis at the edge) lifts the character off its feet. It
+  floats on `Water.sampleSurface` — the waves and the river current, which carries it along — with a damped
+  buoyancy spring, swims with WASD (Shift faster), dives with **C** (or Ctrl) and then swims where the camera
+  looks, swims up with Space and floats back up when let go. Breath lasts 30 s under water (then it has to
+  surface). Pushing against a bank or a jetty at most 0.95 m above the water climbs out (a short pull-up);
+  shallower banks are simply waded out of. The procedural crawl / treading pose pitches with the swim direction;
+  library characters play their swim clip. Collision with the bed, props and shore works as on land.
+- **Camera**: the third-person camera stays on the character's side of the surface (above while it swims at the
+  surface, below while it dives) and eases through the waterline when it dives or surfaces.
+- **Under water** (`core/postfx/Underwater.ts`, the water material's back faces): the surface seen from below
+  shows Snell's window (the world above squeezed into a ~97° cone, wobbling with the waves) and mirrors the
+  water's own light outside it (total internal reflection). A post pass treats every pixel whose lens point is
+  below the surface: Beer–Lambert absorption per channel from the body's colour and clarity (the same formula
+  as the water's absorption from above) fading into the water's in-scattered light, darker deeper down; the bed
+  caustics on everything under water (bed, rocks, props, the character; the terrain's own switch off
+  meanwhile); a slow wobble; light shafts (High) gathered along the view from the caustic light. A camera
+  crossing the surface sees the lens split at the waterline with a thin meniscus. Sound is low-passed with a
+  low rumble of water; strokes under water make bubbles (particles that wobble up and pop with a ring, and
+  little blips) instead of rings. The bed loses its wet sun glint under water. Graphics `underwater_effects`:
+  `off` (a plain scene fog), `low` (no shafts; Low and Medium presets), `high` (default). Texture budget: the
+  water material adds no texture for the underside (it reuses the scene colour copy); the post pass is its own
+  draw.
+- **Floating props** (`world/water/floating.ts`, `Floaters.ts`): prop models with `buoyancy` (`mode: float`,
+  `density` = share of the height under water, `drift`: `none` bobs in place, `return` drifts while playing and
+  is back afterwards, `stay` drifts and stays until the map is reloaded) float where they are placed in water.
+  Five samples of the wavy surface over the footprint set height and tilt (underdamped: they bob after a push);
+  the water's velocity (wave orbits, river current) and the wind (more for high floaters) drag drifting ones;
+  shallows and dry footprint points push them back off the shore, and too shallow water grounds them. They
+  bounce off each other, the character shoves them (smaller ones give way more), and they push rings, bow waves
+  and wakes into the ripple field. The live pose drives rendering, picking and collision (`Props.setPose`); the
+  saved position stays the authored anchor. Edit it in **Place → Props → Select & edit** (Floats on water,
+  under water %, drift) or with `update_prop_model` / `import_model` `buoyancy`.
+- **Water plants**: reeds, grass and flowers standing in water lean downstream with the current and rock with
+  the waves (the water data texture in the foliage vertex stage), and are pushed aside by the wading or swimming
+  character like grass (the phase 6 bend).
+- **MCP**: `control_player` `swim` (walk_to through water, `dive: true` stays under), `dive` (to `depth` m),
+  `surface`; its state reports `swim` (diving, head under, breath, head depth, climbing) and `floating_props`
+  nearby; `take_screenshot` with a `position` below the surface shows the view under water.
 
 ## Bounce light
 
@@ -859,8 +905,9 @@ hills) with size, height, rotation (R) and blend mode; a grid previews the resul
 Props** snaps to a grid, tilts props with the slope, snaps fences and walls end-to-end, and places rows along a
 path (Along a path: click points, Enter). Everything is also available to AI agents over MCP (docs/MCP.md).
 
-**Play mode:** click to capture the mouse. WASD to move, Shift to run, Space to jump or surface, C to dive,
-wheel to zoom. Esc releases the mouse; press Esc again to return to building.
+**Play mode:** click to capture the mouse. WASD to move, Shift to run, Space to jump (in water: swim up, or
+hop at the surface), C (or Ctrl) to dive — under water you swim where you look — and wheel to zoom. Swim into a
+low bank or jetty to climb out. Esc releases the mouse; press Esc again to return to building.
 
 **Collision:** the character is a capsule that slides along tree trunks, rocks and props, steps up ledges up
 to 0.4 m and stands on rocks and props; the camera pulls in in front of them. Foliage types choose `auto`

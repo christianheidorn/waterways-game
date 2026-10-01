@@ -135,10 +135,7 @@ export class Underwater {
                 // Caustics on everything under water (the terrain's own are switched off meanwhile).
                 const k = this.caustics;
                 If(
-                    k.w
-                        .greaterThan(0.5)
-                        .and(sky.not())
-                        .and(dist.lessThan(40)),
+                    k.w.greaterThan(0.5).and(sky.not()).and(dist.lessThan(40)),
                     () => {
                         const below = this.surface.sub(wp.y).max(0);
                         const shift = sun.xz.div(max(sun.y, 0.3)).mul(below);
@@ -197,7 +194,9 @@ export class Underwater {
                         const b = sin(
                             q.y
                                 .mul(1.1)
-                                .add(sin(q.x.mul(0.6).sub(t.mul(0.25))).mul(1.5))
+                                .add(
+                                    sin(q.x.mul(0.6).sub(t.mul(0.25))).mul(1.5),
+                                )
                                 .sub(t.mul(0.3)),
                         );
                         const shaft = smoothstep(0.35, 0.95, a.mul(b).abs());

@@ -391,7 +391,9 @@ function foliagePosition(
                     const off = flowLocal
                         .mul(0.3)
                         .add(flowLocal.mul(flutter.mul(0.08)))
-                        .add(waveLocal.mul(rock.mul(g.wind.mul(0.06).add(0.03))));
+                        .add(
+                            waveLocal.mul(rock.mul(g.wind.mul(0.06).add(0.03))),
+                        );
 
                     return vec3(off.x, 0, off.y).mul(under.mul(submerged));
                 };

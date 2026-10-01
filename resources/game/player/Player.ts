@@ -6,6 +6,7 @@ import { STEP_HEIGHT } from '../world/collision/Collision';
 import type { Capsule, CollisionWorld } from '../world/collision/Collision';
 import { CharacterModel } from './CharacterModel';
 import { GltfCharacter } from './GltfCharacter';
+import { wadeSpeedFactor } from './wading';
 
 export type PlayerEnvironment = {
     heights: Heightfield;
@@ -36,6 +37,8 @@ export class Player {
     yaw = 0;
     grounded = false;
     swimming = false;
+    /** Water above the feet while walking (m; 0 on dry ground or swimming). */
+    wadeDepth = 0;
     private avatar: Avatar;
     private settings: PlayerSettings;
     private modelUrl: string | null = null;
@@ -138,6 +141,7 @@ export class Player {
             this.position.y < water - swimDepth * 0.6;
 
         if (this.swimming && water !== null) {
+            this.wadeDepth = 0;
             const speed = s.swim_speed * (running ? 1.6 : 1);
             const accel = 1 - Math.exp(-dt * 3);
             this.velocity.x += (wish.x * speed - this.velocity.x) * accel;
@@ -158,7 +162,12 @@ export class Player {
 
             this.grounded = false;
         } else {
-            const speed = running ? s.run_speed : s.walk_speed;
+            // Wading: deeper water slows the legs down.
+            this.wadeDepth =
+                water !== null ? Math.max(0, water - this.position.y) : 0;
+            const speed =
+                (running ? s.run_speed : s.walk_speed) *
+                wadeSpeedFactor(this.wadeDepth, s.character_height);
             const control = this.grounded
                 ? 1 - Math.exp(-dt * 12)
                 : 1 - Math.exp(-dt * 2);
@@ -337,6 +346,10 @@ export class Player {
         }
 
         this.position.copy(next);
+    }
+
+    get height(): number {
+        return this.settings.character_height;
     }
 
     /** Eye/camera pivot point. */

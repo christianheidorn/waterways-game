@@ -21,6 +21,7 @@ import type {
     WaterSurfaceLayer,
 } from './water/waterMaterial';
 import { WaterSurfaceData } from './water/WaterSurfaceData';
+import { Ripples } from './water/Ripples';
 import { Surf } from './water/Surf';
 import { shoreFade, WaveField } from './water/WaveField';
 import type { WaveSample } from './water/WaveField';
@@ -87,6 +88,10 @@ export class Water {
     readonly data: WaterSurfaceData;
     /** Beach surf: shore distance field, shoaling / breaking waves, swash (phase 11). */
     readonly surf: Surf;
+    /** Interactive ripples around the player / camera (phase 12). */
+    readonly ripples: Ripples;
+    /** Where the ripple field centres (the player while playing); null: the camera. */
+    interactionFocus: THREE.Vector3 | null = null;
     private readonly u = createWaterUniforms();
     private readonly waveTexture = createWaveTexture();
     private readonly shared: WaterSharedNodes = createSharedNodes();
@@ -133,6 +138,12 @@ export class Water {
             (row) => this.bodies.bodies[row - 1] ?? null,
         );
         this.layers.push(this.surf.layer());
+        this.ripples = new Ripples((x, z) => {
+            const level = this.levelAt(x, z);
+
+            return level === null ? null : level - this.terrain.sample(x, z);
+        });
+        this.layers.push(this.ripples.layer());
         this.bodies.onChange = (reason) => {
             this.waves.invalidateWeights();
             this.tableDirty = true;
@@ -193,6 +204,7 @@ export class Water {
      */
     setRenderer(renderer: GameRenderer): void {
         this.renderer = renderer;
+        this.ripples.setRenderer(renderer);
         this.applyMode();
     }
 
@@ -601,6 +613,12 @@ export class Water {
         if (camera) {
             this.placeFineMesh(camera);
         }
+
+        const focus = this.interactionFocus ?? camera?.position;
+
+        if (focus) {
+            this.ripples.update(dt, focus);
+        }
     }
 
     /** Water surface height at a world position (still level, no waves), or null when dry. */
@@ -756,6 +774,7 @@ export class Water {
 
     /** Rebuilds the water meshes that overlap the rect (after water painting or terrain sculpting). */
     rebuildRect(rect: GridRect): void {
+        this.ripples.invalidate();
         this.onRebuild?.(rect);
         this.data.update(rect, this.riverFlow);
         this.surf.rebuild(rect);
@@ -785,6 +804,7 @@ export class Water {
         this.waveTexture.dispose();
         this.data.dispose();
         this.surf.dispose();
+        this.ripples.dispose();
         this.bodies.dispose();
         this.waves.dispose();
     }

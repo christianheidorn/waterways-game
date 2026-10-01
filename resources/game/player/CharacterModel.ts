@@ -587,12 +587,16 @@ export class CharacterModel {
         const index = int(attribute('palette', 'float').add(0.5));
         const material = new THREE.MeshStandardNodeMaterial();
         material.name = 'Character';
-        applyWetness(material, {
+        applyWetness(
+            material,
+            {
             color: colors.element(index) as unknown as THREE.Node<'color'>,
             roughness: roughness.element(
                 index,
             ) as unknown as THREE.Node<'float'>,
-        });
+            },
+            true,
+        );
         material.metalnessNode = metalness.element(
             index,
         ) as unknown as THREE.Node<'float'>;

@@ -149,6 +149,46 @@ export class WeatherAudio {
         }
     }
 
+    /**
+     * Water sounds near the listener (WaterInteraction): a slosh per wading step, a stroke while swimming,
+     * a splash (volume 0-1 grows with the impact) — short filtered noise bursts.
+     */
+    waterSound(kind: 'step' | 'splash' | 'stroke', volume: number): void {
+        const ctx = this.ctx;
+
+        if (!ctx || !this.master || !this.white || volume <= 0) {
+            return;
+        }
+
+        const start = ctx.currentTime + 0.005;
+        const splash = kind === 'splash';
+        const duration = splash
+            ? 0.5 + volume * 0.9
+            : kind === 'step'
+              ? 0.22 + Math.random() * 0.1
+              : 0.35;
+        const src = ctx.createBufferSource();
+        src.buffer = this.white;
+        src.playbackRate.value = 0.8 + Math.random() * 0.4;
+        const band = ctx.createBiquadFilter();
+        band.type = 'bandpass';
+        const f0 = splash
+            ? 1400 + Math.random() * 600
+            : 500 + Math.random() * 450;
+        band.frequency.setValueAtTime(f0, start);
+        // The slosh drops in pitch as the water settles.
+        band.frequency.exponentialRampToValueAtTime(f0 * 0.45, start + duration);
+        band.Q.value = splash ? 0.6 : 1.4;
+        const g = ctx.createGain();
+        const peak = volume * (splash ? 0.5 : 0.22);
+        g.gain.setValueAtTime(0.0001, start);
+        g.gain.exponentialRampToValueAtTime(peak, start + (splash ? 0.012 : 0.04));
+        g.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+        src.connect(band).connect(g).connect(this.master);
+        src.start(start, Math.random() * 1.5);
+        src.stop(start + duration + 0.05);
+    }
+
     /** Thunder for a strike `distance` metres away (delayed by the speed of sound). */
     thunder(distance: number, volume: number): void {
         const ctx = this.ctx;

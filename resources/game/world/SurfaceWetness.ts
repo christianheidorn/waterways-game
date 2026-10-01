@@ -3,13 +3,24 @@ import {
     materialColor,
     materialRoughness,
     mix,
+    max,
     normalWorld,
+    positionWorld,
     smoothstep,
     uniform,
 } from 'three/tsl';
 
 /** Rain wetness of exposed surfaces (0 = dry, 1 = soaked), driven by Weather. */
 export const surfaceWetness = uniform(0);
+
+/**
+ * The player character's clothes soaked from wading / swimming (WaterInteraction): wet below `line`
+ * (world height, m) by `amount` (0-1, drying over time).
+ */
+export const characterSoak = {
+    line: uniform(-1e6),
+    amount: uniform(0),
+};
 
 /**
  * Rain on props and characters: soaked surfaces are darker (water fills the pores / fabric) and glossier,
@@ -22,9 +33,23 @@ export function applyWetness(
         color: THREE.Node<'vec3'> | THREE.Node<'color'>;
         roughness: THREE.Node<'float'>;
     } = { color: materialColor, roughness: materialRoughness },
+    /** The player character: also soaked below the waterline (characterSoak). */
+    soak = false,
 ): void {
     const exposure = smoothstep(-0.6, 0.6, normalWorld.y).mul(0.5).add(0.5);
-    const wet = surfaceWetness.mul(exposure);
+    const rain = surfaceWetness.mul(exposure);
+    const wet = soak
+        ? max(
+              rain,
+              characterSoak.amount.mul(
+                  smoothstep(
+                      characterSoak.line.add(0.03),
+                      characterSoak.line.sub(0.03),
+                      positionWorld.y,
+                  ),
+              ),
+          )
+        : rain;
     material.colorNode = base.color.mul(mix(1, 0.58, wet));
     material.roughnessNode = mix(base.roughness, 0.28, wet.mul(0.75));
 }
@@ -36,6 +61,7 @@ export function applyWetness(
  */
 export function toLitNodeMaterial(
     source: THREE.Material,
+    soak = false,
 ): THREE.MeshStandardNodeMaterial {
     const material = (source as THREE.MeshPhysicalMaterial)
         .isMeshPhysicalMaterial
@@ -45,7 +71,7 @@ export function toLitNodeMaterial(
     // Copies every property both share (colour, maps, factors, alpha, side...).
     material.copy(source as unknown as THREE.MeshStandardNodeMaterial);
     material.name = source.name;
-    applyWetness(material);
+    applyWetness(material, undefined, soak);
 
     return material;
 }

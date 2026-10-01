@@ -247,6 +247,13 @@ export type GraphicsSettings = {
      * strongest waves everywhere (cheaper).
      */
     water_waves?: 'simple' | 'fft';
+    /**
+     * Interactive ripples around the player (footsteps, splashes, wakes): a wave simulation of 128² / 192² /
+     * 256² cells over 40 m (WebGPU compute; WebGL 2 at most 128² on the CPU), or off.
+     */
+    water_ripples?: 'off' | 'low' | 'medium' | 'high';
+    /** Splash, spray and drip particles from the character and objects in water. */
+    water_splashes?: boolean;
     /** Footprints in snow cover (a trail texture around the character). */
     snow_footprints: boolean;
     /**

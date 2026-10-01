@@ -55,7 +55,7 @@ export class GltfCharacter {
             let node = converted.get(m);
 
             if (!node) {
-                node = toLitNodeMaterial(m);
+                node = toLitNodeMaterial(m, true);
                 converted.set(m, node);
                 m.dispose();
             }

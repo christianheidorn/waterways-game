@@ -118,7 +118,7 @@ const SECTIONS: Section[] = [
     {
         title: 'Effects & weather',
         description:
-            'Particles, lightning, clouds, footprints in snow, water, caustics, screen-space reflections and bounce light.',
+            'Particles, lightning, clouds, footprints in snow, water (waves, ripples, splashes), caustics, screen-space reflections and bounce light.',
         icon: Sparkles,
         groups: ['effects', 'shading'],
         fields: [
@@ -127,6 +127,8 @@ const SECTIONS: Section[] = [
             'snow_footprints',
             'water_quality',
             'water_waves',
+            'water_ripples',
+            'water_splashes',
             'caustics',
             'ssr',
             'bounce_light_quality',

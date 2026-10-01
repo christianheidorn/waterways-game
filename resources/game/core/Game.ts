@@ -77,6 +77,7 @@ import {
     waterCoverage,
 } from '../world/WaterReflection';
 import { Weather } from '../world/Weather';
+import { WaterInteraction } from '../world/water/WaterInteraction';
 import { Wetness } from '../world/Wetness';
 import { Api } from './Api';
 import { Bridge } from './Bridge';
@@ -164,6 +165,8 @@ export class Game {
     /** Bounce light: irradiance probes computed in a worker (graphics bounce_light_quality). */
     private bounce: BounceLight | null = null;
     private player!: Player;
+    /** Wading, splashes, ripples from the character and props, wet clothes (phase 12). */
+    private waterInteraction!: WaterInteraction;
     private playerCamera!: ThirdPersonCamera;
     private editor!: Editor;
     private panel!: EditorPanel;
@@ -1031,6 +1034,17 @@ export class Game {
             this.manifest.character ?? null,
         );
         this.scene.add(this.player.object);
+        this.waterInteraction = new WaterInteraction(this.world.water);
+        this.scene.add(this.waterInteraction.splashes.mesh);
+        this.waterInteraction.onSound = (kind, volume) =>
+            this.weather?.audio.waterSound(kind, volume);
+        this.world.props.onPlaced = (prop, from) =>
+            this.waterInteraction.propMoved(
+                prop.x,
+                prop.z,
+                this.world.props.modelRadius(prop.model, prop.scale),
+                from,
+            );
         this.playerCamera = new ThirdPersonCamera(this.camera, settings.player);
         // The character moves on its own: only the live near shadow cascade draws it. Edited
         // casters refresh the cached far cascade.
@@ -1528,7 +1542,28 @@ export class Game {
             this.sunLight,
         );
         this.world.water.setGusts(...this.world.foliage.gustField());
+        const character = this.mode === 'play' || this.walking;
+        this.world.water.interactionFocus = character
+            ? this.player.position
+            : null;
         this.world.water.update(dt, this.camera);
+        this.waterInteraction.update(
+            dt,
+            character
+                ? {
+                      position: this.player.position,
+                      velocity: this.player.velocity,
+                      height: this.player.height,
+                      swimming: this.player.swimming,
+                      yaw: this.player.yaw,
+                  }
+                : null,
+        );
+        // Splashes: water lit by the sky and some of the sun.
+        this.waterInteraction.splashes.light.value
+            .copy(this.sunLight)
+            .multiplyScalar(0.3)
+            .add(this.skyLight);
         this.world.wetness.update(dt);
         // Grass bends around the character (play and the editor's walk mode).
         this.world.foliage.setInteractor(
@@ -2322,6 +2357,8 @@ export class Game {
         this.world.props.setLodCrossfade(g.lod_crossfade !== false);
         this.atmosphere.setCloudShadows(g.cloud_shadows !== false);
         this.world.water.setWaveQuality(g.water_waves !== 'simple');
+        this.world.water.ripples.setQuality(g.water_ripples ?? 'medium');
+        this.waterInteraction?.setSplashesEnabled(g.water_splashes !== false);
         this.bounce?.setQuality(g.bounce_light_quality ?? 'off');
         this.camera.far = g.draw_distance;
         this.camera.updateProjectionMatrix();

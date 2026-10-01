@@ -92,6 +92,10 @@ final class GameSettingsSchema
                 SettingField::select('water_waves', 'Water waves', 'fft', [
                     'simple' => 'Simple', 'fft' => 'FFT (WebGPU)',
                 ], 'Wind waves on lakes, rivers and the sea. FFT: a GPU wave simulation with choppy crests and whitecaps (WebGPU; WebGL 2 falls back to Simple). Simple: a sum of the strongest waves (cheaper).'),
+                SettingField::select('water_ripples', 'Water ripples', 'medium', [
+                    'off' => 'Off', 'low' => 'Low', 'medium' => 'Medium', 'high' => 'High',
+                ], 'Interactive ripples around the character: footsteps, splashes and wakes spread as rings, reflect off shores and foam on strong impacts. A wave simulation of 128² / 192² / 256² cells over 40 m (WebGPU compute; on WebGL 2 at most 128², on the CPU).'),
+                SettingField::boolean('water_splashes', 'Water splashes', true, 'Splash, spray and drip particles when the character wades, jumps in or leaves the water, and when objects drop into water.'),
                 SettingField::boolean('caustics', 'Caustics', true, 'Animated light patterns on shallow river and lake beds.'),
                 SettingField::boolean('snow_footprints', 'Snow footprints', true, 'The character leaves footprints in snow cover that fade and fill with new snow.'),
                 SettingField::select('bounce_light_quality', 'Bounce light', 'medium', [

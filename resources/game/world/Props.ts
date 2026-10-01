@@ -117,6 +117,10 @@ export class Props implements CollisionProvider {
     readonly group = new THREE.Group();
     /** Called whenever props were added, removed or moved (shadows, saving). */
     onChange: (() => void) | null = null;
+    /** A prop was added (from null) or moved to a new spot (water splashes, WaterInteraction). */
+    onPlaced:
+        | ((prop: PropInstance, from: { x: number; z: number } | null) => void)
+        | null = null;
     private models = new Map<number, PropModelRef>();
     private templates = new Map<number, Promise<Template>>();
     private batches = new Map<number, Batch>();
@@ -249,6 +253,7 @@ export class Props implements CollisionProvider {
         this.index(instance);
         void this.batch(instance.model);
         this.changed();
+        this.onPlaced?.(instance, null);
 
         return instance;
     }
@@ -266,10 +271,15 @@ export class Props implements CollisionProvider {
             return null;
         }
 
+        const from = { x: p.x, z: p.z };
         Object.assign(p, patch);
         this.matrices.delete(id);
         this.index(p);
         this.changed();
+
+        if (p.x !== from.x || p.z !== from.z) {
+            this.onPlaced?.(p, from);
+        }
 
         return p;
     }

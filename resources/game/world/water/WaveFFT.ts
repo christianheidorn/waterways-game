@@ -45,7 +45,8 @@ const FIELDS = 4;
  * eight butterfly stages in workgroup memory: two dispatches for all cascades and fields), then unpacked
  * into textures the water material samples:
  *
- * - displacement[c]: RGBA16F (dx, dy, dz, foam): horizontal (choppiness 1) and vertical displacement (m) and
+ * - displacement: one RGBA16F atlas, cascade c in columns c·N..(c+1)·N−1 (one binding: the water shaders are at
+ *   WebGPU's 16 sampled textures; the vertex stage filters it by hand, wrapping per tile): (dx, dy, dz, foam): horizontal (choppiness 1) and vertical displacement (m) and
  *   the persistent whitecap Jacobian (minimum of the Jacobian over the last seconds, recovering to 1);
  * - derivatives[c]: RGBA16F (∂y/∂x, ∂y/∂z, mean of ∂Dx/∂x and ∂Dz/∂z, whitecap Jacobian), mipmapped: all the
  *   fragment stage needs (normals, crest compression, foam).
@@ -53,7 +54,7 @@ const FIELDS = 4;
  * Cascade c tiles every CASCADES[c].length metres. Cost: 8 dispatches, ~4.7 MB of storage buffers.
  */
 export class WaveFFT {
-    readonly displacement: THREE.StorageTexture[] = [];
+    readonly displacement: THREE.StorageTexture;
     readonly derivatives: THREE.StorageTexture[] = [];
     private readonly h0 = instancedArray(CASCADES.length * N * N, 'vec4');
     private readonly h0Array: Float32Array;
@@ -79,15 +80,15 @@ export class WaveFFT {
     constructor() {
         this.h0Array = this.h0.value.array as Float32Array;
 
+        const disp = new THREE.StorageTexture(N * CASCADES.length, N);
+        disp.type = THREE.HalfFloatType;
+        disp.format = THREE.RGBAFormat;
+        disp.generateMipmaps = false;
+        disp.minFilter = disp.magFilter = THREE.NearestFilter;
+        disp.name = 'Wave displacement';
+        this.displacement = disp;
+
         for (let c = 0; c < CASCADES.length; c++) {
-            const disp = new THREE.StorageTexture(N, N);
-            disp.type = THREE.HalfFloatType;
-            disp.format = THREE.RGBAFormat;
-            disp.wrapS = disp.wrapT = THREE.RepeatWrapping;
-            disp.generateMipmaps = false;
-            disp.minFilter = THREE.LinearFilter;
-            disp.name = `Wave displacement ${c}`;
-            this.displacement.push(disp);
 
             const deriv = new THREE.StorageTexture(N, N);
             deriv.type = THREE.HalfFloatType;
@@ -126,7 +127,7 @@ export class WaveFFT {
     }
 
     dispose(): void {
-        for (const t of [...this.displacement, ...this.derivatives]) {
+        for (const t of [this.displacement, ...this.derivatives]) {
             t.dispose();
         }
 
@@ -256,7 +257,7 @@ export class WaveFFT {
 
     /** Fields → textures (sign of the centred spectrum, persistent whitecap Jacobian). */
     private unpackKernel(c: number): THREE.ComputeNode {
-        const disp = this.displacement[c];
+        const disp = this.displacement;
         const deriv = this.derivatives[c];
 
         return Fn(() => {
@@ -293,7 +294,11 @@ export class WaveFFT {
                 foam.assign(jacobian);
             });
             state.assign(foam);
-            textureStore(disp, uvec2(xi, yi), vec4(f0.x, f0.y, f1.x, foam));
+            textureStore(
+                disp,
+                uvec2(xi.add(c * N), yi),
+                vec4(f0.x, f0.y, f1.x, foam),
+            );
             // The fragment stage reads only this texture (texture binding limits): the mean horizontal
             // compression for the normals and the whitecap Jacobian ride along.
             textureStore(

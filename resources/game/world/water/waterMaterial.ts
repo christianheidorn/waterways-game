@@ -483,10 +483,12 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
                 const w = cascadeW(vWaves, i).mul(
                     smoothstep(f0, f1, camDist).oneMinus(),
                 );
-                const t = texture(
-                    fft.displacement[i],
+                const t = atlasBilinear(
+                    fft.displacement,
                     baseXZ.div(c.length),
-                ).level(float(0));
+                    i,
+                    FFT_SIZE,
+                );
                 d.addAssign(vec3(t.x.mul(chop), t.y, t.z.mul(chop)).mul(w));
             });
         } else {
@@ -1023,4 +1025,32 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     material.shoreNode = smoothstep(0, 0.18, vertical);
 
     return { material, reflection };
+}
+
+/**
+ * Bilinear, wrapped sample of tile `tile` of an atlas of `n`-wide square tiles side by side (WaveFFT's
+ * displacement: one texture binding for all cascades).
+ */
+function atlasBilinear(
+    atlas: THREE.Texture,
+    uv: Node<'vec2'>,
+    tile: number,
+    n: number,
+): Node<'vec4'> {
+    const p = uv.mul(n).sub(0.5);
+    const i0 = floor(p);
+    const f = p.sub(i0);
+    const wrap = (v: Node<'float'>) => v.sub(floor(v.div(n)).mul(n));
+    const x0 = wrap(i0.x);
+    const y0 = wrap(i0.y);
+    const x1 = wrap(i0.x.add(1));
+    const y1 = wrap(i0.y.add(1));
+    const at = (x: Node<'float'>, y: Node<'float'>) =>
+        textureLoad(atlas, ivec2(int(x).add(tile * n), int(y)));
+
+    return mix(
+        mix(at(x0, y0), at(x1, y0), f.x),
+        mix(at(x0, y1), at(x1, y1), f.x),
+        f.y,
+    ) as Node<'vec4'>;
 }

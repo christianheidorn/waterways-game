@@ -64,6 +64,12 @@ class LayerMaterialTest extends TestCase
         $this->put("/maps/{$map->slug}/layers/{$layer->id}", [...$base, 'tint' => 'white', 'roughness_scale' => 4, 'normal_strength' => -1, 'material_id' => 123])
             ->assertSessionHasErrors(['tint', 'roughness_scale', 'normal_strength', 'material_id']);
 
+        // Large-scale colour variation (0-2).
+        $this->put("/maps/{$map->slug}/layers/{$layer->id}", [...$base, 'macro_variation' => 1.7])->assertSessionHasNoErrors();
+        $this->assertSame(1.7, $layer->refresh()->macro_variation);
+        $this->assertSame(1.7, $layer->toGameArray()['macro_variation']);
+        $this->put("/maps/{$map->slug}/layers/{$layer->id}", [...$base, 'macro_variation' => 3])->assertSessionHasErrors(['macro_variation']);
+
         // Materials that are not ready are not sent to the game.
         $material->update(['status' => 'processing']);
         $this->assertNull($layer->refresh()->toGameArray()['material']);

@@ -109,6 +109,34 @@ class WeatherEnvironmentTest extends TestCase
         ])->assertSessionHasErrors(['gust_strength', 'gust_scale', 'gust_speed', 'cloud_shadow_strength', 'fog_shaft_intensity']);
     }
 
+    public function test_foam_caustics_puddles_and_footprints_are_saved_and_range_checked(): void
+    {
+        $map = Map::factory()->create();
+
+        $this->put("/maps/{$map->slug}/environment", [
+            'foam_breakup' => 0.2, 'caustics_intensity' => 1.4, 'caustics_scale' => 3.5, 'caustics_depth' => 6,
+            'puddles' => 0.9, 'puddle_dry_time' => 120, 'footprint_depth' => 1, 'footprint_fade_time' => 60,
+        ])->assertSessionHasNoErrors()->assertRedirect();
+
+        $env = $map->fresh()->resolvedEnvironment();
+        $this->assertSame(0.2, $env['foam_breakup']);
+        $this->assertSame(1.4, $env['caustics_intensity']);
+        $this->assertSame(3.5, $env['caustics_scale']);
+        $this->assertSame(6.0, $env['caustics_depth']);
+        $this->assertSame(0.9, $env['puddles']);
+        $this->assertSame(120.0, $env['puddle_dry_time']);
+        $this->assertSame(1.0, $env['footprint_depth']);
+        $this->assertSame(60.0, $env['footprint_fade_time']);
+
+        $this->put("/maps/{$map->slug}/environment", [
+            'foam_breakup' => 2, 'caustics_intensity' => -1, 'caustics_scale' => 20, 'caustics_depth' => 0,
+            'puddles' => 3, 'puddle_dry_time' => 0, 'footprint_depth' => -0.5, 'footprint_fade_time' => 99999,
+        ])->assertSessionHasErrors([
+            'foam_breakup', 'caustics_intensity', 'caustics_scale', 'caustics_depth',
+            'puddles', 'puddle_dry_time', 'footprint_depth', 'footprint_fade_time',
+        ]);
+    }
+
     public function test_weather_values_are_range_checked(): void
     {
         $map = Map::factory()->create();

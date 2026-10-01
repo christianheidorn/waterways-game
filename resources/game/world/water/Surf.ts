@@ -20,7 +20,6 @@ import {
     sin,
     smoothstep,
     sqrt,
-    texture,
     textureLoad,
     uniform,
     uniformArray,

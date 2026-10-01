@@ -160,10 +160,7 @@ export class Wetness {
                 const slope = Math.hypot(rr - l, d - u) / (2 * cell);
                 // Water runs off slopes steeper than ~6-11°.
                 const flat = 1 - smooth(0.1, 0.2, slope);
-                const hollow = Math.max(
-                    near[i] - h[i],
-                    (wide[i] - h[i]) * 0.6,
-                );
+                const hollow = Math.max(near[i] - h[i], (wide[i] - h[i]) * 0.6);
                 const v = Math.max(0, Math.min(1, hollow / full)) * flat;
                 out[i * 4 + 2] = Math.round(v * 255);
             }
@@ -208,7 +205,8 @@ function boxBlur(src: Float32Array, res: number, radius: number): Float32Array {
         for (let r = 0; r < res; r++) {
             out[r * res + c] = sum / width;
             sum +=
-                tmp[at(r + radius + 1) * res + c] - tmp[at(r - radius) * res + c];
+                tmp[at(r + radius + 1) * res + c] -
+                tmp[at(r - radius) * res + c];
         }
     }
 

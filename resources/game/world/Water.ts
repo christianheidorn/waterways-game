@@ -12,7 +12,6 @@ import {
     dot,
     exp,
     float,
-    floor,
     Fn,
     fract,
     fwidth,
@@ -245,7 +244,10 @@ export class Water {
                     for (let c = c0; c <= c1; c++) {
                         const px = hf.colToX(c) - a.x;
                         const pz = hf.rowToZ(r) - a.z;
-                        const along = Math.min(len, Math.max(0, px * tx + pz * tz));
+                        const along = Math.min(
+                            len,
+                            Math.max(0, px * tx + pz * tz),
+                        );
                         const d = Math.hypot(px - tx * along, pz - tz * along);
 
                         if (d >= half) {
@@ -1085,30 +1087,35 @@ function createWaterMaterial(
         .x.add(wave(pos.xz.div(11.3).sub(wind.yx.mul(waveTime.mul(0.01)))).y)
         .mul(0.5)
         .toVar();
-    const patches = smoothstep(
-        0.4,
-        0.58,
-        patchNoise.add(edge.mul(edge).mul(0.18)),
-    );
+    const patches = smoothstep(0.36, 0.62, patchNoise);
     const breakup = mix(1, patches, clamp(u.foamBreakup, 0, 1));
-    // Lines of foam rolling in towards the shore (wavy along the shoreline) and fading out on it.
+    // Bubbly lace: dense at the waterline, thinning out towards the foam width, pulsing as the
+    // water laps against the shore.
+    const lap = sin(waveTime.mul(1.3).sub(vertical.mul(5).div(foamWidth)))
+        .mul(0.5)
+        .add(0.5);
+    const lace = smoothstep(
+        mix(0.72, 0.18, edge),
+        mix(0.9, 0.42, edge),
+        bubbles.add(edge.mul(lap).mul(0.12)),
+    ).mul(edge);
+    // Lines of foam rolling in towards the shore (wavy along the shoreline).
     const rollPhase = vertical
         .div(foamWidth)
         .mul(4.5)
         .add(waveTime.mul(1.1))
         .add(patchNoise.mul(9));
-    const rolls = smoothstep(0.55, 0.95, sin(rollPhase).mul(0.5).add(0.5))
-        .mul(smoothstep(0, 0.35, edge));
-    const lap = sin(waveTime.mul(1.3).sub(vertical.mul(5).div(foamWidth)))
-        .mul(0.5)
-        .add(0.5);
-    const shoreFoam = u.foamEnabled
-        .mul(
-            edge
-                .mul(smoothstep(0.15, 0.55, bubbles.add(edge.mul(0.35).mul(lap))))
-                .add(rolls.mul(smoothstep(0.1, 0.4, bubbles)).mul(0.8)),
-        )
-        .mul(breakup);
+    const rolls = smoothstep(0.6, 0.95, sin(rollPhase).mul(0.5).add(0.5))
+        .mul(smoothstep(0, 0.4, edge))
+        .mul(smoothstep(0.25, 0.5, bubbles))
+        .mul(0.7);
+    // A thin line where the water touches anything, even inside the gaps between patches.
+    const contact = smoothstep(0.02, 0.12, vertical)
+        .oneMinus()
+        .mul(smoothstep(0.1, 0.35, bubbles));
+    const shoreFoam = u.foamEnabled.mul(
+        max(contact.mul(0.85), lace.add(rolls).mul(breakup)),
+    );
     const flowSpeed = length(waterFlow);
     // Foam carried downstream: two phases of a flow-mapped lookup, cross-faded (as the normals).
     const flowUv = pos.xz.div(4.1);
@@ -1120,8 +1127,10 @@ function createWaterMaterial(
         wave(flowUv.sub(flowVec.mul(fph1)).add(0.37)).a,
         abs(fph0.sub(0.5)).mul(2),
     );
-    const streaks = smoothstep(0.5, 0.85, carried)
-        .mul(smoothstep(0.15, 0.5, flowSpeed))
+    // Streaks of foam drifting downstream on rivers (with the rapids switch).
+    const streaks = u.rapids
+        .mul(smoothstep(0.5, 0.85, carried))
+        .mul(smoothstep(0.2, 0.5, flowSpeed))
         .mul(mix(1, patches, 0.6))
         .mul(0.45);
     const rapids = u.rapids
@@ -1132,7 +1141,7 @@ function createWaterMaterial(
     const foam = clamp(
         shoreFoam
             .add(rapids)
-            .add(streaks.mul(u.foamEnabled.mul(0.5).add(0.5)))
+            .add(streaks)
             .mul(u.foamIntensity)
             .mul(1.5)
             .mul(foamFade),

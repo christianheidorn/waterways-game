@@ -117,7 +117,9 @@ const ENV_SECTIONS: { title: string; match: (key: string) => boolean }[] = [
     {
         title: 'Water',
         match: (k) =>
-            /^(water_|wave_|flow_|shore_|foam_|rapids_|caustics_|ocean_|sea_)/.test(k),
+            /^(water_|wave_|flow_|shore_|foam_|rapids_|caustics_|ocean_|sea_)/.test(
+                k,
+            ),
     },
     { title: 'Camera & look', match: () => true },
 ];
@@ -402,7 +404,9 @@ export class WorldPanel {
                 max,
                 step,
                 unit,
-                value: Number(layer[key] ?? (key === 'macro_variation' ? 1 : min)),
+                value: Number(
+                    layer[key] ?? (key === 'macro_variation' ? 1 : min),
+                ),
                 onInput: (v) => patch({ [key]: v }),
             }).el;
 
@@ -414,7 +418,13 @@ export class WorldPanel {
                       num('Tile size', 'texture_scale', 0.5, 50, 0.1, ' m'),
                       num('Roughness', 'roughness_scale', 0, 3, 0.05),
                       num('Normal strength', 'normal_strength', 0, 3, 0.05),
-                      num('Large-scale variation', 'macro_variation', 0, 2, 0.05),
+                      num(
+                          'Large-scale variation',
+                          'macro_variation',
+                          0,
+                          2,
+                          0.05,
+                      ),
                   ]
                 : [
                       color('Colour', 'color'),
@@ -423,7 +433,13 @@ export class WorldPanel {
                       num('Pattern size', 'noise_scale', 0.5, 100, 0.5, ' m'),
                       num('Variation', 'variation', 0, 1, 0.01),
                       num('Bump', 'bump', 0, 2, 0.05),
-                      num('Large-scale variation', 'macro_variation', 0, 2, 0.05),
+                      num(
+                          'Large-scale variation',
+                          'macro_variation',
+                          0,
+                          2,
+                          0.05,
+                      ),
                   ],
         );
     }

@@ -248,7 +248,10 @@ export class Weather {
             this.puddleFill * (env.puddles ?? 0.6),
             this.rain,
         );
-        this.world.material.setFrame(this.time, this.atmosphere.lightDirection());
+        this.world.material.setFrame(
+            this.time,
+            this.atmosphere.lightDirection(),
+        );
         this.world.material.setTrailDepth(
             this.trail.enabled ? (env.footprint_depth ?? 0.7) : 0,
         );

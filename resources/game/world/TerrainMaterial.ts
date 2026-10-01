@@ -37,7 +37,7 @@ import {
     vec4,
 } from 'three/tsl';
 import type { TerrainLayer, TerrainMaterialRef } from '../shared/types';
-import { SimplexNoise } from '../util/noise';
+import { mulberry32, SimplexNoise } from '../util/noise';
 import type { SplatMap } from './SplatMap';
 import { TerrainDebugView } from './TerrainDebugView';
 import { TERRAIN_SLOTS, TerrainTextures } from './TerrainTextures';
@@ -93,6 +93,7 @@ function createUniforms(
     resolution: number,
     textures: TerrainTextures,
     noise: THREE.Texture,
+    macro: THREE.Texture,
     wet: THREE.Texture,
     trail: THREE.Texture,
 ) {
@@ -118,6 +119,7 @@ function createUniforms(
         uSplat0: fixedTexture(splat.textures[0]),
         uSplat1: fixedTexture(splat.textures[1]),
         uNoise: fixedTexture(noise),
+        uMacro: fixedTexture(macro),
         uAlbedoArr: fixedTexture(textures.albedoRough),
         uDetailArr: fixedTexture(textures.normalAoHeight),
         uWet: fixedTexture(wet),
@@ -178,6 +180,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
     private textures: TerrainTextures;
     private layers: TerrainLayer[] = [];
     private readonly noise: THREE.DataTexture;
+    private readonly macroNoise: THREE.DataTexture;
     private readonly blankWet: THREE.DataTexture;
     private readonly blankTrail: THREE.DataTexture;
     /** Albedo of the splat surface (see setupDiffuseColor). */
@@ -194,6 +197,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
 
         this.textures = this.createTextures(textureSize);
         this.noise = createNoiseTexture();
+        this.macroNoise = createMacroTexture();
         // Placeholders until the real textures are connected; their formats and filters match
         // (the shader's sampling mode is chosen from the first texture a node sees).
         this.blankWet = new THREE.DataTexture(
@@ -221,6 +225,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
             resolution,
             this.textures,
             this.noise,
+            this.macroNoise,
             this.blankWet,
             this.blankTrail,
         );
@@ -432,6 +437,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
 
     override dispose(): void {
         this.noise.dispose();
+        this.macroNoise.dispose();
         this.blankWet.dispose();
         this.blankTrail.dispose();
         this.textures.dispose();
@@ -671,19 +677,21 @@ function terrainSurface(u: TerrainUniforms) {
     const macro2 = u.uNoise.sample(wp.div(97)).toVar();
     // Large-scale variation (see the layers' macro_variation): broad brightness and hue patches from
     // a few hundred metres down to ~25 m, shared by all layers.
-    const macro3 = u.uNoise.sample(wp.div(1500).add(0.37)).toVar();
-    const macroLum = macro3.x
+    const macroA = u.uMacro.sample(wp.div(2300).add(0.37)).toVar();
+    const macroB = u.uMacro.sample(wp.div(610).add(0.71)).toVar();
+    const macroLum = macroA.x
         .sub(0.5)
-        .mul(0.55)
-        .add(macro.w.sub(0.5).mul(0.5))
-        .add(macro.x.sub(0.5).mul(0.3))
-        .add(macro2.z.sub(0.5).mul(0.14))
+        .mul(0.6)
+        .add(macroB.y.sub(0.5).mul(0.45))
+        .add(macro2.z.sub(0.5).mul(0.12))
         .toVar();
-    const macroHue = macro3.y
+    const macroHue = macroA.z
         .sub(0.5)
-        .mul(1.3)
-        .add(macro.y.sub(0.5).mul(0.7))
+        .mul(1.5)
+        .add(macroB.w.sub(0.5).mul(0.7))
         .toVar();
+    // Drier / lusher patches: saturation.
+    const macroSat = macroA.w.sub(0.5).add(macroB.x.sub(0.5).mul(0.5)).toVar();
     // Seen from further away the variation grows (up close the texture detail dominates anyway) and
     // material layers lean towards their average colour, which hides their repeat.
     const macroAmount = mix(0.6, 1.15, smoothstep(25, 450, dist)).toVar();
@@ -929,11 +937,18 @@ function terrainSurface(u: TerrainUniforms) {
             // Large-scale variation: brighter / darker and warmer / cooler patches.
             const amount = m2.w.mul(macroAmount).toVar();
             const hue = macroHue.mul(amount);
+            const grey = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+            albedo.assign(
+                max(
+                    mix(albedo, vec3(grey), macroSat.mul(amount).mul(0.7)),
+                    0,
+                ),
+            );
             albedo.mulAssign(
                 vec3(
-                    hue.mul(0.09).add(1),
-                    hue.mul(0.025).add(1),
-                    hue.mul(-0.1).add(1),
+                    hue.mul(0.1).add(1),
+                    hue.mul(0.03).add(1),
+                    hue.mul(-0.11).add(1),
                 ).mul(max(macroLum.mul(amount).add(1), 0.3)),
             );
         });
@@ -1019,7 +1034,7 @@ function terrainSurface(u: TerrainUniforms) {
             float(1).sub(smoothstep(45, 160, dist)),
         );
         albedo.mulAssign(
-            pattern.mul(c.x).mul(reach).mul(visible).mul(2.2).add(1),
+            pattern.mul(c.x).mul(reach).mul(visible).mul(3).add(1),
         );
     });
 
@@ -1048,9 +1063,7 @@ function terrainSurface(u: TerrainUniforms) {
             .add(tileNoise.sub(0.5).mul(0.08))
             .toVar();
         const level = float(1).sub(u.uPuddle.mul(0.78)).toVar();
-        puddle.assign(
-            smoothstep(level, level.add(0.04), score).mul(flatness),
-        );
+        puddle.assign(smoothstep(level, level.add(0.04), score).mul(flatness));
         // A darker, soaked rim around the water.
         const rim = smoothstep(level.sub(0.12), level, score)
             .mul(flatness)
@@ -1065,7 +1078,9 @@ function terrainSurface(u: TerrainUniforms) {
             const slope = rainRipples(wp, u.uTime).mul(
                 u.uRain.mul(0.45).mul(float(1).sub(smoothstep(12, 45, dist))),
             );
-            surface.assign(normalize(vec3(slope.x.negate(), 1, slope.y.negate())));
+            surface.assign(
+                normalize(vec3(slope.x.negate(), 1, slope.y.negate())),
+            );
         });
 
         nrm.assign(normalize(mix(nrm, surface, puddle)));
@@ -1166,6 +1181,70 @@ function layerMaterial(layer: TerrainLayer): TerrainMaterialRef | null {
     }
 
     return null;
+}
+
+/**
+ * Smooth, isotropic tiling noise for the large-scale variation: per channel a sum of plane waves with
+ * integer wave vectors (1-10 cycles per tile, so it tiles exactly) and a 1/f^1.3 spectrum, normalised
+ * to 0..1. R/G/B/A are independent.
+ */
+function createMacroTexture(): THREE.DataTexture {
+    const size = 128;
+    const data = new Uint8Array(size * size * 4);
+    const rand = mulberry32(9157);
+    const field = new Float32Array(size * size);
+    const tau = Math.PI * 2;
+
+    for (let c = 0; c < 4; c++) {
+        const waves: { kx: number; ky: number; amp: number; phase: number }[] =
+            [];
+
+        while (waves.length < 40) {
+            const k = 1 + Math.pow(rand(), 1.5) * 9;
+            const a = rand() * tau;
+            const kx = Math.round(Math.cos(a) * k);
+            const ky = Math.round(Math.sin(a) * k);
+
+            if (kx !== 0 || ky !== 0) {
+                waves.push({
+                    kx,
+                    ky,
+                    amp: Math.pow(Math.hypot(kx, ky), -1.3),
+                    phase: rand() * tau,
+                });
+            }
+        }
+
+        let lo = Infinity;
+        let hi = -Infinity;
+
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                let v = 0;
+
+                for (const w of waves) {
+                    v += Math.sin((tau * (w.kx * x + w.ky * y)) / size + w.phase) * w.amp;
+                }
+
+                field[y * size + x] = v;
+                lo = Math.min(lo, v);
+                hi = Math.max(hi, v);
+            }
+        }
+
+        for (let i = 0; i < size * size; i++) {
+            data[i * 4 + c] = Math.round(((field[i] - lo) / (hi - lo)) * 255);
+        }
+    }
+
+    const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+    texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = true;
+    texture.needsUpdate = true;
+
+    return texture;
 }
 
 /** Tiling multi-octave noise texture: R/G/B/A = four independent tileable noise fields. */

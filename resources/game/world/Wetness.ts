@@ -1,4 +1,5 @@
 import * as THREE from 'three/webgpu';
+import { claimHeavySlot } from '../core/stagger';
 import { NO_WATER } from '../shared/types';
 import type { GridRect, Heightfield } from './Heightfield';
 
@@ -61,7 +62,8 @@ export class Wetness {
     update(dt: number): void {
         this.timer -= dt;
 
-        if (this.pending && this.timer <= 0) {
+        // Shares the frame's heavy-work slot with the other low-rate uploads (see core/stagger).
+        if (this.pending && this.timer <= 0 && claimHeavySlot()) {
             this.compute(this.pending);
             this.timer = 0.5;
         }

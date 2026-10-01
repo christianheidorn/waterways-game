@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { beginStaggerFrame } from '../core/stagger';
 import { NO_WATER } from '../shared/types';
 import { Heightfield } from './Heightfield';
 import { Wetness } from './Wetness';
@@ -48,6 +49,7 @@ describe('Wetness', () => {
         }
 
         wetness.invalidate(rect);
+        beginStaggerFrame();
         wetness.update(1);
 
         const fresh = new Wetness(heights, water);

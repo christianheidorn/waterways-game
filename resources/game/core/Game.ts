@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { EditorWorkerClient } from '../editor/workers/EditorWorkerClient';
+import { beginStaggerFrame } from './stagger';
 import { configureCompressedTextures } from '../util/gltf';
 import { Editor } from '../editor/Editor';
 import type { DirtyChannel } from '../editor/Editor';
@@ -1451,6 +1452,7 @@ export class Game {
         this.timer.update();
         const dt = Math.min(this.timer.getDelta(), 0.1);
         this.renderer.info.reset();
+        beginStaggerFrame();
         const start = performance.now();
         // Per-pass timings only while the F10 menu shows them.
         const profiler = this.profiler;

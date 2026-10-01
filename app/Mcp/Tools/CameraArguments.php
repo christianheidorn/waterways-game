@@ -20,7 +20,7 @@ trait CameraArguments
                 ->description('current: as the user sees it; overview: the whole map at an angle; top_down: straight down over the map (or over `look_at`); spawn: from the player start. Ignored when `position` is given.'),
             'position' => $schema->object([
                 'x' => $schema->number()->required(),
-                'y' => $schema->number()->description('Height in m; omitted = 2 m above the ground.'),
+                'y' => $schema->number()->description('Height in m; omitted = 2 m above the ground. Below a water surface for the view under water.'),
                 'z' => $schema->number()->required(),
             ])->description('Camera position in world metres.'),
             'look_at' => $schema->object([

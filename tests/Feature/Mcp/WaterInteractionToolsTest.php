@@ -59,7 +59,7 @@ class WaterInteractionToolsTest extends TestCase
         $count = count($this->editor->ran);
         WaterwaysServer::tool(ControlPlayer::class, ['action' => 'splash', 'strength' => 3])->assertHasErrors();
         WaterwaysServer::tool(ControlPlayer::class, ['action' => 'splash', 'size' => 0])->assertHasErrors();
-        WaterwaysServer::tool(ControlPlayer::class, ['action' => 'dive'])->assertHasErrors();
+        WaterwaysServer::tool(ControlPlayer::class, ['action' => 'fly'])->assertHasErrors();
         $this->assertCount($count, $this->editor->ran);
     }
 

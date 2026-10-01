@@ -409,6 +409,31 @@ export class Game {
                 position: () => this.player.position,
                 yaw: () => this.player.yaw,
                 swimming: () => this.player.swimming,
+                swim: () => {
+                    const p = this.player;
+                    const surface = p.surfaceHeight;
+                    const head = p.position.y + p.height * 0.9;
+
+                    return {
+                        diving: p.diving,
+                        head_under: p.headUnder,
+                        breath: Math.round(p.breath.amount * 100) / 100,
+                        head_depth_m:
+                            surface === null
+                                ? 0
+                                : Math.round(Math.max(0, surface - head) * 100) /
+                                  100,
+                        climbing: p.climbing,
+                    };
+                },
+                floating: () => {
+                    const p = this.mode === 'play' ? this.player.position : this.camera.position;
+
+                    return this.floaters
+                        .describe()
+                        .filter((f) => Math.hypot(f.x - p.x, f.z - p.z) < 60)
+                        .slice(0, 12);
+                },
                 water: () => this.waterInteraction.state(),
                 splash: (x, z, strength, size) =>
                     this.waterInteraction.splash(x, z, strength, size),

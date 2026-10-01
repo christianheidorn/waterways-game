@@ -199,6 +199,16 @@ export type PlayerHost = {
     swimming: () => boolean;
     /** Wading / wet state (WaterInteraction). */
     water?: () => Record<string, unknown>;
+    /** Swimming state: diving, head under water, breath, depth of the head below the surface. */
+    swim?: () => {
+        diving: boolean;
+        head_under: boolean;
+        breath: number;
+        head_depth_m: number;
+        climbing: boolean;
+    };
+    /** Floating props near the character (Floaters.describe). */
+    floating?: () => Record<string, unknown>[];
     /**
      * A splash at (x, z): strength 0-2 (1 ≈ a person jumping in), footprint size (m). False where dry.
      */
@@ -244,7 +254,9 @@ function playerState(host: PlayerHost): Record<string, unknown> {
         facing_deg: deg(host.yaw()),
         camera: { yaw_deg: deg(v.yaw), pitch_deg: deg(v.pitch) },
         swimming: host.swimming(),
+        ...(host.swim ? { swim: host.swim() } : {}),
         ...(host.water ? { water: host.water() } : {}),
+        ...(host.floating ? { floating_props: host.floating() } : {}),
     };
 }
 
@@ -252,7 +264,9 @@ function playerState(host: PlayerHost): Record<string, unknown> {
  * control_player: play mode as the user plays it. "state"; "teleport" (x, z, facing); "look" (turn
  * the camera: yaw / pitch in degrees, or towards a point); "walk_to" walks (or runs) with the real
  * movement (slopes, water, wading, collision) until the target is reached, the player is stuck or the
- * time runs out; "jump"; "splash" disturbs the water (particles, foam ring, ripples) at x, z or ahead.
+ * time runs out; "jump"; "splash" disturbs the water (particles, foam ring, ripples) at x, z or ahead;
+ * "swim" is walk_to through water (dive: true stays under), "dive" goes down to a depth, "surface" swims
+ * back up.
  */
 export async function controlPlayer(
     host: PlayerHost,
@@ -322,6 +336,13 @@ export async function controlPlayer(
             return playerState(host);
         case 'walk_to':
             return walkTo(host, payload);
+        case 'swim':
+            // Swims (where it is deep enough; walks where not) to x, z; dive: true stays under water.
+            return walkTo(host, payload, payload.dive === true ? ['KeyC'] : []);
+        case 'dive':
+            return dive(host, payload);
+        case 'surface':
+            return surface(host, payload);
         case 'splash': {
             // Default: two metres in front of the character.
             const p = host.position();
@@ -367,9 +388,99 @@ export async function controlPlayer(
     }
 }
 
+/** Holds the dive key until the head is `depth` m under the surface (or the bed / timeout stops it). */
+async function dive(
+    host: PlayerHost,
+    payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+    if (!host.swimming() || !host.swim) {
+        throw new Error(
+            'The character is not swimming: teleport or walk_to into water deeper than about chest height first.',
+        );
+    }
+
+    const depth = Math.min(30, Math.max(0.5, Number(payload.depth) || 2));
+    const limit = Math.min(30, Math.max(1, Number(payload.timeout) || 10)) * 1000;
+    const start = performance.now();
+    let outcome: 'reached' | 'bottom' | 'timeout' | 'out_of_breath' = 'timeout';
+    let lastY = host.position().y;
+    let still = 0;
+
+    try {
+        host.hold('KeyC', true);
+
+        if (payload.forward === true) {
+            host.hold('KeyW', true);
+        }
+
+        while (performance.now() - start < limit) {
+            await frames(1);
+            const s = host.swim();
+
+            if (s.head_depth_m >= depth) {
+                outcome = 'reached';
+                break;
+            }
+
+            if (s.breath <= 0) {
+                outcome = 'out_of_breath';
+                break;
+            }
+
+            const y = host.position().y;
+            still = Math.abs(y - lastY) < 0.002 ? still + 1 : 0;
+            lastY = y;
+
+            if (still > 30) {
+                outcome = 'bottom';
+                break;
+            }
+        }
+    } finally {
+        host.hold('KeyC', false);
+        host.hold('KeyW', false);
+    }
+
+    await frames(3);
+
+    return { outcome, ...playerState(host) };
+}
+
+/** Swims up (Space) until the head is out of the water. */
+async function surface(
+    host: PlayerHost,
+    payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+    const limit = Math.min(30, Math.max(1, Number(payload.timeout) || 15)) * 1000;
+    const start = performance.now();
+    let outcome: 'surfaced' | 'timeout' = 'timeout';
+
+    try {
+        host.hold('KeyC', false);
+        host.hold('Space', true);
+
+        while (performance.now() - start < limit) {
+            await frames(1);
+
+            if (!host.swim || !host.swim().head_under) {
+                outcome = 'surfaced';
+                break;
+            }
+        }
+    } finally {
+        host.hold('Space', false);
+    }
+
+    // Let it settle on the surface (Space at the surface would hop).
+    await frames(20);
+
+    return { outcome, ...playerState(host) };
+}
+
 async function walkTo(
     host: PlayerHost,
     payload: Record<string, unknown>,
+    extraKeys: string[] = [],
 ): Promise<Record<string, unknown>> {
     const tx = Number(payload.x);
     const tz = Number(payload.z);
@@ -395,6 +506,10 @@ async function walkTo(
         }
 
         host.hold('KeyW', true);
+
+        for (const key of extraKeys) {
+            host.hold(key, true);
+        }
 
         while (performance.now() - start < limit) {
             const p = host.position();
@@ -429,6 +544,10 @@ async function walkTo(
     } finally {
         host.hold('KeyW', false);
         host.hold('ShiftLeft', false);
+
+        for (const key of extraKeys) {
+            host.hold(key, false);
+        }
     }
 
     await frames(10);

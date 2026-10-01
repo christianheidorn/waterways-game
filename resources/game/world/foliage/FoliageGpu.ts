@@ -12,6 +12,7 @@ import {
     instancedArray,
     instanceIndex,
     length,
+    Loop,
     min,
     Return,
     smoothstep,
@@ -53,11 +54,15 @@ const CELL_HEADROOM = 0.25;
 const SWAY_MARGIN = 0.6;
 /** Stats read-back interval (s). */
 const STATS_INTERVAL = 0.5;
+/** Smallest coarse cell table (cells); doubles when a type has more cells. */
+const MIN_CELL_TABLE = 256;
+/** Largest instance scale assumed for cells grown on the GPU (their instances are unknown here). */
+const FILLED_SCALE = 2.5;
 /**
  * LOD switch distances of the water reflection relative to the main view: the rippled, reduced
  * resolution reflection takes coarser LODs much sooner.
  */
-const REFLECTION_LOD_SCALE = 0.5;
+const REFLECTION_LOD_SCALE = 0.35;
 
 /** Per-frame inputs shared by every type's culling pass (one set per Foliage). */
 export class GpuCullFrame {
@@ -94,6 +99,11 @@ export class GpuCullFrame {
     readonly nearShadowScale = uniform(1);
     /** 1 while there is a near cascade (its casters get a list of their own). */
     readonly nearShadow = uniform(0);
+    /**
+     * 1 when the far (whole shadow distance) caster list is needed this frame: the cached far cascade
+     * re-renders, or there are no cascades (a single shadow map). Skipped otherwise.
+     */
+    readonly farShadow = uniform(1);
     /** Shadow camera of the near cascade: its shadow pass draws the near caster list. */
     nearShadowCamera: THREE.Camera | null = null;
     private readonly frustum = new THREE.Frustum();
@@ -147,6 +157,7 @@ export class GpuCullFrame {
     setShadowCascade(cascade: ShadowCascade | null): void {
         this.nearShadowCamera = cascade?.camera ?? null;
         this.nearShadow.value = cascade ? 1 : 0;
+        this.farShadow.value = !cascade || cascade.farRenders() ? 1 : 0;
 
         if (cascade) {
             const e = cascade.box.elements;
@@ -202,6 +213,8 @@ export type GpuTypeConfig = {
     reflect: boolean;
     /** How far the plant bends away from the character (0 = not at all). */
     interact: number;
+    /** Cell size (m) of the type's grid (coarse culling of cells grown on the GPU). */
+    cellSize: number;
 };
 
 type Draw = {
@@ -219,6 +232,10 @@ type Range = {
     count: number;
     /** Filled on the GPU (see GpuFiller); `count` is read back. */
     filled: boolean;
+    /** Bounds of the uploaded instances (bounding spheres included); null: the cell's column. */
+    box?: THREE.Box3 | null;
+    /** Largest instance scale of the uploaded instances. */
+    scale?: number;
 };
 
 /**
@@ -295,6 +312,21 @@ export class GpuFoliageType {
     private stats: Storage<'uint'> | null = null;
     private args: THREE.IndirectStorageBufferAttribute | null = null;
     private readonly capacityNode = uniform(0, 'uint');
+    /**
+     * Coarse culling: (first thread, first slot) of each cell range that survives the per-cell test
+     * (distance, frustum, reflection, shadows), sorted by thread. The culling pass runs one thread per
+     * slot of those ranges only and finds its range by binary search, so far and off-screen cells cost
+     * no per-instance work.
+     */
+    private cellTable: Storage<'uint'> | null = null;
+    private cellTableSize = 0;
+    private readonly tableCells = uniform(0, 'uint');
+    private readonly cellThreads = uniform(0, 'uint');
+    /** Threads of this frame's culling pass (slots of the coarse-visible cells). */
+    dispatched = 0;
+    /** Cells with instances / cells that passed the coarse test this frame. */
+    coarseCells = 0;
+    coarseVisible = 0;
     private readonly castShadows = uniform(1);
     private draws: Draw[] = [];
     /** Draws of the water reflection pass (hidden otherwise). */
@@ -336,6 +368,11 @@ export class GpuFoliageType {
 
     get instanceCount(): number {
         return this.live;
+    }
+
+    /** Allocated instance slots (live, headroom and freed). */
+    get slots(): number {
+        return this.top;
     }
 
     /** Instances of a cell (GPU-filled cells: as last read back). */
@@ -562,14 +599,112 @@ export class GpuFoliageType {
             (this.instances.value as THREE.BufferAttribute).needsUpdate = true;
         }
 
-        // Slots past the allocated ranges are never live.
-        this.computes[1].count = Math.max(1, this.top);
+        if (this.ranges.size > this.cellTableSize) {
+            // More cells than the table holds: a larger one, bound by a rebuilt culling pass.
+            this.cellTableSize = Math.max(
+                MIN_CELL_TABLE,
+                2 ** Math.ceil(Math.log2(this.ranges.size * 1.5)),
+            );
+            this.cellTable = instancedArray(this.cellTableSize * 2, 'uint');
+            this.buildComputes();
+        }
+
+        this.dispatched = this.coarseCull();
+        this.computes[1].count = Math.max(1, this.dispatched);
 
         if (this.lateComputes.length) {
             this.lateComputes[0].count = Math.max(1, this.top);
         }
 
         return [...this.fillPasses(), ...this.computes];
+    }
+
+    /**
+     * Fills the coarse cell table with the ranges that can contribute to any list this frame; returns
+     * the culling pass's thread count.
+     */
+    private coarseCull(): number {
+        const table = this.cellTable!;
+        const attribute = table.value as THREE.BufferAttribute;
+        const array = attribute.array as Uint32Array;
+        const config = this.config!;
+        const frame = this.frame;
+        const g = frame.globals;
+        const cam = g.camPos.value;
+        const cull = config.uniforms.fadeEnd.value * g.fadeScale.value;
+        const planes = frame.planes.array as THREE.Vector4[];
+        const reflect =
+            config.reflect && frame.reflect.value > 0.5
+                ? (frame.reflectPlanes.array as THREE.Vector4[])
+                : null;
+        const shadows =
+            this.castShadows.value > 0.5 ? frame.shadowDistance.value : -1;
+        const size = config.cellSize;
+        const box = _box;
+        let cells = 0;
+        let threads = 0;
+        let ranges = 0;
+
+        for (const [cell, range] of this.ranges) {
+            const slots = range.filled ? range.capacity : range.count;
+
+            if (!slots) {
+                continue;
+            }
+
+            ranges++;
+
+            if (range.box) {
+                box.copy(range.box).expandByScalar(
+                    (config.radius + config.center.length()) *
+                        (range.scale ?? FILLED_SCALE) +
+                        SWAY_MARGIN,
+                );
+            } else {
+                const pad =
+                    (config.radius + config.center.length()) * FILLED_SCALE +
+                    SWAY_MARGIN;
+                box.min.set(cell.cx * size - pad, -1e5, cell.cz * size - pad);
+                box.max.set(
+                    (cell.cx + 1) * size + pad,
+                    1e5,
+                    (cell.cz + 1) * size + pad,
+                );
+            }
+
+            const dx = Math.max(box.min.x - cam.x, 0, cam.x - box.max.x);
+            const dz = Math.max(box.min.z - cam.z, 0, cam.z - box.max.z);
+            const near = Math.hypot(dx, dz);
+
+            if (
+                near >= cull ||
+                !(
+                    boxInPlanes(box, planes) ||
+                    (reflect && boxInPlanes(box, reflect)) ||
+                    near < shadows
+                )
+            ) {
+                continue;
+            }
+
+            array[cells * 2] = threads;
+            array[cells * 2 + 1] = range.start;
+            cells++;
+            threads += slots;
+        }
+
+        this.tableCells.value = cells;
+        this.cellThreads.value = threads;
+        this.coarseCells = ranges;
+        this.coarseVisible = cells;
+
+        if (cells) {
+            attribute.clearUpdateRanges();
+            attribute.addUpdateRange(0, cells * 2);
+            attribute.needsUpdate = true;
+        }
+
+        return threads;
     }
 
     /**
@@ -656,6 +791,8 @@ export class GpuFoliageType {
         this.counters = null;
         this.stats = null;
         this.args = null;
+        this.cellTable = null;
+        this.cellTableSize = 0;
         this.ranges.clear();
         this.pendingFills.clear();
         this.pendingClears = [];
@@ -763,6 +900,19 @@ export class GpuFoliageType {
             array[(range.start + i) * INSTANCE_FLOATS + 14] = 0;
         }
 
+        // Bounds for the coarse culling: instance positions and the largest scale (the bounding
+        // sphere is added when testing, with the current LODs' radius).
+        const data = cell.data;
+        const box = (range.box ??= new THREE.Box3()).makeEmpty();
+        let scale = 0;
+
+        for (let i = 0; i < data.length; i += FOLIAGE_STRIDE) {
+            _point.set(data[i], data[i + 1], data[i + 2]);
+            box.expandByPoint(_point);
+            scale = Math.max(scale, data[i + 4]);
+        }
+
+        range.scale = scale;
         this.live += count - range.count;
         this.markRange(range.start, Math.max(count, range.count));
         range.count = count;
@@ -1201,6 +1351,14 @@ export class GpuFoliageType {
     private buildComputes(): void {
         const config = this.config!;
 
+        if (!this.cellTable) {
+            this.cellTableSize = Math.max(
+                MIN_CELL_TABLE,
+                2 ** Math.ceil(Math.log2(Math.max(1, this.ranges.size * 1.5))),
+            );
+            this.cellTable = instancedArray(this.cellTableSize * 2, 'uint');
+        }
+
         for (const node of [...this.computes, ...this.lateComputes]) {
             node.dispose();
         }
@@ -1235,8 +1393,36 @@ export class GpuFoliageType {
             r2: Node<'vec4'>,
         ) => pos.add(vec3(dot(r0.xyz, c), dot(r1.xyz, c), dot(r2.xyz, c)));
 
+        const table = this.cellTable!;
+        const cellCount = this.tableCells;
+        const searchSteps = Math.ceil(Math.log2(this.cellTableSize)) + 1;
         const cull = Fn(() => {
-            const i = instanceIndex;
+            const t = instanceIndex;
+
+            If(t.greaterThanEqual(this.cellThreads), () => {
+                Return();
+            });
+
+            // The coarse-visible cell this thread belongs to (last entry whose first thread <= t).
+            const lo = uint(0).toVar();
+            const hi = cellCount.toVar();
+
+            Loop(searchSteps, () => {
+                If(hi.sub(lo).greaterThan(1), () => {
+                    const mid = lo.add(hi).shiftRight(1).toVar();
+
+                    If(table.element(mid.mul(2)).lessThanEqual(t), () => {
+                        lo.assign(mid);
+                    }).Else(() => {
+                        hi.assign(mid);
+                    });
+                });
+            });
+
+            const i = table
+                .element(lo.mul(2).add(1))
+                .add(t.sub(table.element(lo.mul(2))))
+                .toVar();
 
             If(i.greaterThanEqual(capacity), () => {
                 Return();
@@ -1339,7 +1525,8 @@ export class GpuFoliageType {
                 .and(castShadows.greaterThan(0.5))
                 .toVar();
 
-            If(casts, () => {
+            // The far cascade's list only when it re-renders this frame (it is cached: rarely).
+            If(casts.and(frame.farShadow.greaterThan(0.5)), () => {
                 const slot = atomicAdd(counters.element(shadowRegion), 1);
                 visible
                     .element(uint(shadowRegion).mul(capacity).add(slot))
@@ -1477,7 +1664,19 @@ export class GpuFoliageType {
 
             for (let r = 0; r <= occludedSlot; r++) {
                 if (!isLate(r) && r !== candidateRegion) {
-                    stats.element(r).assign(atomicLoad(counters.element(r)));
+                    if (r === shadowRegion) {
+                        // Keeps the count of the last frame that built the far list.
+                        If(frame.farShadow.greaterThan(0.5), () => {
+                            stats
+                                .element(r)
+                                .assign(atomicLoad(counters.element(r)));
+                        });
+                    } else {
+                        stats
+                            .element(r)
+                            .assign(atomicLoad(counters.element(r)));
+                    }
+
                     atomicStore(counters.element(r), 0);
                 }
             }
@@ -1596,3 +1795,21 @@ function indexed(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
 
     return geometry;
 }
+
+/** Whether a box lies at least partly inside six frustum planes (xyz normal, w constant). */
+function boxInPlanes(box: THREE.Box3, planes: THREE.Vector4[]): boolean {
+    for (const p of planes) {
+        const x = p.x > 0 ? box.max.x : box.min.x;
+        const y = p.y > 0 ? box.max.y : box.min.y;
+        const z = p.z > 0 ? box.max.z : box.min.z;
+
+        if (p.x * x + p.y * y + p.z * z + p.w < 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+const _box = new THREE.Box3();
+const _point = new THREE.Vector3();

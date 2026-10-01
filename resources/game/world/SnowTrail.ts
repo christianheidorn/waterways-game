@@ -1,4 +1,5 @@
 import * as THREE from 'three/webgpu';
+import { claimHeavySlot } from '../core/stagger';
 
 /** Texels per side of the trail texture. */
 const SIZE = 1024;
@@ -45,6 +46,7 @@ export class SnowTrail {
     private decayTimer = 0;
     private decayCarry = 0;
     private dirty = false;
+    private uploadDue = false;
     private active = false;
     enabled = true;
 
@@ -105,10 +107,14 @@ export class SnowTrail {
                 this.decayCarry = 0;
             }
 
-            if (this.dirty) {
-                this.dirty = false;
-                this.texture.needsUpdate = true;
-            }
+            this.uploadDue = true;
+        }
+
+        // 1 MB upload: on a frame no other low-rate upload takes (see core/stagger).
+        if (this.uploadDue && this.dirty && claimHeavySlot()) {
+            this.dirty = false;
+            this.uploadDue = false;
+            this.texture.needsUpdate = true;
         }
 
         this.info.w = this.active ? 1 : 0;

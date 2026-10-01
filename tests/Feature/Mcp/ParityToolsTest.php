@@ -130,6 +130,11 @@ class ParityToolsTest extends TestCase
         WaterwaysServer::tool(SetDeviceGraphics::class, ['groups' => ['sparkles' => 'low']])->assertHasErrors(['Unknown scalability groups']);
         WaterwaysServer::tool(SetDeviceGraphics::class, ['settings' => ['warp' => 9]])->assertHasErrors(['Unknown graphics fields']);
         WaterwaysServer::tool(SetDeviceGraphics::class, ['settings' => ['render_scale' => 9]])->assertHasErrors();
+
+        // High-DPI scene resolution (share of the native pixels, upscaled temporally).
+        WaterwaysServer::tool(SetDeviceGraphics::class, ['settings' => ['retina_render_scale' => 0.7]])->assertOk();
+        $this->assertEquals(0.7, ((array) end($editor->ran)['payload']['settings'])['retina_render_scale']);
+        WaterwaysServer::tool(SetDeviceGraphics::class, ['settings' => ['retina_render_scale' => 0.1]])->assertHasErrors();
     }
 
     public function test_control_player_walks_teleports_and_looks(): void

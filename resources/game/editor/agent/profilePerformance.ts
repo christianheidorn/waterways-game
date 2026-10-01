@@ -303,6 +303,14 @@ function describeSystems(host: PerformanceHost): Record<string, unknown> {
             occluded: foliage.occludedInstances,
             drawn_late: foliage.lateInstances,
             two_phase_occlusion: host.foliage.twoPhaseOcclusion,
+            // GPU path, placed foliage and ground cover: instance slots, culling threads run (slots of
+            // the cells the coarse per-cell test kept), cells and coarse-visible cells.
+            gpu_culling: {
+                slots: foliage.gpuCulling.slots,
+                threads: foliage.gpuCulling.threads,
+                cells: foliage.gpuCulling.cells,
+                visible_cells: foliage.gpuCulling.visibleCells,
+            },
         },
         ground_cover: {
             instances: sum(cover, (t) => t.instances),

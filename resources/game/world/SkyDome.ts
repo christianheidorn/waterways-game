@@ -25,7 +25,9 @@ import {
     sin,
     smoothstep,
     sqrt,
+    texture,
     uniform,
+    uv,
     vec2,
     vec3,
     vec4,
@@ -757,12 +759,138 @@ export type CloudShadowInputs = {
     strength: THREE.UniformNode<'float', number>;
     /** Ground level (m) the cloud layer's height is measured from (lowest point of the map). */
     base: THREE.UniformNode<'float', number>;
+    /** Cloud mask baked at a lower rate around the focus (CloudShadowBake); null: evaluated per pixel. */
+    baked?: CloudShadowBake | null;
 };
+
+/** Cloud cover (0-1 shadow mask) at a point of the cloud plane (metres, world xz). */
+function cloudMaskAt(sky: SkyDome, onPlane: Vec2): Float {
+    const u = sky.uniforms;
+    const uv = onPlane.mul(CLOUD_UV_PER_M).add(u.cloudOffset).toVar();
+    const n = cloudField(3)(uv, u.time);
+    const cov = clamp(
+        u.cloudCoverage.add(
+            gnoise(uv.mul(0.16).add(2.3))
+                .mul(0.22)
+                .mul(float(1).sub(u.overcast)),
+        ),
+        0,
+        1,
+    ).toVar();
+    const threshold = float(1).sub(cov);
+
+    // Firmer edges than the sky's opacity ramp: a cloud blocks the sun well before its thin fringe
+    // turns opaque in the sky.
+    return smoothstep(
+        threshold.sub(0.02),
+        threshold.add(u.cloudSoftness.mul(0.35)).add(0.04),
+        n,
+    );
+}
+
+/** Texels per side of the baked cloud shadow mask, and the metres of cloud plane it spans. */
+const BAKE_SIZE = 512;
+const BAKE_SPAN = 6144;
+/** Re-bake every n-th frame (the drift in between is applied when sampling). */
+const BAKE_INTERVAL = 4;
+
+/**
+ * The cloud shadow mask on the cloud plane, baked into a small texture around the focus every few
+ * frames instead of evaluating the cloud noise for every lit pixel of every pass (terrain, foliage,
+ * props, water, light shafts). The wind drift since the bake is applied when sampling, so the shadows
+ * keep moving smoothly; only the slow evolution of the cloud shapes steps at the bake rate. Points
+ * outside the baked square fall back to the per-pixel evaluation.
+ */
+export class CloudShadowBake {
+    readonly target: THREE.RenderTarget;
+    /** Plane centre (m) of the baked square, and the cloud offset it was baked with. */
+    readonly center = uniform(new THREE.Vector2());
+    readonly bakedOffset = uniform(new THREE.Vector2());
+    /** 1 once something was baked. */
+    readonly valid = uniform(0);
+    readonly span = BAKE_SPAN;
+    private readonly bakeCenter = uniform(new THREE.Vector2());
+    private readonly quad: THREE.QuadMesh;
+    private readonly material = new THREE.MeshBasicNodeMaterial();
+    private frame = 0;
+    private readonly next = new THREE.Vector2();
+
+    constructor(private readonly sky: SkyDome) {
+        this.target = new THREE.RenderTarget(BAKE_SIZE, BAKE_SIZE, {
+            depthBuffer: false,
+            generateMipmaps: false,
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+        });
+        this.target.texture.name = 'Cloud shadow mask';
+        const onPlane = this.bakeCenter.add(uv().sub(0.5).mul(BAKE_SPAN));
+        const mask = cloudMaskAt(sky, onPlane);
+        this.material.colorNode = vec4(mask, mask, mask, 1);
+        this.material.toneMapped = false;
+        this.material.name = 'Cloud shadow mask';
+        this.quad = new THREE.QuadMesh(this.material);
+        this.quad.name = 'Cloud shadow mask';
+    }
+
+    /**
+     * Re-bakes every BAKE_INTERVAL frames, or at once when the square must move: `center` is where
+     * the view's ground meets the cloud plane along the light (metres).
+     */
+    update(
+        renderer: THREE.Renderer,
+        centerX: number,
+        centerZ: number,
+        active: boolean,
+    ): void {
+        if (!active) {
+            this.valid.value = 0;
+            this.frame = 0;
+
+            return;
+        }
+
+        const texel = BAKE_SPAN / BAKE_SIZE;
+        // Snapped to texels so the baked pattern doesn't swim as the centre moves.
+        this.next.set(
+            Math.round(centerX / texel) * texel,
+            Math.round(centerZ / texel) * texel,
+        );
+        const moved = this.next.distanceTo(this.center.value) > BAKE_SPAN * 0.1;
+        this.frame = (this.frame + 1) % BAKE_INTERVAL;
+
+        if (this.valid.value && !moved && this.frame !== 0) {
+            return;
+        }
+
+        this.frame = 0;
+        this.bakeCenter.value.copy(this.next);
+        const state = THREE.RendererUtils.resetRendererState(
+            renderer as never,
+            {} as never,
+        );
+
+        try {
+            renderer.setRenderTarget(this.target);
+            this.quad.render(renderer as never);
+        } finally {
+            THREE.RendererUtils.restoreRendererState(renderer as never, state);
+        }
+
+        this.center.value.copy(this.next);
+        this.bakedOffset.value.copy(this.sky.uniforms.cloudOffset.value);
+        this.valid.value = 1;
+    }
+
+    dispose(): void {
+        this.target.dispose();
+        this.material.dispose();
+    }
+}
 
 /**
  * Light left under the clouds at a world position (1 = clear sky, down to 1 - strength): the sky's
  * cloud field (same plane, drift, coverage and softness; fewer octaves) where the ray from the point
- * towards the light meets the cloud layer.
+ * towards the light meets the cloud layer. Read from the baked mask where it covers the point.
  */
 export function cloudShadowNode(
     sky: SkyDome,
@@ -770,6 +898,8 @@ export function cloudShadowNode(
     position: Vec3,
 ): Float {
     const u = sky.uniforms;
+    const baked = inputs.baked ?? null;
+    const bakedMask = baked ? texture(baked.target.texture) : null;
 
     return Fn(() => {
         const light = float(1).toVar();
@@ -784,31 +914,45 @@ export function cloudShadowNode(
                     inputs.base.add(CLOUD_HEIGHT).sub(position.y),
                     0,
                 );
-                const onPlane = position.xz.add(
-                    l.xz.div(max(l.y, 0.12)).mul(up),
-                );
-                const uv = onPlane
-                    .mul(CLOUD_UV_PER_M)
-                    .add(u.cloudOffset)
+                const onPlane = position.xz
+                    .add(l.xz.div(max(l.y, 0.12)).mul(up))
                     .toVar();
-                const n = cloudField(3)(uv, u.time);
-                const cov = clamp(
-                    u.cloudCoverage.add(
-                        gnoise(uv.mul(0.16).add(2.3))
-                            .mul(0.22)
-                            .mul(float(1).sub(u.overcast)),
-                    ),
-                    0,
-                    1,
-                ).toVar();
-                const threshold = float(1).sub(cov);
-                // Firmer edges than the sky's opacity ramp: a cloud blocks the sun well before its
-                // thin fringe turns opaque in the sky.
-                const mask = smoothstep(
-                    threshold.sub(0.02),
-                    threshold.add(u.cloudSoftness.mul(0.35)).add(0.04),
-                    n,
-                );
+                const mask = float(0).toVar();
+
+                if (baked && bakedMask) {
+                    // Where the baked plane point drifted to since the bake (the field moves with
+                    // cloudOffset in plane units).
+                    const local = onPlane
+                        .add(
+                            u.cloudOffset
+                                .sub(baked.bakedOffset)
+                                .div(CLOUD_UV_PER_M),
+                        )
+                        .sub(baked.center)
+                        .div(baked.span)
+                        .add(0.5)
+                        .toVar();
+                    const edge = min(
+                        min(local.x, local.y),
+                        min(local.x.oneMinus(), local.y.oneMinus()),
+                    );
+
+                    If(
+                        baked.valid
+                            .greaterThan(0.5)
+                            .and(edge.greaterThan(0.002)),
+                        () => {
+                            mask.assign(
+                                bakedMask.sample(local).level(float(0)).r,
+                            );
+                        },
+                    ).Else(() => {
+                        mask.assign(cloudMaskAt(sky, onPlane));
+                    });
+                } else {
+                    mask.assign(cloudMaskAt(sky, onPlane));
+                }
+
                 light.assign(float(1).sub(mask.mul(inputs.strength)));
             },
         );

@@ -191,6 +191,12 @@ export type GraphicsSettings = {
     render_scale: number;
     /** Highest device pixel ratio rendered at (Retina / HiDPI); render_scale applies on top. */
     max_pixel_ratio: number;
+    /**
+     * High-DPI screens (device pixel ratio >= 1.5): the scene renders at most at this fraction of the
+     * native device pixels per axis and is upscaled to the output (TAAU with TAA, FSR 1 otherwise).
+     * 1 = no limit.
+     */
+    retina_render_scale: number;
     /** Graphics API: WebGPU when available (auto), or force one. Applies on reload. */
     renderer_backend: 'auto' | 'webgpu' | 'webgl';
     draw_distance: number;

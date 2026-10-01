@@ -1,5 +1,6 @@
 import * as THREE from 'three/webgpu';
 import { EditorWorkerClient } from '../editor/workers/EditorWorkerClient';
+import { beginStaggerFrame } from './stagger';
 import { configureCompressedTextures } from '../util/gltf';
 import { Editor } from '../editor/Editor';
 import type { DirtyChannel } from '../editor/Editor';
@@ -68,7 +69,13 @@ import { Terrain } from '../world/Terrain';
 import { TerrainMaterial } from '../world/TerrainMaterial';
 import { Water } from '../world/Water';
 import type { WaterBodiesFile } from '../world/Water';
-import { WaterReflection } from '../world/WaterReflection';
+import {
+    REFLECTION_FADE,
+    REFLECTION_OFF,
+    REFLECTION_ON,
+    WaterReflection,
+    waterCoverage,
+} from '../world/WaterReflection';
 import { Weather } from '../world/Weather';
 import { Wetness } from '../world/Wetness';
 import { Api } from './Api';
@@ -137,6 +144,14 @@ export class Game {
     private reflection = new WaterReflection();
     private reflectionLevelTimer = 0;
     private reflectionLevel: number | null = null;
+    /** Share of the screen the reflected water level covers (sampled with the level). */
+    private reflectionCoverage = 1;
+    /** The reflection is worth rendering (enough water on screen, with hysteresis). */
+    private reflectionWanted = true;
+    /** Blend of the planar reflection over the environment reflection (fades as it turns on / off). */
+    private reflectionWeight = 1;
+    /** The reflection pass is skipped this frame (little or far water: environment reflection only). */
+    private reflectionSkipped = false;
     private scene = new THREE.Scene();
     private camera = new THREE.PerspectiveCamera(60, 1, 0.1, 20000);
     private input!: Input;
@@ -431,16 +446,30 @@ export class Game {
                     render: `${this.postFx.renderSize.x}×${this.postFx.renderSize.y}`,
                     render_scale: round2(this.effectiveRenderScale()),
                     configured_render_scale: g.render_scale,
+                    // High-DPI screens: scene resolution limit (fraction of the native device pixels).
+                    retina_render_scale: g.retina_render_scale ?? 1,
+                    // Scene pixels / native device pixels of the canvas area.
+                    native_pixel_share: round2(
+                        (this.postFx.renderSize.x * this.postFx.renderSize.y) /
+                            Math.max(
+                                1,
+                                (this.postFx.outputSize.x *
+                                    this.postFx.outputSize.y *
+                                    (window.devicePixelRatio || 1) ** 2) /
+                                    this.renderer.getPixelRatio() ** 2,
+                            ),
+                    ),
                     dynamic_resolution: g.dynamic_resolution,
                     frame_rate_target: g.frame_rate_target ?? 'auto',
                     refresh_hz: this.refreshRate.measured
                         ? this.refreshRate.hz
                         : null,
                     target_fps: this.dynamicTargetFps || null,
-                    // Erosion, scatter and ground cover run in a web worker (WebGL 2 fallback).
+                    // Erosion and scatter run in a web worker (ground cover too on WebGL 2).
                     editor_worker: !!this.editorWorker?.available,
                     device_pixel_ratio: round2(window.devicePixelRatio),
                     quality_preset: g.quality_preset,
+                    water_reflection: this.reflectionStats(),
                     // Irradiance probes: grid, rays, worker time of the last update.
                     bounce_light: this.bounce?.stats() ?? null,
                 };
@@ -910,17 +939,14 @@ export class Game {
         const wetness = new Wetness(heights, waterGrid);
         wetness.compute();
         material.setWetness(wetness.texture);
-        // Editor work off the main thread on the WebGL 2 fallback (no GPU compute there): erosion
-        // brushes, the foliage scatter and ground cover tiles (editor/workers). `?workers=1` / `0`
-        // forces it on / off.
+        // Editor work off the main thread (editor/workers): erosion brushes and the foliage scatter on
+        // both backends, ground cover tiles on the WebGL 2 fallback (WebGPU grows them on the GPU).
+        // `?workers=0` keeps everything on the main thread.
         const workersParam = new URLSearchParams(window.location.search).get(
             'workers',
         );
 
-        if (
-            workersParam === '1' ||
-            (workersParam !== '0' && this.backend === 'webgl')
-        ) {
+        if (workersParam !== '0') {
             this.editorWorker?.dispose();
             this.editorWorker = new EditorWorkerClient();
         }
@@ -963,7 +989,7 @@ export class Game {
         });
         splat.onChange = coverAt;
         water.onRebuild = (rect) => {
-            wetness.invalidate();
+            wetness.invalidate(rect);
             coverAt(rect);
         };
 
@@ -1438,6 +1464,7 @@ export class Game {
         this.timer.update();
         const dt = Math.min(this.timer.getDelta(), 0.1);
         this.renderer.info.reset();
+        beginStaggerFrame();
         const start = performance.now();
         // Per-pass timings only while the F10 menu shows them.
         const profiler = this.profiler;
@@ -1505,9 +1532,10 @@ export class Game {
         this.world.props.updateView(this.camera, {
             shadowCaster: sunShadows.casterTest(),
             shadowRevision: sunShadows.casterRevision,
-            reflectionLevel: this.reflection.enabled
-                ? this.reflectionLevel
-                : null,
+            reflectionLevel:
+                this.reflection.enabled && !this.reflectionSkipped
+                    ? this.reflectionLevel
+                    : null,
         });
 
         const waterLevel = this.world.water.levelAt(
@@ -1742,9 +1770,7 @@ export class Game {
         return this.postFx.readFocusDistance();
     }
 
-    // Small foliage (grass, flowers, reeds) is left out of the water reflection; cached per type list.
-    private smallFoliageTypes: FoliageType[] | null = null;
-    private smallFoliagePrefixes: string[] = [];
+    /** Objects hidden while the water reflection renders (precipitation). */
     private readonly reflectionHidden: THREE.Object3D[] = [];
 
     /**
@@ -1771,9 +1797,35 @@ export class Game {
             const level = water.dominantLevel(focus, this.camera);
             // Keep the previous plane when nothing is found so the reflection doesn't flicker.
             this.reflectionLevel = level ?? this.reflectionLevel;
+
+            if (this.reflectionLevel !== null) {
+                // Little water on screen (or only far away): the environment reflection is enough.
+                this.reflectionCoverage = waterCoverage(
+                    this.camera,
+                    this.reflectionLevel,
+                    (x, z) => water.levelAt(x, z),
+                );
+                this.reflectionWanted =
+                    this.reflectionCoverage >=
+                    (this.reflectionWanted ? REFLECTION_OFF : REFLECTION_ON);
+            }
         }
 
         if (this.reflectionLevel === null) {
+            this.reflectionSkipped = true;
+
+            return null;
+        }
+
+        // Fades between the planar and the environment reflection instead of popping.
+        const step = dt / REFLECTION_FADE;
+        this.reflectionWeight = this.reflectionWanted
+            ? Math.min(1, this.reflectionWeight + step)
+            : Math.max(0, this.reflectionWeight - step);
+        this.reflectionSkipped =
+            !this.reflectionWanted && this.reflectionWeight <= 0;
+
+        if (this.reflectionSkipped) {
             return null;
         }
 
@@ -1792,55 +1844,40 @@ export class Game {
     private renderReflection(): void {
         const water = this.world.water;
 
-        if (!this.reflection.enabled || this.reflectionLevel === null) {
+        if (
+            !this.reflection.enabled ||
+            this.reflectionLevel === null ||
+            this.reflectionSkipped
+        ) {
             water.setReflection(null);
 
             return;
         }
 
-        if (this.smallFoliageTypes !== this.manifest.foliage_types) {
-            this.smallFoliageTypes = this.manifest.foliage_types;
-            this.smallFoliagePrefixes = this.manifest.foliage_types
-                .filter(
-                    (t) =>
-                        t.kind === 'grass' ||
-                        t.kind === 'flower' ||
-                        t.kind === 'reed',
-                )
-                .map((t) => `Foliage_${t.name}_`);
-        }
-
-        const small = this.smallFoliagePrefixes;
         const hidden = this.reflectionHidden;
         hidden.length = 0;
         const precipitation = this.weather?.precipitation.group;
         const foliage = this.world.foliage;
+        const props = this.world.props;
         this.reflection.render(
             this.renderer,
             this.scene,
             () => {
                 water.group.visible = false;
-                foliage.beginReflection();
+                // Ground cover and small foliage are left out, so are the props' farthest LODs.
+                foliage.beginReflection(this.reflection.camera);
+                props.setReflectionPass(true);
 
                 // Rain / snow streaks are invisible in a rippled reflection but cost a full particle draw.
                 if (precipitation?.visible) {
                     precipitation.visible = false;
                     hidden.push(precipitation);
                 }
-
-                for (const child of foliage.group.children) {
-                    if (
-                        child.visible &&
-                        small.some((prefix) => child.name.startsWith(prefix))
-                    ) {
-                        child.visible = false;
-                        hidden.push(child);
-                    }
-                }
             },
             () => {
                 water.group.visible = true;
                 foliage.endReflection();
+                props.setReflectionPass(false);
 
                 for (const child of hidden) {
                     child.visible = true;
@@ -1853,9 +1890,25 @@ export class Game {
                       texture: this.reflection.target.texture,
                       matrix: this.reflection.textureMatrix,
                       level: this.reflection.level,
+                      weight: this.reflectionWeight,
                   }
                 : null,
         );
+    }
+
+    /** Planar water reflection state for the performance profile. */
+    private reflectionStats(): Record<string, unknown> | null {
+        if (!this.reflection.enabled) {
+            return null;
+        }
+
+        return {
+            rendering: !this.reflectionSkipped && this.reflectionLevel !== null,
+            size: `${this.reflection.target.width}×${this.reflection.target.height}`,
+            every_nth_frame: this.reflection.interval,
+            screen_coverage: round2(this.reflectionCoverage),
+            weight: round2(this.reflectionWeight),
+        };
     }
 
     private resizeWaterTarget(): void {
@@ -1866,7 +1919,8 @@ export class Game {
         this.reflection.setSize(
             size.x,
             size.y,
-            quality === 'high' ? 0.6 : quality === 'medium' ? 0.4 : 0,
+            // Half resolution at most: the reflection is rippled and blurred by the water anyway.
+            quality === 'high' ? 0.5 : quality === 'medium' ? 0.4 : 0,
         );
         // Medium redraws the reflection every other frame; the water projects it through the matrix
         // of the frame it was drawn in, so it stays in place while the camera moves.
@@ -1893,13 +1947,37 @@ export class Game {
         return Math.min(this.displayPixelRatio() * Math.max(1, scale), 3);
     }
 
-    /** Render scale (× device pixel ratio) the scene is currently rendered at. */
+    /**
+     * Render scale (× capped pixel ratio) that keeps the scene within `retina_render_scale` of the
+     * native device pixels on high-DPI screens (pixel ratio >= 1.5); Infinity elsewhere. A 2× Retina
+     * screen at 0.65 renders the scene at 1.3× and upscales it to the capped output (TAAU / FSR 1).
+     */
+    private retinaScaleLimit(): number {
+        const dpr = window.devicePixelRatio || 1;
+        const limit = this.manifest?.settings.graphics.retina_render_scale ?? 1;
+
+        if (dpr < 1.5 || !(limit > 0) || limit >= 1) {
+            return Infinity;
+        }
+
+        return (dpr * limit) / this.displayPixelRatio();
+    }
+
+    /** The configured render scale with the Retina limit applied (what dynamic resolution starts from). */
+    private configuredRenderScale(): number {
+        const scale = this.manifest.settings.graphics.render_scale;
+
+        return Math.min(scale, Math.max(0.25, this.retinaScaleLimit()));
+    }
+
+    /** Render scale (× capped device pixel ratio) the scene is currently rendered at. */
     private effectiveRenderScale(): number {
         const g = this.manifest.settings.graphics;
+        const configured = this.configuredRenderScale();
 
         return g.dynamic_resolution
-            ? Math.min(this.dynamicResolution.scale, g.render_scale)
-            : g.render_scale;
+            ? Math.min(this.dynamicResolution.scale, configured)
+            : configured;
     }
 
     private resize(): void {
@@ -2229,9 +2307,12 @@ export class Game {
         if (
             !g.dynamic_resolution ||
             this.dynamicResolution.max !==
-                Math.max(this.dynamicResolution.min, g.render_scale)
+                Math.max(
+                    this.dynamicResolution.min,
+                    this.configuredRenderScale(),
+                )
         ) {
-            this.dynamicResolution.reset(g.render_scale);
+            this.dynamicResolution.reset(this.configuredRenderScale());
         }
 
         this.postFx.configure(g);

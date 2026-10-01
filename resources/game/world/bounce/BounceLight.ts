@@ -1,4 +1,5 @@
 import * as THREE from 'three/webgpu';
+import { claimHeavySlot } from '../../core/stagger';
 import {
     dot,
     float,
@@ -393,7 +394,12 @@ export class BounceLight {
 
         this.uploadCooldown -= dt;
 
-        if (this.uploadPending && this.uploadCooldown <= 0) {
+        // The atlas upload shares the frame's heavy-work slot with the other low-rate uploads.
+        if (
+            this.uploadPending &&
+            this.uploadCooldown <= 0 &&
+            claimHeavySlot()
+        ) {
             this.uploadPending = false;
             this.uploadCooldown = this.pendingTiles > 0 ? 0.35 : 0;
             this.atlas.needsUpdate = true;

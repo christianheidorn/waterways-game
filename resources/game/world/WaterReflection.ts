@@ -3,6 +3,62 @@ import type { GameRenderer } from '../core/renderer';
 
 type ShadowCaster = THREE.Object3D & { shadow: THREE.LightShadow };
 
+/** Screen share of water the reflection turns on at, and (lower: hysteresis) off at. */
+export const REFLECTION_ON = 0.03;
+export const REFLECTION_OFF = 0.015;
+/** Seconds the water takes to blend between the planar and the environment reflection. */
+export const REFLECTION_FADE = 0.4;
+/** Water farther than this (m) doesn't count towards the coverage (its reflection is tiny). */
+const COVERAGE_DISTANCE = 1500;
+const COVERAGE_COLS = 12;
+const COVERAGE_ROWS = 8;
+const _ndc = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+
+/**
+ * Share (0..1) of the screen showing the water at `level` within COVERAGE_DISTANCE: a grid of view rays
+ * against the plane, each hit counted where the water there is at that level. Terrain in front of the
+ * water is not tested (it only overestimates).
+ */
+export function waterCoverage(
+    camera: THREE.PerspectiveCamera,
+    level: number,
+    levelAt: (x: number, z: number) => number | null,
+): number {
+    camera.updateMatrixWorld();
+    const origin = camera.position;
+    let hits = 0;
+
+    for (let r = 0; r < COVERAGE_ROWS; r++) {
+        for (let c = 0; c < COVERAGE_COLS; c++) {
+            _ndc.set(
+                ((c + 0.5) / COVERAGE_COLS) * 2 - 1,
+                ((r + 0.5) / COVERAGE_ROWS) * 2 - 1,
+                0.5,
+            ).unproject(camera);
+            _dir.subVectors(_ndc, origin).normalize();
+
+            if (_dir.y > -1e-4) {
+                continue;
+            }
+
+            const t = (level - origin.y) / _dir.y;
+
+            if (t <= 0 || t > COVERAGE_DISTANCE) {
+                continue;
+            }
+
+            const at = levelAt(origin.x + _dir.x * t, origin.z + _dir.z * t);
+
+            if (at !== null && Math.abs(at - level) < 1) {
+                hits++;
+            }
+        }
+    }
+
+    return hits / (COVERAGE_COLS * COVERAGE_ROWS);
+}
+
 /**
  * Planar reflection for the water level nearest to the viewer (lakes, sea, calm rivers).
  * Renders the scene from a camera mirrored across the plane y = level with an oblique near plane

@@ -1,4 +1,5 @@
 import * as THREE from 'three/webgpu';
+import { SHADOW_LAYER } from './layers';
 import {
     Fn,
     If,
@@ -47,6 +48,8 @@ export type CloudShadow = (position: THREE.Node<'vec3'>) => THREE.Node<'float'>;
 export type ShadowCascade = {
     readonly camera: THREE.Camera;
     readonly box: THREE.Matrix4;
+    /** The cached far cascade re-renders this frame (its casters are needed). */
+    farRenders(): boolean;
 };
 
 /**
@@ -212,10 +215,19 @@ export class SunShadows {
         this.near = cascadeLight('Sun near', sun.shadow.clone());
         this.far = cascadeLight('Sun far', sun.shadow.clone());
         this.far.shadow.autoUpdate = false;
+
+        // Shadow-only casters (see layers.ts) as well as everything on the view's layer. With a mask
+        // beyond layer 0, three's shadow pass keeps the camera's own mask instead of the view's.
+        for (const shadow of [this.near.shadow, this.far.shadow, sun.shadow]) {
+            shadow.camera.layers.enable(0);
+            shadow.camera.layers.enable(SHADOW_LAYER);
+        }
+
         scene.add(this.near, this.near.target, this.far, this.far.target);
         this.nearCascade = {
             camera: this.near.shadow.camera,
             box: new THREE.Matrix4(),
+            farRenders: () => this.far.shadow.autoUpdate,
         };
 
         const near = shadowTerm(

@@ -8,7 +8,15 @@ import {
     fogSunParams,
     heightFogParams,
 } from './HeightFog';
-import { cloudShadowNode, extinction, SkyDome, skyRadiance } from './SkyDome';
+import {
+    CLOUD_HEIGHT,
+    CloudShadowBake,
+    cloudShadowNode,
+    extinction,
+    SkyDome,
+    skyRadiance,
+} from './SkyDome';
+import type { CloudShadowInputs } from './SkyDome';
 import type { CloudQuality, SkyParams } from './SkyDome';
 import { SunShadows } from './SunShadows';
 
@@ -112,10 +120,11 @@ export class Atmosphere {
     private envTimer = 0;
     private underwater = false;
     /** Cloud shadow inputs (light direction, strength) and the graphics switch. */
-    private readonly cloudShadow = {
+    private readonly cloudShadow: CloudShadowInputs = {
         lightDir: uniform(new THREE.Vector3(0, 1, 0)),
         strength: uniform(0),
         base: uniform(0),
+        baked: null,
     };
     private cloudShadowsEnabled = true;
     /**
@@ -159,6 +168,7 @@ export class Atmosphere {
         this.sky = new SkyDome('medium');
         this.sky.scale.setScalar(450000);
         this.sky.name = 'Sky';
+        this.cloudShadow.baked = new CloudShadowBake(this.sky);
         scene.add(this.sky);
 
         this.envSky = new SkyDome('low', false);
@@ -354,6 +364,17 @@ export class Atmosphere {
         // Only the direction matters for the lighting; the shadow cascades are placed separately.
         const lightDir = this.lightDirection();
         this.cloudShadow.lightDir.value.copy(lightDir);
+        // Cloud shadow mask baked around where the focus's light ray meets the cloud layer.
+        const rise =
+            Math.max(0, this.cloudShadow.base.value + CLOUD_HEIGHT - focus.y) /
+            Math.max(lightDir.y, 0.12);
+        this.cloudShadow.baked?.update(
+            this.renderer,
+            focus.x + lightDir.x * rise,
+            focus.z + lightDir.z * rise,
+            this.cloudShadow.strength.value > 0.001 &&
+                this.sky.uniforms.cloudCoverage.value > 0.001,
+        );
         this.sun.target.position.copy(focus);
         this.sun.position.copy(focus).add(lightDir);
         this.sun.target.updateMatrixWorld();
@@ -414,6 +435,7 @@ export class Atmosphere {
 
     dispose(): void {
         this.envTarget?.dispose();
+        this.cloudShadow.baked?.dispose();
         this.pmrem.dispose();
         this.sky.dispose();
         this.envSky.dispose();

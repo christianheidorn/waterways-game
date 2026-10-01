@@ -753,7 +753,7 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
     }
 
     // Whitecaps: where the surface folds (Jacobian < ~0.5) foam breaks out and lingers.
-    const capCover = smoothstep(0.55, -0.15, minJacobian).mul(u.whitecaps);
+    const capCover = smoothstep(0.35, -0.35, minJacobian).mul(u.whitecaps);
     const whitecap = smoothstep(
         0.25,
         0.75,

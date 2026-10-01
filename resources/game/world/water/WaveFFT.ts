@@ -89,7 +89,6 @@ export class WaveFFT {
         this.displacement = disp;
 
         for (let c = 0; c < CASCADES.length; c++) {
-
             const deriv = new THREE.StorageTexture(N, N);
             deriv.type = THREE.HalfFloatType;
             deriv.format = THREE.RGBAFormat;

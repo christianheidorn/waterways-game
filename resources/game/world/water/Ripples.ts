@@ -44,6 +44,9 @@ type Float = Node<'float'>;
 type Vec4 = Node<'vec4'>;
 type Buffer = THREE.StorageBufferNode<'vec4'>;
 
+/** Slope gain of the ripples' normals (see `layer`). */
+const RIPPLE_NORMAL_GAIN = 12;
+
 /** The CPU field (WebGL 2) is capped at this resolution (its texture is uploaded every frame). */
 const CPU_MAX = 128;
 
@@ -265,7 +268,16 @@ export class Ripples {
         const pixel = (): Vec4 => {
             if (!shaded) {
                 const { v, fade } = sampleAt(positionWorld.xz);
-                shaded = varying(vec4(v.y, v.z, v.w, 1).mul(fade));
+                // Normals are steepened: the grid can't resolve the short capillary wavelengths
+                // that make real rings sparkle, so the resolved ones stand in for them.
+                shaded = varying(
+                    vec4(
+                        v.y.mul(RIPPLE_NORMAL_GAIN),
+                        v.z.mul(RIPPLE_NORMAL_GAIN),
+                        v.w,
+                        1,
+                    ).mul(fade),
+                );
             }
 
             return shaded;

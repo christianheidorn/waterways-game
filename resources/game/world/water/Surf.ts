@@ -803,6 +803,5 @@ export class Surf {
         return p && p.height > 0 ? swash(this.time, alongshore(x, z), p) : null;
     }
 
-    dispose(): void {
-    }
+    dispose(): void {}
 }

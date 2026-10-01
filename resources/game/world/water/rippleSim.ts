@@ -23,7 +23,7 @@ export const RIPPLE_DAMPING = 0.45;
 /** Foam fades over about this many seconds. */
 export const RIPPLE_FOAM_DECAY = 1.4;
 /** Vertical surface speed (m/s) above which foam forms. */
-export const RIPPLE_FOAM_SPEED = 0.25;
+export const RIPPLE_FOAM_SPEED = 0.6;
 /** The field re-centres in jumps of this many cells (the shore mask is rebuilt then). */
 export const RIPPLE_SNAP = 16;
 /** Most disturbances per frame. */

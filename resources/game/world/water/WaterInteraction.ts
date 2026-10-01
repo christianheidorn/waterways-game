@@ -267,7 +267,7 @@ export class WaterInteraction {
                 z: p.z + dirZ * 0.25,
                 radius: 0.22 + deep * 0.12,
                 amount: push * 0.05 * (0.4 + deep),
-                foam: speed > 2.5 ? 0.15 * deep : 0,
+                foam: 0,
             });
             this.water.ripples.disturb({
                 x: p.x - dirX * 0.2,
@@ -298,7 +298,7 @@ export class WaterInteraction {
             z: fz,
             radius: 0.18,
             amount: -(0.012 + speed * 0.008) * shallow,
-            foam: speed > 3 ? 0.3 : 0.08,
+            foam: speed > 3.5 ? 0.25 : 0,
         });
         // Spray at the shins, more when running through shallow water.
         const kick = Math.round(

@@ -234,6 +234,8 @@ type Range = {
     filled: boolean;
     /** Bounds of the uploaded instances (bounding spheres included); null: the cell's column. */
     box?: THREE.Box3 | null;
+    /** Largest instance scale of the uploaded instances. */
+    scale?: number;
 };
 
 /**
@@ -653,9 +655,15 @@ export class GpuFoliageType {
             ranges++;
 
             if (range.box) {
-                box.copy(range.box);
+                box.copy(range.box).expandByScalar(
+                    (config.radius + config.center.length()) *
+                        (range.scale ?? FILLED_SCALE) +
+                        SWAY_MARGIN,
+                );
             } else {
-                const pad = config.radius * FILLED_SCALE + SWAY_MARGIN;
+                const pad =
+                    (config.radius + config.center.length()) * FILLED_SCALE +
+                    SWAY_MARGIN;
                 box.min.set(cell.cx * size - pad, -1e5, cell.cz * size - pad);
                 box.max.set(
                     (cell.cx + 1) * size + pad,
@@ -892,7 +900,8 @@ export class GpuFoliageType {
             array[(range.start + i) * INSTANCE_FLOATS + 14] = 0;
         }
 
-        // Bounds for the coarse culling: instance positions grown by the largest bounding sphere.
+        // Bounds for the coarse culling: instance positions and the largest scale (the bounding
+        // sphere is added when testing, with the current LODs' radius).
         const data = cell.data;
         const box = (range.box ??= new THREE.Box3()).makeEmpty();
         let scale = 0;
@@ -903,11 +912,7 @@ export class GpuFoliageType {
             scale = Math.max(scale, data[i + 4]);
         }
 
-        const config = this.config;
-        box.expandByScalar(
-            (config ? config.radius + config.center.length() : 0) * scale +
-                SWAY_MARGIN,
-        );
+        range.scale = scale;
         this.live += count - range.count;
         this.markRange(range.start, Math.max(count, range.count));
         range.count = count;

@@ -67,6 +67,9 @@ import { LIGHTING_ONLY_ALBEDO } from '../TerrainDebugView';
 
 /** Fraction of instances that are mid-transition in the density fade. */
 export const RANK_FADE = 0.12;
+/** Width of thinned-out small foliage: kept share ^ -THIN_WIDEN, at most THIN_WIDEN_MAX. */
+const THIN_WIDEN = 0.4;
+const THIN_WIDEN_MAX = 1.6;
 
 /** Recent positions of the character(s) that push grass aside (see Foliage.setInteractors). */
 export const INTERACTORS = 8;
@@ -387,26 +390,27 @@ function foliagePosition(
             .toVar();
 
         if (fade) {
-            const densityT = g.density
-                .mul(
-                    float(1).sub(
-                        float(1)
-                            .sub(u.falloff.y)
-                            .mul(
-                                smoothstep(
-                                    u.falloff.x.mul(fadeEnd),
-                                    fadeEnd,
-                                    camDist,
-                                ),
-                            ),
-                    ),
+            // Share of the instances kept at this distance (1 near the camera, falloff.y far away).
+            const kept = float(1)
+                .sub(
+                    float(1)
+                        .sub(u.falloff.y)
+                        .mul(
+                            smoothstep(u.falloff.x.mul(fadeEnd), fadeEnd, camDist),
+                        ),
                 )
-                .mul(1 + RANK_FADE);
+                .toVar();
+            const densityT = g.density.mul(kept).mul(1 + RANK_FADE);
             fadeK.mulAssign(
                 float(1).sub(
                     smoothstep(densityT.sub(RANK_FADE), densityT, data.x),
                 ),
             );
+            // Fewer, slightly wider blades: the survivors widen as the density thins out, so the
+            // ground stays about as covered (half the blades → about 1.3× as wide).
+            const widen = kept.max(0.05).pow(-THIN_WIDEN).min(THIN_WIDEN_MAX);
+            p.assign(vec3(p.x.mul(widen), p.y, p.z.mul(widen)));
+            pPrev.assign(vec3(pPrev.x.mul(widen), pPrev.y, pPrev.z.mul(widen)));
         }
 
         fadeK.mulAssign(lodSplitFade(options, instPos, shadow));

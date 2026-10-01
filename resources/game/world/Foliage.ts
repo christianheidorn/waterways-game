@@ -92,13 +92,15 @@ const CELL_SIZES: Record<FoliageKind, number> = {
  * Kinds that thin out with distance: beyond `start` × cull distance fewer instances are drawn,
  * down to `min` × density at the cull distance. Instances are shuffled, so drawing a prefix of a
  * cell is a uniform subset; the vertex shader shrinks the instances at the edge of that prefix so
- * the density changes smoothly instead of popping.
+ * the density changes smoothly instead of popping, and widens the ones kept so the ground stays
+ * about as covered (fewer, wider blades). Both render paths cull the dropped instances before
+ * drawing (GPU: culling pass; CPU: draw count per cell).
  */
 const DENSITY_FALLOFF: Partial<
     Record<FoliageKind, { start: number; min: number }>
 > = {
-    grass: { start: 0.2, min: 0.2 },
-    flower: { start: 0.25, min: 0.25 },
+    grass: { start: 0.15, min: 0.18 },
+    flower: { start: 0.2, min: 0.22 },
     reed: { start: 0.3, min: 0.35 },
     bush: { start: 0.3, min: 0.35 },
 };

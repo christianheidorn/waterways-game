@@ -57,7 +57,7 @@ const STATS_INTERVAL = 0.5;
  * LOD switch distances of the water reflection relative to the main view: the rippled, reduced
  * resolution reflection takes coarser LODs much sooner.
  */
-const REFLECTION_LOD_SCALE = 0.5;
+const REFLECTION_LOD_SCALE = 0.35;
 
 /** Per-frame inputs shared by every type's culling pass (one set per Foliage). */
 export class GpuCullFrame {

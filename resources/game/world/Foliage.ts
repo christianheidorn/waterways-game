@@ -305,6 +305,16 @@ export type FoliageStats = {
      * visible and drew in the same frame (two-phase occlusion, GPU path).
      */
     lateInstances: number;
+    /**
+     * GPU culling work: instance slots in the stores, threads the culling passes ran (slots of the
+     * cells that passed the coarse per-cell test), cells and coarse-visible cells.
+     */
+    gpuCulling: {
+        slots: number;
+        threads: number;
+        cells: number;
+        visibleCells: number;
+    };
     /** Cells with a mesh / cells shown / cells total. */
     meshes: number;
     shownCells: number;
@@ -2152,6 +2162,7 @@ export class Foliage {
             shadowCasters: 0,
             occludedInstances: 0,
             lateInstances: 0,
+            gpuCulling: { slots: 0, threads: 0, cells: 0, visibleCells: 0 },
             meshes: 0,
             shownCells: 0,
             cells: 0,
@@ -2217,6 +2228,11 @@ export class Foliage {
                 stats.shadowCasters += detail.shadowCasters;
                 stats.occludedInstances += detail.occluded ?? 0;
                 stats.lateInstances += gpuLate(renderer.gpu);
+                const culling = stats.gpuCulling;
+                culling.slots += renderer.gpu.slots;
+                culling.threads += renderer.gpu.dispatched;
+                culling.cells += renderer.gpu.coarseCells;
+                culling.visibleCells += renderer.gpu.coarseVisible;
                 stats.drawnInstances += detail.drawn;
                 stats.drawCalls += detail.drawCalls;
                 stats.triangles += detail.triangles;
@@ -2894,6 +2910,7 @@ export class Foliage {
             radius: sphere.radius,
             reflect: !reflectionExcluded(renderer),
             interact: interactionStrength(renderer.type.kind),
+            cellSize: renderer.cellSize,
         };
     }
 

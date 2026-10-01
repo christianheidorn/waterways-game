@@ -464,7 +464,7 @@ export class Game {
                         ? this.refreshRate.hz
                         : null,
                     target_fps: this.dynamicTargetFps || null,
-                    // Erosion, scatter and ground cover run in a web worker (WebGL 2 fallback).
+                    // Erosion and scatter run in a web worker (ground cover too on WebGL 2).
                     editor_worker: !!this.editorWorker?.available,
                     device_pixel_ratio: round2(window.devicePixelRatio),
                     quality_preset: g.quality_preset,
@@ -924,17 +924,14 @@ export class Game {
         const wetness = new Wetness(heights, waterGrid);
         wetness.compute();
         material.setWetness(wetness.texture);
-        // Editor work off the main thread on the WebGL 2 fallback (no GPU compute there): erosion
-        // brushes, the foliage scatter and ground cover tiles (editor/workers). `?workers=1` / `0`
-        // forces it on / off.
+        // Editor work off the main thread (editor/workers): erosion brushes and the foliage scatter on
+        // both backends, ground cover tiles on the WebGL 2 fallback (WebGPU grows them on the GPU).
+        // `?workers=0` keeps everything on the main thread.
         const workersParam = new URLSearchParams(window.location.search).get(
             'workers',
         );
 
-        if (
-            workersParam === '1' ||
-            (workersParam !== '0' && this.backend === 'webgl')
-        ) {
+        if (workersParam !== '0') {
             this.editorWorker?.dispose();
             this.editorWorker = new EditorWorkerClient();
         }

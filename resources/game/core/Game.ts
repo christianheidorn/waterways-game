@@ -430,6 +430,19 @@ export class Game {
                     render: `${this.postFx.renderSize.x}×${this.postFx.renderSize.y}`,
                     render_scale: round2(this.effectiveRenderScale()),
                     configured_render_scale: g.render_scale,
+                    // High-DPI screens: scene resolution limit (fraction of the native device pixels).
+                    retina_render_scale: g.retina_render_scale ?? 1,
+                    // Scene pixels / native device pixels of the canvas area.
+                    native_pixel_share: round2(
+                        (this.postFx.renderSize.x * this.postFx.renderSize.y) /
+                            Math.max(
+                                1,
+                                (this.postFx.outputSize.x *
+                                    this.postFx.outputSize.y *
+                                    (window.devicePixelRatio || 1) ** 2) /
+                                    this.renderer.getPixelRatio() ** 2,
+                            ),
+                    ),
                     dynamic_resolution: g.dynamic_resolution,
                     frame_rate_target: g.frame_rate_target ?? 'auto',
                     refresh_hz: this.refreshRate.measured
@@ -1873,13 +1886,37 @@ export class Game {
         return Math.min(this.displayPixelRatio() * Math.max(1, scale), 3);
     }
 
-    /** Render scale (× device pixel ratio) the scene is currently rendered at. */
+    /**
+     * Render scale (× capped pixel ratio) that keeps the scene within `retina_render_scale` of the
+     * native device pixels on high-DPI screens (pixel ratio >= 1.5); Infinity elsewhere. A 2× Retina
+     * screen at 0.65 renders the scene at 1.3× and upscales it to the capped output (TAAU / FSR 1).
+     */
+    private retinaScaleLimit(): number {
+        const dpr = window.devicePixelRatio || 1;
+        const limit = this.manifest?.settings.graphics.retina_render_scale ?? 1;
+
+        if (dpr < 1.5 || !(limit > 0) || limit >= 1) {
+            return Infinity;
+        }
+
+        return (dpr * limit) / this.displayPixelRatio();
+    }
+
+    /** The configured render scale with the Retina limit applied (what dynamic resolution starts from). */
+    private configuredRenderScale(): number {
+        const scale = this.manifest.settings.graphics.render_scale;
+
+        return Math.min(scale, Math.max(0.25, this.retinaScaleLimit()));
+    }
+
+    /** Render scale (× capped device pixel ratio) the scene is currently rendered at. */
     private effectiveRenderScale(): number {
         const g = this.manifest.settings.graphics;
+        const configured = this.configuredRenderScale();
 
         return g.dynamic_resolution
-            ? Math.min(this.dynamicResolution.scale, g.render_scale)
-            : g.render_scale;
+            ? Math.min(this.dynamicResolution.scale, configured)
+            : configured;
     }
 
     private resize(): void {
@@ -2208,9 +2245,12 @@ export class Game {
         if (
             !g.dynamic_resolution ||
             this.dynamicResolution.max !==
-                Math.max(this.dynamicResolution.min, g.render_scale)
+                Math.max(
+                    this.dynamicResolution.min,
+                    this.configuredRenderScale(),
+                )
         ) {
-            this.dynamicResolution.reset(g.render_scale);
+            this.dynamicResolution.reset(this.configuredRenderScale());
         }
 
         this.postFx.configure(g);

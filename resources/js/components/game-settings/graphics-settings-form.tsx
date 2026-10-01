@@ -155,6 +155,7 @@ const SECTIONS: Section[] = [
         fields: [
             'render_scale',
             'max_pixel_ratio',
+            'retina_render_scale',
             'sharpen',
             'dynamic_resolution',
             'frame_rate_target',

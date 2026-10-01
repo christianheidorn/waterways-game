@@ -104,6 +104,7 @@ final class GameSettingsSchema
                 // Resolution & frame rate
                 SettingField::number('render_scale', 'Render scale', 1, 0.5, 2, 0.05, '×', 'Screen percentage on the capped pixel ratio. Below 1 the scene renders at a lower resolution and is upscaled (TAAU with TAA, FSR 1 otherwise); above 1 it is supersampled.'),
                 SettingField::number('max_pixel_ratio', 'Resolution cap', 1.5, 1, 3, 0.25, '×', 'Highest pixel density rendered on Retina / HiDPI screens (2–3× pixel ratio). Render scale applies on top of the capped ratio; 1.5 on a 2× display renders 56 % of the pixels.'),
+                SettingField::number('retina_render_scale', 'Retina render scale', 0.65, 0.4, 1, 0.05, '×', 'High-DPI screens (pixel ratio 1.5 and up, e.g. a MacBook\'s Retina display): the scene renders at most at this fraction of the native device pixels per axis, and temporal upscaling (TAAU with TAA, FSR 1 otherwise) reconstructs the output; the UI stays sharp. 0.65 on a 2× display renders 42 % of the native pixels. 1 = no limit.'),
                 SettingField::number('sharpen', 'Sharpen', 0, 0, 1, 0.01, null, 'Contrast-adaptive sharpening (FSR 1 RCAS when upscaling without TAA); useful with a render scale below 1.'),
                 SettingField::boolean('dynamic_resolution', 'Dynamic resolution', false, 'Lowers the render scale (down to 0.5×) automatically to hold the target frame rate.'),
                 SettingField::select('frame_rate_target', 'Frame rate target', 'auto', [

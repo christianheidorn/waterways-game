@@ -106,6 +106,7 @@ export class GraphicsMenu {
     }> = [];
     private renderScale: SliderHandle;
     private pixelRatioCap: SliderHandle;
+    private retinaScale: SliderHandle;
     private targetFps: SliderHandle;
     private frameTarget: SegmentHandle<GraphicsSettings['frame_rate_target']>;
     private maxFps: SliderHandle;
@@ -207,6 +208,19 @@ export class GraphicsMenu {
         this.pixelRatioCap.el.title =
             'Highest pixel density rendered on Retina / HiDPI screens. Your screen: ' +
             `${(window.devicePixelRatio || 1).toFixed(2)}×. Render scale applies on top.`;
+        this.retinaScale = slider({
+            label: 'Retina render scale',
+            min: 0.4,
+            max: 1,
+            step: 0.05,
+            value: 0.65,
+            format: (v) => (v >= 1 ? 'Off' : `${Math.round(v * 100)}%`),
+            onInput: (v) => patch({ retina_render_scale: v }),
+        });
+        this.retinaScale.el.title =
+            'High-DPI screens (pixel ratio 1.5 and up): the scene renders at most at this share of the ' +
+            'native pixels per axis and is upscaled temporally (TAAU). Your screen: ' +
+            `${(window.devicePixelRatio || 1).toFixed(2)}×.`;
         this.dynRes = toggle('Dynamic resolution', false, (v) =>
             patch({ dynamic_resolution: v }),
         );
@@ -320,6 +334,7 @@ export class GraphicsMenu {
                     ),
                     this.renderScale.el,
                     this.pixelRatioCap.el,
+                    this.retinaScale.el,
                     this.dynRes.el,
                     h(
                         'div',
@@ -419,6 +434,7 @@ export class GraphicsMenu {
 
         this.renderScale.set(g.render_scale);
         this.pixelRatioCap.set(g.max_pixel_ratio);
+        this.retinaScale.set(g.retina_render_scale ?? 1);
         this.dynRes.set(g.dynamic_resolution);
         this.targetFps.set(g.target_fps);
         this.frameTarget.set(g.frame_rate_target ?? 'auto');

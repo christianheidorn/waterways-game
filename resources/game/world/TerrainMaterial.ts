@@ -616,7 +616,7 @@ class PuddleEnvironmentNode extends THREE.EnvironmentNode {
         super.setup(builder);
         const radiance = (builder.context as { radiance: Vec3 }).radiance;
         // The terrain's environment intensity (0.45) suits rough ground; still water reflects it all.
-        radiance.mulAssign(mix(1, 2.4, this.puddle));
+        radiance.mulAssign(mix(1, 1.9, this.puddle));
 
         return undefined;
     }

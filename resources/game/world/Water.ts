@@ -1122,14 +1122,21 @@ function createWaterMaterial(
     const flowVec = waterFlow.mul(u.flowSpeed).mul(0.35);
     const fph0 = fract(waveTime.mul(0.12));
     const fph1 = fract(waveTime.mul(0.12).add(0.5));
+    // Three taps along the current smear the bubbles into streaks.
+    const streakDir = waterFlow.div(max(flowSpeed, 1e-3)).mul(0.09);
+    const smeared = (uv: Node<'vec2'>) =>
+        wave(uv)
+            .a.add(wave(uv.add(streakDir)).a)
+            .add(wave(uv.sub(streakDir)).a)
+            .div(3);
     const carried = mix(
-        wave(flowUv.sub(flowVec.mul(fph0))).a,
-        wave(flowUv.sub(flowVec.mul(fph1)).add(0.37)).a,
+        smeared(flowUv.sub(flowVec.mul(fph0))),
+        smeared(flowUv.sub(flowVec.mul(fph1)).add(0.37)),
         abs(fph0.sub(0.5)).mul(2),
     );
     // Streaks of foam drifting downstream on rivers (with the rapids switch).
     const streaks = u.rapids
-        .mul(smoothstep(0.5, 0.85, carried))
+        .mul(smoothstep(0.38, 0.7, carried))
         .mul(smoothstep(0.2, 0.5, flowSpeed))
         .mul(mix(1, patches, 0.6))
         .mul(0.45);

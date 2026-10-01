@@ -21,6 +21,7 @@ import type {
     WaterSurfaceLayer,
 } from './water/waterMaterial';
 import { WaterSurfaceData } from './water/WaterSurfaceData';
+import { Surf } from './water/Surf';
 import { shoreFade, WaveField } from './water/WaveField';
 import type { WaveSample } from './water/WaveField';
 import type { WaterBody } from './water/bodySegmentation';
@@ -84,6 +85,8 @@ export class Water {
     readonly bodies: WaterBodies;
     readonly waves = new WaveField();
     readonly data: WaterSurfaceData;
+    /** Beach surf: shore distance field, shoaling / breaking waves, swash (phase 11). */
+    readonly surf: Surf;
     private readonly u = createWaterUniforms();
     private readonly waveTexture = createWaveTexture();
     private readonly shared: WaterSharedNodes = createSharedNodes();
@@ -107,6 +110,7 @@ export class Water {
     private tableVersion = -1;
     private tableDirty = true;
     private componentsVersion = -1;
+    private surfTableIn = 0;
     /** Called whenever water meshes are rebuilt (e.g. to refresh shore wetness). */
     onRebuild: ((rect?: GridRect) => void) | null = null;
     /** Called after the bodies were re-segmented or their settings changed. */
@@ -122,6 +126,13 @@ export class Water {
         this.step = surface.resolution > 600 ? 2 : 1;
         this.data = new WaterSurfaceData(surface, terrain, this.step);
         this.bodies = new WaterBodies(surface, terrain);
+        this.surf = new Surf(
+            this.data,
+            surface,
+            terrain,
+            (row) => this.bodies.bodies[row - 1] ?? null,
+        );
+        this.layers.push(this.surf.layer());
         this.bodies.onChange = (reason) => {
             this.waves.invalidateWeights();
             this.tableDirty = true;
@@ -131,6 +142,9 @@ export class Water {
                     this.bodies.rowOfLabel(label),
                 );
             }
+
+            // Body rows and surf flags feed the surf strength.
+            this.surf.refresh();
 
             this.onBodiesChanged?.(reason);
         };
@@ -291,6 +305,7 @@ export class Water {
 
         if (rect) {
             this.data.update(rect, this.riverFlow);
+            this.surf.rebuild(rect);
             this.buildChunksIn(rect);
             this.scheduleSegmentation();
         }
@@ -573,6 +588,14 @@ export class Water {
             this.writeTable();
         }
 
+        // Surf follows the (gusting) wind a few times a second.
+        this.surf.setTime(this.u.time.value * (this.env?.wave_speed ?? 1));
+        this.surfTableIn -= dt;
+
+        if (this.surfTableIn < 0) {
+            this.writeSurfTable();
+        }
+
         if (camera) {
             this.placeFineMesh(camera);
         }
@@ -650,8 +673,14 @@ export class Water {
         layer.slopeZ = 0;
         layer.velocity.set(0, 0, 0);
 
+        const waveTime = this.u.time.value * (this.env?.wave_speed ?? 1);
+
         for (const l of this.layers) {
-            l.sample?.(x, z, this.u.time.value, layer);
+            l.sample?.(x, z, waveTime, layer);
+        }
+
+        if (inside) {
+            this.surf.sample(x, z, layer, depth);
         }
 
         result.level = level;
@@ -727,6 +756,7 @@ export class Water {
     rebuildRect(rect: GridRect): void {
         this.onRebuild?.(rect);
         this.data.update(rect, this.riverFlow);
+        this.surf.rebuild(rect);
         this.buildChunksIn(rect);
         this.scheduleSegmentation();
     }
@@ -752,6 +782,7 @@ export class Water {
         this.material.dispose();
         this.waveTexture.dispose();
         this.data.dispose();
+        this.surf.dispose();
         this.bodies.dispose();
         this.waves.dispose();
     }
@@ -781,7 +812,22 @@ export class Water {
         this.waves.setMaxFetch(this.ocean ? OPEN_FETCH : maxFetch);
     }
 
+    private writeSurfTable(): void {
+        this.surfTableIn = 0.3;
+        this.surf.writeTable(this.bodies.bodies, {
+            strength: this.waves.windStrength,
+            x: this.waves.windDir.x,
+            z: this.waves.windDir.y,
+        });
+    }
+
+    /** Painted surf changed in `rect` (full-res grid): the field around it is recomputed. */
+    surfPainted(rect?: GridRect): void {
+        this.surf.rebuild(rect);
+    }
+
     private writeTable(): void {
+        this.writeSurfTable();
         this.tableDirty = false;
         this.tableVersion = this.waves.version;
         this.bodies.writeTable((b) => this.waves.weights(b, 1), {

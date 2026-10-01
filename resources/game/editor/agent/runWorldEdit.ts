@@ -19,6 +19,7 @@ import { STAMP_SHAPES } from '../stamps';
 import type { StampParams } from '../stamps';
 import type { GridRect } from '../../world/Heightfield';
 import type { Props } from '../../world/Props';
+import { encodePainted } from '../../world/water/shoreField';
 import { ShapeMask } from './shapes';
 import type { ShapeSpec } from './shapes';
 import {
@@ -395,9 +396,92 @@ export function runWorldEdit(
         }
         case 'water_body':
             return waterBodyEdit(editor, payload);
+        case 'surf':
+            return surfEdit(editor, requireMask(), payload);
         default:
             throw new EditError(`Unknown edit kind ${String(payload.kind)}.`);
     }
+}
+
+/**
+ * MCP paint_surf: surf painted on (at a strength), off, or back to automatic inside the shape (Water ›
+ * Surf brush): where the weight is at least half. Reports the shoreline with surf inside the shape.
+ */
+function surfEdit(
+    editor: Editor,
+    mask: ShapeMask,
+    payload: Record<string, unknown>,
+): Record<string, unknown> {
+    const water = editor.worldData.water;
+    const hf = editor.worldData.heights;
+    const mode = payload.action;
+
+    if (mode !== 'on' && mode !== 'off' && mode !== 'auto') {
+        throw new EditError(`Unknown surf mode ${String(mode)}.`);
+    }
+
+    const params = (payload.params ?? {}) as { strength?: number };
+    const value = encodePainted(
+        mode === 'auto' ? null : mode === 'off' ? 0 : (params.strength ?? 1),
+    );
+    const surfMask = water.surf.mask;
+    const r = mask.rect;
+    let painted = 0;
+
+    editor.scriptedEdit(`Agent: surf ${mode}`, r, ['surf'], () => {
+        for (let row = r.z0; row <= r.z1; row++) {
+            for (let col = r.x0; col <= r.x1; col++) {
+                const w = mask.weight[(row - r.z0) * mask.width + (col - r.x0)];
+
+                if (w >= 0.5) {
+                    surfMask[row * hf.resolution + col] = value;
+                    painted++;
+                }
+            }
+        }
+    });
+
+    // Shoreline with surf now inside the shape (water samples next to the shore).
+    const f = water.surf.field;
+    let shore = 0;
+    let surfing = 0;
+
+    for (let j = 0; j < f.size; j++) {
+        for (let i = 0; i < f.size; i++) {
+            const k = j * f.size + i;
+            const d = f.dist[k];
+
+            if (d <= 0 || d > f.spacing) {
+                continue;
+            }
+
+            const x = i * f.spacing - hf.half;
+            const z = j * f.spacing - hf.half;
+
+            if (mask.weightAt(x, z) < 0.5) {
+                continue;
+            }
+
+            shore++;
+
+            if (water.surf.strength[k] > 0.05) {
+                surfing++;
+            }
+        }
+    }
+
+    return {
+        mode,
+        ...(mode === 'on' ? { strength: params.strength ?? 1 } : {}),
+        painted_samples: painted,
+        shoreline_in_shape_m: Math.round(shore * f.spacing),
+        shoreline_with_surf_m: Math.round(surfing * f.spacing),
+        ...(shore === 0
+            ? {
+                  note: 'The shape covers no shoreline: paint over where water meets land.',
+              }
+            : {}),
+    };
 }
 
 /** MCP edit_water_body: list / get / update the water bodies (Water › Bodies). */

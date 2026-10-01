@@ -14,6 +14,7 @@ use RuntimeException;
  * - water.f32      Float32 LE, resolution² water surface heights (NO_WATER where dry)
  * - splat.u8       Uint8, resolution² × 8 channel weights (two RGBA textures, interleaved per texel)
  * - landcover.u8   Uint8, resolution² ESA WorldCover class codes (0 = no data), real-world maps only
+ * - surf.u8        Uint8, resolution² painted surf (0 = automatic, 1-255 = strength 0-1)
  * - foliage.json   {"version":1,"instances":{"<typeId>":[x,y,z,yaw,scale,tiltX,tiltZ,...]}}
  */
 class TerrainStorage
@@ -34,6 +35,8 @@ class TerrainStorage
         'landcover' => 'landcover.u8',
         // Water bodies: stable ids and per-body settings {version, bodies: [{id, seed, kind, ...settings}]}.
         'water_bodies' => 'water_bodies.json',
+        // Painted surf along the shores (the Water tool's Surf brush, MCP paint_surf).
+        'surf' => 'surf.u8',
     ];
 
     public function disk(): Filesystem
@@ -76,7 +79,7 @@ class TerrainStorage
         return match ($asset) {
             'heightmap', 'water' => $samples * 4,
             'splatmap' => $samples * self::SPLAT_CHANNELS,
-            'landcover' => $samples,
+            'landcover', 'surf' => $samples,
             default => null,
         };
     }

@@ -17,6 +17,7 @@ use App\Mcp\Tools\EditFoliage;
 use App\Mcp\Tools\EditRoad;
 use App\Mcp\Tools\EditWater;
 use App\Mcp\Tools\EditWaterBody;
+use App\Mcp\Tools\PaintSurf;
 use App\Mcp\Tools\GenerateImage;
 use App\Mcp\Tools\GenerateMaterial;
 use App\Mcp\Tools\GenerateModel;
@@ -90,6 +91,7 @@ Building the world (live in the open editor, each call one undo step, saved by d
 - Shapes are world-metre outlines: circle, rect, polygon, path (with width) or map, with a soft `falloff` edge.
 - sculpt_terrain: raise / lower, set_height, flatten, smooth, noise, terrace, hill (landforms: hills, massifs, ridges; negative = basins, valleys), erode, grade (road beds along paths).
 - edit_water: lake (flood a basin to a level), river (along a path, downhill from its first point; kept as an editable spline: list_rivers / update_river / delete_river), erase.
+- Beaches: surf breaks on gentle shores of bodies with surf on (edit_water_body settings surf, surf_height, surf_period, surf_direction); paint_surf paints it on / off along a stretch of shore.
 - edit_road: roads, paths and tracks as editable splines (graded bed, soft banks, painted layer, foliage cleared); update re-carves, delete takes them out again.
 - apply_stamp: landforms in one call (mountain, volcano, crater, mesa, dunes, ridge, canyon, hills) with position, rotation, size, height and blend mode.
 - paint_terrain: paint layers (optionally only on matching slope / height); painted layers grow their ground cover, so apply a biome to a slot and paint it to plant forests, meadows, beaches.
@@ -198,5 +200,7 @@ class WaterwaysServer extends Server
         ApplyStamp::class,
         // Water bodies and waves (docs/ROADMAP.md phase 10)
         EditWaterBody::class,
+        // Beaches (docs/ROADMAP.md phase 11)
+        PaintSurf::class,
     ];
 }

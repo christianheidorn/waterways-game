@@ -14,6 +14,13 @@ export class WeatherAudio {
     private rainHeavyGain: GainNode | null = null;
     private windGain: GainNode | null = null;
     private windFilter: BiquadFilterNode | null = null;
+    private surfGain: GainNode | null = null;
+    private surfCrashGain: GainNode | null = null;
+    private surfFilter: BiquadFilterNode | null = null;
+    private surf = 0;
+    private surfCrash = 0;
+    private lastSurf = -1;
+    private lastSurfCrash = -1;
     private brown: AudioBuffer | null = null;
     private white: AudioBuffer | null = null;
     private muted = false;
@@ -99,6 +106,41 @@ export class WeatherAudio {
                 220 + w * 380,
                 ctx.currentTime,
                 0.3,
+            );
+        }
+    }
+
+    /**
+     * Surf / lapping on nearby beaches (0-1, Water.surf.activity): a low wash that swells with `level`
+     * and a brighter crash (`crash`, 0-1) while the nearest waves break and run up the sand.
+     */
+    setSurf(level: number, crash: number): void {
+        this.surf = level;
+        this.surfCrash = crash;
+        const ctx = this.ctx;
+
+        if (!ctx || !this.surfGain || !this.surfCrashGain || !this.surfFilter) {
+            return;
+        }
+
+        if (Math.abs(level - this.lastSurf) > 0.005) {
+            this.lastSurf = level;
+            this.surfGain.gain.setTargetAtTime(
+                Math.min(1, level) * 0.16,
+                ctx.currentTime,
+                0.5,
+            );
+        }
+
+        const c = Math.min(1, level) * crash;
+
+        if (Math.abs(c - this.lastSurfCrash) > 0.01) {
+            this.lastSurfCrash = c;
+            this.surfCrashGain.gain.setTargetAtTime(c * 0.2, ctx.currentTime, 0.12);
+            this.surfFilter.frequency.setTargetAtTime(
+                700 + crash * 1300,
+                ctx.currentTime,
+                0.15,
             );
         }
     }
@@ -251,10 +293,33 @@ export class WeatherAudio {
             .connect(this.windGain)
             .connect(this.master);
 
+        // Surf: a low brown-noise wash and a brighter pink-noise crash as the waves break.
+        const washSrc = loop(ctx, this.brown, 6.1);
+        const washFilter = ctx.createBiquadFilter();
+        washFilter.type = 'lowpass';
+        washFilter.frequency.value = 520;
+        this.surfGain = ctx.createGain();
+        this.surfGain.gain.value = 0;
+        washSrc.connect(washFilter).connect(this.surfGain).connect(this.master);
+        const crashSrc = loop(ctx, pink, 1.7);
+        this.surfFilter = ctx.createBiquadFilter();
+        this.surfFilter.type = 'bandpass';
+        this.surfFilter.frequency.value = 900;
+        this.surfFilter.Q.value = 0.35;
+        this.surfCrashGain = ctx.createGain();
+        this.surfCrashGain.gain.value = 0;
+        crashSrc
+            .connect(this.surfFilter)
+            .connect(this.surfCrashGain)
+            .connect(this.master);
+
         this.lastRain = -1;
         this.lastWind = -1;
+        this.lastSurf = -1;
+        this.lastSurfCrash = -1;
         this.applyMute();
         this.setAmbience(this.rain, this.wind);
+        this.setSurf(this.surf, this.surfCrash);
         void ctx.resume();
     }
 

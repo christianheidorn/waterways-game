@@ -17,7 +17,7 @@ use Laravel\Mcp\Server\Attributes\Name;
 Water bodies: the connected pieces of the map's water (lake, pond, river, sea, classified automatically), each with its own wave and look settings. They are derived from the water (edit_water) and keep their ids across edits. Same as the editor's Water › Bodies tool.
 - list: every body (id, name, kind, area, level, deepest point, centroid, bounds, fetch along the current wind, current wave height and settings). Live from the open editor, else as last saved.
 - get: one body by `id`, or the body at `point` {x, z}.
-- update: changes body `id` (or the one at `point`): `settings` with any of name, kind (lake/pond/river/sea, null = automatic), wind_exposure (0-2: how much wind reaches it; sheltered 0.3, open 1), fetch (m the wind blows over it; null = from its size along the wind), wave_height (0-4 ×), choppiness (0-2: horizontal sharpness of crests), shallow_color / deep_color ('#rrggbb', null = environment), clarity (0.3-40 m, null = environment), surf (true/false: surf on its shores). Live in the open editor (one step, saved unless save is false).
+- update: changes body `id` (or the one at `point`): `settings` with any of name, kind (lake/pond/river/sea, null = automatic), wind_exposure (0-2: how much wind reaches it; sheltered 0.3, open 1), fetch (m the wind blows over it; null = from its size along the wind), wave_height (0-4 ×), choppiness (0-2: horizontal sharpness of crests), shallow_color / deep_color ('#rrggbb', null = environment), clarity (0.3-40 m, null = environment), surf (true/false: surf on its gentle shores), surf_height (0-4 m offshore; lakes scale it with the wind), surf_period (1.5-20 s: lake chop ~3, ocean swell 8-14), surf_direction (degrees the surf travels towards, 0 = north, 90 = east; null = with the wind). Paint surf on / off along a shore with paint_surf. Live in the open editor (one step, saved unless save is false).
 Wind waves grow with the environment's wind_strength and each body's fetch (fetch-limited JONSWAP spectrum): a 50 m pond only ripples, a 2 km lake builds ~0.2-0.5 m waves in a stiff breeze, the sea more.
 MD)]
 class EditWaterBody extends WaterwaysTool
@@ -40,6 +40,9 @@ class EditWaterBody extends WaterwaysTool
                 'deep_color' => $schema->string()->nullable(),
                 'clarity' => $schema->number()->min(0.3)->max(40)->nullable(),
                 'surf' => $schema->boolean(),
+                'surf_height' => $schema->number()->min(0)->max(4),
+                'surf_period' => $schema->number()->min(1.5)->max(20),
+                'surf_direction' => $schema->number()->min(0)->max(360)->nullable(),
             ])->description('update: the settings to change (others stay).'),
             'save' => $schema->boolean()->description('update: save the map after the change (default true).'),
         ];
@@ -65,6 +68,9 @@ class EditWaterBody extends WaterwaysTool
             'settings.deep_color' => ['sometimes', 'nullable', 'regex:/^#[0-9a-fA-F]{6}$/'],
             'settings.clarity' => ['sometimes', 'nullable', 'numeric', 'between:0.3,40'],
             'settings.surf' => ['sometimes', 'boolean'],
+            'settings.surf_height' => ['sometimes', 'numeric', 'between:0,4'],
+            'settings.surf_period' => ['sometimes', 'numeric', 'between:1.5,20'],
+            'settings.surf_direction' => ['sometimes', 'nullable', 'numeric', 'between:0,360'],
         ])->validate();
         $action = $data['action'];
         $map = $this->map($request);
@@ -80,11 +86,11 @@ class EditWaterBody extends WaterwaysTool
 
         if ($action === 'update') {
             $settings = array_intersect_key($input['settings'] ?? [], array_flip([
-                'name', 'kind', 'wind_exposure', 'fetch', 'wave_height', 'choppiness', 'shallow_color', 'deep_color', 'clarity', 'surf',
+                'name', 'kind', 'wind_exposure', 'fetch', 'wave_height', 'choppiness', 'shallow_color', 'deep_color', 'clarity', 'surf', 'surf_height', 'surf_period', 'surf_direction',
             ]));
 
             if ($settings === []) {
-                return Response::error('Nothing to change: give settings (name, kind, wind_exposure, fetch, wave_height, choppiness, shallow_color, deep_color, clarity, surf).');
+                return Response::error('Nothing to change: give settings (name, kind, wind_exposure, fetch, wave_height, choppiness, shallow_color, deep_color, clarity, surf, surf_height, surf_period, surf_direction).');
             }
 
             return $this->worldEdit($map, $request, 'edit_water_body update', [
@@ -170,7 +176,7 @@ class EditWaterBody extends WaterwaysTool
     public static function describe(array $record): array
     {
         $settings = array_intersect_key($record, array_flip([
-            'name', 'kind', 'wind_exposure', 'fetch', 'wave_height', 'choppiness', 'shallow_color', 'deep_color', 'clarity', 'surf',
+            'name', 'kind', 'wind_exposure', 'fetch', 'wave_height', 'choppiness', 'shallow_color', 'deep_color', 'clarity', 'surf', 'surf_height', 'surf_period', 'surf_direction',
         ]));
         $kind = $record['kind'] ?? null ?: ($record['kind_auto'] ?? 'lake');
 

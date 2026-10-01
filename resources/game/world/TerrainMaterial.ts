@@ -43,6 +43,7 @@ import { TerrainDebugView } from './TerrainDebugView';
 import { TERRAIN_SLOTS, TerrainTextures } from './TerrainTextures';
 import { causticPattern, rainRipples } from './waterPatterns';
 import { WATER_DEPTH_RANGE } from './Wetness';
+import type { ShoreEffectsHook } from './water/Surf';
 
 export type BrushOverlay = {
     x: number;
@@ -185,6 +186,8 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
     private readonly blankTrail: THREE.DataTexture;
     /** Albedo of the splat surface (see setupDiffuseColor). */
     private surfaceColor!: THREE.Node<'vec4'>;
+    /** Beach surf on the ground (swash, wet sand, foam), from the water. */
+    private shoreEffects: ShoreEffectsHook | null = null;
 
     constructor(
         splat: SplatMap,
@@ -364,6 +367,13 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
         })();
     }
 
+    /** Surf on the beaches (Water.surf.terrainHook): swash sheet, wet sand and foam; null removes it. */
+    setShoreEffects(hook: ShoreEffectsHook | null): void {
+        this.shoreEffects = hook;
+        this.buildNodes();
+        this.needsUpdate = true;
+    }
+
     /** Weather-driven ground state: `wet` darkens and glosses everything (puddles on flat ground), `snow` whitens it. */
     setWeather(wet: number, snow: number): void {
         this.uniforms.uWeatherWet.value = wet;
@@ -523,7 +533,7 @@ export class TerrainMaterial extends THREE.MeshStandardNodeMaterial {
         const surfacePuddle = this.puddleProperty;
 
         this.surfaceColor = Fn(() => {
-            const s = terrainSurface(u);
+            const s = terrainSurface(u, this.shoreEffects);
             surfaceNormal.assign(s.normal);
             surfaceRoughness.assign(s.roughness);
             surfaceAO.assign(s.ao);
@@ -658,7 +668,10 @@ type LayerSample = {
 };
 
 /** Splat, layer and weather evaluation (fragment stage). */
-function terrainSurface(u: TerrainUniforms) {
+function terrainSurface(
+    u: TerrainUniforms,
+    shoreEffects: ShoreEffectsHook | null = null,
+) {
     const wpos = positionWorld.toVar();
     const wp = wpos.xz.toVar();
     const N = normalize(normalWorldGeometry).toVar();
@@ -1082,6 +1095,22 @@ function terrainSurface(u: TerrainUniforms) {
 
         nrm.assign(normalize(mix(nrm, surface, puddle)));
     });
+
+    // Beach surf: sand darkened and glossy where the swash was, the thin sheet running up and back
+    // (a film of water: dark, mirror-smooth, flat) and its foam edge and bubbles.
+    if (shoreEffects) {
+        const fx = shoreEffects(wpos);
+        albedo.mulAssign(mix(1, 0.6, fx.wet));
+        rough.assign(mix(rough, 0.16, fx.gloss.mul(0.9)));
+        albedo.assign(
+            mix(albedo, albedo.mul(vec3(0.5, 0.6, 0.66)), fx.sheet.mul(0.7)),
+        );
+        rough.assign(mix(rough, 0.04, fx.sheet));
+        nrm.assign(normalize(mix(nrm, N, max(fx.sheet, fx.gloss.mul(0.4)))));
+        albedo.assign(mix(albedo, vec3(0.9, 0.92, 0.93), fx.foam));
+        rough.assign(mix(rough, 0.65, fx.foam));
+        puddle.assign(max(puddle, fx.sheet.mul(fx.foam.oneMinus()).mul(0.8)));
+    }
 
     // Snow settles on flatter ground first; thinner near water.
     If(u.uSnowCover.greaterThan(0.001), () => {

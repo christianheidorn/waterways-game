@@ -495,15 +495,20 @@ export function createWaterMaterial(o: WaterMaterialOptions): {
             });
         }
 
+        // Wind waves calm down in the shallows; layers (surf) bring their own shallow-water behaviour.
+        const out = d.mul(vFade).toVar();
+
         for (const layer of o.layers) {
             if (layer.displacement) {
-                d.addAssign(
-                    layer.displacement(ctxFor(baseXZ, vData.x, vRow, vMisc)),
+                out.addAssign(
+                    layer
+                        .displacement(ctxFor(baseXZ, vData.x, vRow, vMisc))
+                        .mul(edgeCalm),
                 );
             }
         }
 
-        return d.mul(vFade);
+        return out;
     })();
     /** Sum of waves: analytic slopes (x, z) and Jacobian diagonal (x, z); FFT: only the swell's slope. */
     const slopeJac = Fn(() => {

@@ -33,11 +33,7 @@ import type {
     InstanceSource,
     RootTint,
 } from './FoliageMaterial';
-import {
-    createFoliageMaterial,
-    lodBandT,
-    RANK_FADE,
-} from './FoliageMaterial';
+import { createFoliageMaterial, lodBandT, RANK_FADE } from './FoliageMaterial';
 import type { HiZ } from './HiZ';
 import { occludedNode } from './HiZ';
 import { INSTANCE_FLOATS, writeInstance } from './instances';
@@ -1432,9 +1428,7 @@ export class GpuFoliageType {
                                         .mul(capacity)
                                         .add(slot),
                                 )
-                                .assign(
-                                    i.mul(16).add(fadeIn.mul(8)).add(lod),
-                                );
+                                .assign(i.mul(16).add(fadeIn.mul(8)).add(lod));
                         });
 
                         Return();

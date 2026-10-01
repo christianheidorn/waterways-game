@@ -421,6 +421,31 @@ report triangles, meshes (draw calls per copy) and materials of a prop, and warn
 remeshed to about 15k triangles. Vegetation belongs in **foliage types** (LODs, impostors, GPU culling, ground
 cover), not props.
 
+## Motion and atmosphere
+
+Per-map environment fields (`update_environment`, `get_settings` group `environment`; the studio's Maps →
+Environment page and the editor's World → Weather tab show the same fields):
+
+| Field                   | Default | Range   | What it does                                                                                                      |
+| ----------------------- | ------- | ------- | ----------------------------------------------------------------------------------------------------------------- |
+| `gust_strength`         | 0.5     | 0-2     | Travelling gusts: patches of stronger wind that sweep downwind across grass fields and canopies (0 = steady wind) |
+| `gust_scale`            | 40      | 5-300 m | Size of the gust patches                                                                                          |
+| `gust_speed`            | 1       | 0-4 ×   | How fast gust fronts travel, relative to the wind strength ((3 + 9 × wind) m/s × this)                            |
+| `cloud_shadow_strength` | 0.6     | 0-1     | How dark the shadows of the drifting clouds are; how much of the land they cover follows `cloud_coverage`         |
+| `fog_shaft_intensity`   | 0.8     | 0-2     | Sunbeams through trees and cloud gaps in fog and haze; grows with `fog_density` and valley fog                    |
+
+Graphics switches (`set_device_graphics` `settings` for this device, `update_game_settings` group `graphics` for
+the project; all on from Medium up, off on Low):
+
+- `lod_crossfade` (Foliage group): foliage and props dissolve between detail levels with a screen-space dither
+  instead of popping; shadows fade the same way.
+- `grass_interaction` (Foliage group): grass, flowers, reeds (and a little bushes) bend away from the character
+  in play and walk mode and straighten again behind it.
+- `cloud_shadows` (Shadows group): the cloud shadows; they need sun shadows (`shadow_quality` not `off`).
+
+Light shafts in fog use the existing `god_rays` switch (off on Low). `take_screenshot` / `take_photo` show all of
+it; gusts and grass bending need a few frames (an open editor in play mode for the character).
+
 ## How it works
 
 - `routes/ai.php` registers the server: `App\Mcp\Servers\WaterwaysServer`, with tools in `app/Mcp/Tools`.

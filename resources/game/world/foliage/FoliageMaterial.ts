@@ -260,10 +260,7 @@ function gustField(
 }
 
 /** Horizontal push away from the character trail (world x / z, length ≤ 1). */
-function interactionPush(
-    g: FoliageGlobals,
-    pos: Node<'vec3'>,
-): Node<'vec2'> {
+function interactionPush(g: FoliageGlobals, pos: Node<'vec3'>): Node<'vec2'> {
     const push = vec2(0).toVar();
 
     for (let i = 0; i < INTERACTORS; i++) {
@@ -290,7 +287,7 @@ function foliagePosition(
     source: InstanceSource,
     shadow = false,
 ): Node {
-    const { globals: g, uniforms: u, stiffness, fade, role } = options;
+    const { globals: g, uniforms: u, stiffness, fade } = options;
     const interact = options.interact ?? 0;
 
     return Fn(() => {

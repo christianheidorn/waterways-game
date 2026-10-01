@@ -11,7 +11,7 @@ use Laravel\Mcp\Server\Attributes\Description;
 use Laravel\Mcp\Server\Attributes\Name;
 
 #[Name('update_environment')]
-#[Description('Changes a map\'s environment: weather, time of day, sun, clouds, fog, wind, water look, sea level, … Pass only the fields to change in `values` (see get_settings group "environment" for every field and its range). Applies live in an open editor.')]
+#[Description('Changes a map\'s environment: weather, time of day, sun, clouds and their shadows, fog and light shafts in fog, wind and travelling gusts, water look, sea level, … Pass only the fields to change in `values` (see get_settings group "environment" for every field and its range). Applies live in an open editor.')]
 class UpdateEnvironment extends WaterwaysTool
 {
     public function schema(JsonSchema $schema): array

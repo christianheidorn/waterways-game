@@ -428,9 +428,7 @@ export class PostFx {
                 k =
                     vis *
                     horizon *
-                    ((0.6 *
-                        (night ? 0.35 : 1) *
-                        (1 - light.darkness * 0.6)) /
+                    ((0.6 * (night ? 0.35 : 1) * (1 - light.darkness * 0.6)) /
                         baseExposure);
                 // Sky around the light, stronger in haze; and the sunlit fog (see GodRays), which
                 // grows with the fog density (weather included) and valley fog around the camera.
@@ -439,10 +437,7 @@ export class PostFx {
                 e.godRays.skyWeight.value =
                     look.godRayIntensity *
                     (1 + Math.min(0.75, look.fogDensity / 0.001));
-                const fogginess = Math.min(
-                    1.5,
-                    fog / 0.0005 + valley / 0.01,
-                );
+                const fogginess = Math.min(1.5, fog / 0.0005 + valley / 0.01);
                 e.godRays.fogWeight.value =
                     0.7 *
                     look.fogShaftIntensity *

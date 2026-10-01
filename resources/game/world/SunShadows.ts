@@ -224,13 +224,7 @@ export class SunShadows {
         );
         // Read by three's light node in place of the default single-map shadow.
         Object.assign(sun.shadow, {
-            shadowNode: new CascadeBlendNode(
-                sun,
-                near,
-                far,
-                this.near,
-                cloud,
-            ),
+            shadowNode: new CascadeBlendNode(sun, near, far, this.near, cloud),
         });
     }
 

@@ -47,13 +47,14 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
       medium: 40 %, redrawn every other frame; low: sky reflection only).
     - Shorelines and rapids get foam.
     - An ocean ring extends to the horizon, and the view tints when the camera goes underwater.
-- **Atmosphere & weather.** Physical sky with lit clouds, stars and a moon; valley (height) fog; rain, snow,
-  lightning with thunder, gusting wind and wet or snowy ground (see [Weather & sky](#weather--sky)). The sun
+- **Atmosphere & weather.** Physical sky with lit clouds whose shadows drift over the land, stars and a moon;
+  valley (height) fog with sunbeams; rain, snow, lightning with thunder, gusts that sweep across fields and
+  canopies, and wet or snowy ground (see [Weather & sky](#weather--sky)). The sun
   position is driven by time of day. Lighting comes from the
   sky (IBL), with fog and a shadow that follows the camera or player. Post-processing covers MSAA, bloom, GTAO
   and ACES tone mapping.
-- **Foliage.** Instanced and bucketed into 128 m cells, with 2 LODs, wind sway, a grass distance fade and
-  density scaling.
+- **Foliage.** Instanced and bucketed into 128 m cells, with LODs that cross-fade (dithered), wind sway with
+  travelling gusts, grass that bends around the character, a grass distance fade and density scaling.
 - **Player.** Third-person explorer with procedural walk, run, jump and swim animation (or your own GLB). Moves
   over terrain with a slope limit, jumps (with coyote time), and swims or dives in deep water.
 
@@ -267,6 +268,29 @@ the switch from LOD0 to LOD1 happens per instance, not per 128 m cell, so full-d
 LOD distance. The F10 menu lists per-type instances drawn, triangles per LOD and LOD distances, and warns
 about missing or over-budget LODs.
 
+**LOD cross-fades** (graphics `lod_crossfade`, on from Medium). LODs don't pop: over a band before each switch
+distance (12 % of it) an instance is drawn by both LODs, and a screen-space dither (interleaved gradient noise)
+gives each pixel to one of them, the incoming LOD's share growing with the distance across the band. With TAA the
+dither changes every frame and resolves to a smooth blend. Shadows fade the same way at the end of the foliage
+shadow reach, in the shadow maps (`world/foliage/FoliageMaterial.ts`, `lodBandT` / `lodFadeMask`):
+
+- WebGPU: the culling pass lists an instance in the band for both LODs (also in the second occlusion phase), and
+  each LOD's vertex shader computes the dither range it keeps from the same switch distances. Every LOD step
+  fades, the impostor included.
+- WebGL 2: the per-instance LOD0 → LOD1 split of trees, bushes and rocks fades (the near subset fades out, the
+  LOD1 cell fades in). Switches that happen per cell or per 4 × 4-cell chunk there (grass and flowers, and the far
+  impostor chunks) still switch at once.
+- Props (`world/Props.ts`) fade between their LODs and out before they are hidden, the same way: the CPU writes
+  each instance's dither range into an instanced attribute when it re-buckets the LODs (every metre of camera
+  movement).
+
+**Wind gusts and grass interaction.** The sway in the foliage vertex shader is modulated by a world-space gust
+field: gradient noise (`gust_scale` m patches) scrolled downwind at (3 + 9 × wind strength) × `gust_speed` m/s,
+so stronger patches visibly travel across grass fields and canopies; `gust_strength` 0 is the old steady wind.
+Grass, flowers and reeds (bushes a little) are pushed aside by the character in play and walk mode (graphics
+`grass_interaction`): its feet and a trail of up to 7 earlier positions (one every 0.6 m) push blades away within
+0.9 m, tips most, and the trail fades out over 2.5 s so the grass straightens again behind it.
+
 **GPU-driven foliage (WebGPU).** Like Unreal's GPU scene, the GPU decides what to draw
 (`world/foliage/FoliageGpu.ts`):
 
@@ -335,6 +359,9 @@ leave these values alone:
 | High      | 12 km      | high (220 m)    | TAA  | off         | 1K / 8×              | 1 / 1× / 120 m                   | 1 / 1.5×                  |
 | Epic      | 20 km      | ultra (400 m)   | TAA  | GTAO medium | 2K / 16×             | 1 / 1.5× / 250 m                 | 1 / 2×                    |
 | Cinematic | 30 km      | ultra (700 m)   | TAA  | GTAO high   | 2K / 16×             | 1 / 2× / 350 m                   | 1.25 (supersampled) / 3×  |
+
+Low also switches off the LOD cross-fades, grass bending around the character (Foliage group) and the cloud
+shadows (Shadows group); Medium and up have all three.
 
 **Retina / HiDPI resolution cap.** `max_pixel_ratio` caps the device pixel ratio of the output (the
 canvas); the browser upsamples the canvas to the screen. A MacBook's 2× Retina screen at native resolution
@@ -450,7 +477,11 @@ only when it is enabled.
    metalness / roughness (SSR).
 2. GTAO and contact shadows (sun or moon direction, ray-marched through the depth buffer).
 3. Screen-space reflections where the material is glossy (wet ground: the terrain's roughness).
-4. Light shafts (radial blur of the bright sky around the sun or moon).
+4. Light shafts: radial blur towards the sun or moon of the bright sky around it and of the sunlit fog. The fog
+   in front of each pixel (1 - e^(-medium × distance), forward-scattered, from the weather's fog density and
+   valley fog around the camera) emits; near trunks and branches have little fog in front of them and stay dark,
+   so the gaps between them become beams, and cloud gaps along the ray (the cloud shadows) light the fog, so
+   beams also fall from breaks in the clouds. `fog_shaft_intensity` per map.
 5. HDR lighting composite of 2-4 at the scene resolution.
 6. TAA (un-jittered reconstruction, closest-depth reprojection, Catmull-Rom history, YCoCg variance
    clipping), or TAAU below 1× render scale (see Graphics quality). Everything after this runs at the output
@@ -473,7 +504,7 @@ only when it is enabled.
 
 - ten film looks (grade + lens bundles);
 - exposure and adaptation range, white balance;
-- light-shaft strength, bloom threshold;
+- light-shaft strength (sky and fog), bloom threshold;
 - focus, aperture and max blur;
 - motion blur, lens flare, chromatic aberration, grain, letterbox.
 
@@ -493,16 +524,19 @@ One-click presets (Clear, Cloudy, Overcast, Foggy, Rain, Storm, Snow, Autumn) se
 precipitation, wind, wetness and exposure values, which you can then fine-tune. The game blends to a new
 look over a few seconds, so changes preview smoothly.
 
-| Setting                          | What it does                                                                                      |
-| -------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `weather`                        | Weather type (for presets); `snow` turns precipitation into snowfall                              |
-| `precipitation`                  | Rain / snow amount (0-1): particles, rain ripples on water, rain sound, reduced visibility        |
-| `falling_leaves`                 | Autumn leaves blowing through the air around the camera (0-1); combines with any weather          |
-| `lightning_frequency`            | Strikes per minute: sky flash, light pulse, branching bolt, thunder delayed by distance (343 m/s) |
-| `thunder_volume`                 | Thunder loudness                                                                                  |
-| `wind_strength` / `_direction`   | Foliage sway, cloud drift, rain slant, water chop; storms add gusts                               |
-| `height_fog_height` / `_density` | Valley fog up to this height above the lowest point of the map (sea level with an ocean); 0 = off |
-| `wetness`                        | Darker, glossier ground with puddles on flat ground; rain also soaks the ground over time         |
+| Setting                               | What it does                                                                                      |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `weather`                             | Weather type (for presets); `snow` turns precipitation into snowfall                              |
+| `precipitation`                       | Rain / snow amount (0-1): particles, rain ripples on water, rain sound, reduced visibility        |
+| `falling_leaves`                      | Autumn leaves blowing through the air around the camera (0-1); combines with any weather          |
+| `lightning_frequency`                 | Strikes per minute: sky flash, light pulse, branching bolt, thunder delayed by distance (343 m/s) |
+| `thunder_volume`                      | Thunder loudness                                                                                  |
+| `wind_strength` / `_direction`        | Foliage sway, cloud drift, rain slant, water chop; storms add gusts                               |
+| `gust_strength` / `_scale` / `_speed` | Travelling gusts: patches of stronger wind sweeping downwind over grass and canopies              |
+| `cloud_shadow_strength`               | Darkness of the drifting cloud shadows (their coverage follows `cloud_coverage`)                  |
+| `fog_shaft_intensity`                 | Sunbeams through trees and cloud gaps in fog and haze (Camera & look has the sky light shafts)    |
+| `height_fog_height` / `_density`      | Valley fog up to this height above the lowest point of the map (sea level with an ocean); 0 = off |
+| `wetness`                             | Darker, glossier ground with puddles on flat ground; rain also soaks the ground over time         |
 
 How it works (`resources/game/world/`):
 
@@ -510,6 +544,11 @@ How it works (`resources/game/world/`):
   (octaves and light steps follow the `cloud_quality` graphics setting). Overcast skies turn into a grey
   cloud deck and storms darken it. Nights have stars, a moon and moonlight. Lightning lights the clouds
   from inside.
+- **Cloud shadows** (`SkyDome.ts` `cloudShadowNode`, applied in the sun's shadow term in `SunShadows.ts`): the
+  sky's cloud layer is anchored to the world 500 m above the lowest ground, and every lit surface (terrain,
+  water, foliage, props) looks up along the light into the same cloud field (same drift, coverage
+  and softness, 3 octaves), so the shadows match the clouds overhead and move with the wind. They thin out as the
+  deck closes (the sun itself is dimmed then). Graphics `cloud_shadows`; they need sun shadows.
 - **Fog** (`HeightFog.ts`): three's fog shader chunks are patched once, so every material (terrain, water,
   foliage, characters) gets exponential distance fog, analytic height fog and sun in-scattering. The fog
   colour follows the sky's horizon, so distant terrain melts into the sky.

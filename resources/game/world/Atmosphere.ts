@@ -8,12 +8,7 @@ import {
     fogSunParams,
     heightFogParams,
 } from './HeightFog';
-import {
-    cloudShadowNode,
-    extinction,
-    SkyDome,
-    skyRadiance,
-} from './SkyDome';
+import { cloudShadowNode, extinction, SkyDome, skyRadiance } from './SkyDome';
 import type { CloudQuality, SkyParams } from './SkyDome';
 import { SunShadows } from './SunShadows';
 
@@ -279,7 +274,9 @@ export class Atmosphere {
 
         return (
             c.heightFogDensity *
-            Math.exp(-Math.max(0, above) * (3.2 / Math.max(1, c.heightFogHeight)))
+            Math.exp(
+                -Math.max(0, above) * (3.2 / Math.max(1, c.heightFogHeight)),
+            )
         );
     }
 

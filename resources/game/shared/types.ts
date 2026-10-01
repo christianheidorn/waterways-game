@@ -82,6 +82,8 @@ export type EnvironmentSettings = {
     /** 0-1 depth of the character's footprints in snow; seconds they take to fade without snowfall. */
     footprint_depth?: number;
     footprint_fade_time?: number;
+    /** 0-2 strength of the bounce light and of the sky occlusion under trees and in valleys (1 = physical). */
+    bounce_light?: number;
     // ---- Camera & look: artistic post-processing per map (resources/game/core/PostFx.ts) ----
     /** Colour grade preset, applied as a generated 3D LUT. */
     color_grade: ColorGrade;
@@ -232,6 +234,11 @@ export type GraphicsSettings = {
     caustics: boolean;
     /** Footprints in snow cover (a trail texture around the character). */
     snow_footprints: boolean;
+    /**
+     * Bounce light (diffuse global illumination from an irradiance probe grid): off, or the probe
+     * density and rays per probe (low 128² / 16, medium 192² / 24, high 256² / 32 over the map).
+     */
+    bounce_light_quality: 'off' | 'low' | 'medium' | 'high';
     /** Weather particles, lightning, splashes. */
     effects_quality: QualityLevel;
     cloud_quality: 'off' | 'low' | 'medium' | 'high';

@@ -118,6 +118,17 @@ export class Atmosphere {
         base: uniform(0),
     };
     private cloudShadowsEnabled = true;
+    /**
+     * Bounce light inputs (world/bounce/BounceLight): the sun / moon irradiance and the sky's
+     * irradiance on open flat ground (hemisphere light + environment), before the debug view's
+     * switch-off.
+     */
+    readonly bounceSun = new THREE.Color();
+    readonly bounceSky = new THREE.Color();
+    /** Share of the hemisphere ground colour and the reflections' ground kept (the bounce light replaces it). */
+    private groundBounce = 1;
+    /** "Bounce light only" view: every other light off. */
+    private lightsOff = false;
     private env: EnvironmentSettings | null = null;
     private current = emptyLook();
     private target = emptyLook();
@@ -278,6 +289,28 @@ export class Atmosphere {
                 -Math.max(0, above) * (3.2 / Math.max(1, c.heightFogHeight)),
             )
         );
+    }
+
+    /**
+     * How much of the uniform ground light (the hemisphere light's ground colour and the ground in
+     * the sky reflections) stays: lowered while the bounce light lights the scene from the real ground.
+     */
+    setGroundBounce(scale: number): void {
+        if (Math.abs(scale - this.groundBounce) < 1e-3) {
+            return;
+        }
+
+        this.groundBounce = scale;
+        this.lightingDirty = true;
+        this.envDirty = true;
+    }
+
+    /** Switches the sun, moon, sky and lightning light off (the "Bounce light only" view). */
+    setLightsOff(off: boolean): void {
+        if (off !== this.lightsOff) {
+            this.lightsOff = off;
+            this.lightingDirty = true;
+        }
     }
 
     /** Drifting cloud shadows (graphics cloud_shadows); their strength is per map. */
@@ -603,7 +636,9 @@ export class Atmosphere {
             (1 - dark * 0.6);
         this.hemi.intensity =
             THREE.MathUtils.lerp(dayAmbient, 0.1, night) + flash * 1.1;
-        this.hemi.groundColor.set('#4a4030').multiplyScalar(1 - night * 0.6);
+        this.hemi.groundColor
+            .set('#4a4030')
+            .multiplyScalar((1 - night * 0.6) * this.groundBounce);
 
         // ---- lightning flash light from the strike direction
         this.flashLight.intensity = flash > 0.005 ? flash * 2.5 : 0;
@@ -617,6 +652,15 @@ export class Atmosphere {
             0.55 * (1 - dark * 0.35) + flash * 0.8;
 
         this.updateEnvGround(zenith, deck, overcast);
+        this.bounceSun.copy(this.sun.color).multiplyScalar(this.sun.intensity);
+
+        if (this.lightsOff) {
+            this.sun.intensity = 0;
+            this.hemi.intensity = 0;
+            this.flashLight.intensity = 0;
+            this.scene.environmentIntensity = 0;
+        }
+
         this.applyFog();
     }
 
@@ -657,7 +701,17 @@ export class Atmosphere {
         e.multiplyScalar(1 / envIntensity);
         // Sky light, already in environment units.
         e.add(sky);
-        e.multiplyScalar(albedo);
+        e.multiplyScalar(albedo * this.groundBounce);
+        // Sky irradiance on open flat ground: the hemisphere light's sky colour plus the environment's
+        // sky hemisphere (π × its average radiance).
+        this.bounceSky
+            .copy(this.hemi.color)
+            .multiplyScalar(this.hemi.intensity)
+            .add(
+                this.tmpColor2
+                    .copy(sky)
+                    .multiplyScalar(Math.PI * this.scene.environmentIntensity),
+            );
     }
 
     /**

@@ -1298,6 +1298,38 @@ export class Foliage {
         return { version: 1, instances };
     }
 
+    /**
+     * Hand-placed instances cell by cell (not the ground cover grown around the camera), with their
+     * type and its model's bounds at scale 1 (the bounce light's canopy and rock occluders).
+     */
+    *placedCells(): Generator<{
+        type: FoliageType;
+        bounds: THREE.Box3;
+        data: number[];
+    }> {
+        for (const renderer of this.renderers.values()) {
+            const geometry = renderer.lods[0];
+
+            if (renderer.cover || renderer.disposed || !geometry) {
+                continue;
+            }
+
+            if (!geometry.boundingBox) {
+                geometry.computeBoundingBox();
+            }
+
+            for (const cell of renderer.cells.values()) {
+                if (cell.data.length) {
+                    yield {
+                        type: renderer.type,
+                        bounds: geometry.boundingBox!,
+                        data: cell.data,
+                    };
+                }
+            }
+        }
+    }
+
     get instanceCount(): number {
         let count = 0;
 

@@ -59,6 +59,7 @@ import { PhotoMode } from '../ui/PhotoMode';
 import { Hud, LoadingScreen } from '../ui/Hud';
 import { ViewModeMenu } from '../ui/ViewModeMenu';
 import { Atmosphere } from '../world/Atmosphere';
+import { BounceLight } from '../world/bounce/BounceLight';
 import { Foliage, placementAllowed } from '../world/Foliage';
 import { Heightfield } from '../world/Heightfield';
 import type { GridRect } from '../world/Heightfield';
@@ -144,6 +145,8 @@ export class Game {
     private world!: World;
     private atmosphere!: Atmosphere;
     private weather: Weather | null = null;
+    /** Bounce light: irradiance probes computed in a worker (graphics bounce_light_quality). */
+    private bounce: BounceLight | null = null;
     private player!: Player;
     private playerCamera!: ThirdPersonCamera;
     private editor!: Editor;
@@ -222,6 +225,14 @@ export class Game {
                 water: this.world.water,
                 setFoliageWind: (s, x, z) =>
                     this.world.foliage.setWind(s, x, z),
+            });
+            this.bounce = new BounceLight(this.renderer, this.scene, {
+                heights: this.world.heights,
+                water: this.world.waterGrid,
+                splat: this.world.splat,
+                material: this.world.material,
+                foliage: this.world.foliage,
+                props: this.world.props,
             });
             this.graphicsDefaults = normalizeGraphics(
                 this.manifest.settings.graphics,
@@ -943,7 +954,10 @@ export class Game {
             wetness,
             landCoverAt,
         };
-        props.onChange = () => this.atmosphere?.invalidateShadows();
+        props.onChange = () => {
+            this.atmosphere?.invalidateShadows();
+            this.bounce?.invalidate();
+        };
         this.progress(0.97, 'Compiling shaders');
     }
 
@@ -1420,6 +1434,19 @@ export class Game {
                   ? this.editor.cursor
                   : this.cameraGroundPoint();
         this.atmosphere.update(dt, focus);
+
+        if (this.bounce) {
+            this.bounce.update(
+                dt,
+                focus,
+                this.atmosphere.lightDirection(),
+                this.atmosphere.bounceSun,
+                this.atmosphere.bounceSky,
+            );
+            // The probes' ground light replaces the uniform ground colour of the ambient light.
+            this.atmosphere.setGroundBounce(this.bounce.uniformGroundShare);
+        }
+
         this.atmosphere.skyAndSunLight(this.skyLight, this.sunLight);
         this.world.foliage.setLighting(
             this.skyLight,
@@ -1940,6 +1967,7 @@ export class Game {
             env.gust_speed ?? 1,
         );
         this.weather?.apply(env);
+        this.bounce?.setStrength(env.bounce_light ?? 1);
     }
 
     private readonly foliagePatches = new Map<number, Partial<FoliageType>>();
@@ -1956,6 +1984,7 @@ export class Game {
         this.manifest.foliage_types = types;
         this.world.foliage.setTypes(types);
         this.editor.setFoliageTypes(types);
+        this.bounce?.invalidate();
         this.foliagePatches.set(id, {
             ...this.foliagePatches.get(id),
             ...patch,
@@ -2056,6 +2085,7 @@ export class Game {
         this.world.material.setLayers(layers);
         this.world.foliage.setGroundCover(layers);
         this.editor.setLayers(layers);
+        this.bounce?.invalidate();
     }
 
     private async flushCoverPatches(): Promise<void> {
@@ -2148,6 +2178,7 @@ export class Game {
         this.world.foliage.setInteraction(g.grass_interaction !== false);
         this.world.props.setLodCrossfade(g.lod_crossfade !== false);
         this.atmosphere.setCloudShadows(g.cloud_shadows !== false);
+        this.bounce?.setQuality(g.bounce_light_quality ?? 'off');
         this.camera.far = g.draw_distance;
         this.camera.updateProjectionMatrix();
 
@@ -2244,6 +2275,11 @@ export class Game {
     private markDirty(channel: DirtyChannel): void {
         const wasClean = this.dirty.size === 0;
         this.dirty.add(channel);
+
+        if (channel !== 'meta' && channel !== 'splines') {
+            // Terrain, paint, water, foliage and props all reach the bounce light.
+            this.bounce?.invalidate();
+        }
 
         if (channel === 'heightmap') {
             this.viewModes.invalidateHeights();

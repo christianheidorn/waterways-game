@@ -43,8 +43,11 @@ itself in an embedded viewport. You switch between **Build** and **Play** withou
       rivers visibly flow along their course: downstream along the river splines, elsewhere downhill.
     - Colour, absorption, refraction and soft shorelines follow the water thickness, which the water reads per
       pixel from the scene depth of the same render pass (no extra refraction pass).
-    - Planar reflection of the water level nearest to the focus point (`water_quality` high: 60 % resolution;
-      medium: 40 %, redrawn every other frame; low: sky reflection only).
+    - Planar reflection of the water level nearest to the focus point (`water_quality` high: 50 % resolution;
+      medium: 40 %, redrawn every other frame; low: sky reflection only). It leaves out ground cover, grass,
+      flowers and reeds and the props' farthest LOD, and takes foliage LODs and impostors much sooner. When
+      that water covers less than ~2–3 % of the screen within 1.5 km (a grid of view rays against the plane,
+      with hysteresis), the pass is skipped and the water fades to the sky reflection over 0.4 s (and back).
     - Shorelines get animated foam (a bubbly lace with lines rolling in, broken into drifting patches), rapids
       white water, and shallow beds caustics.
     - An ocean ring extends to the horizon, and the view tints when the camera goes underwater.
@@ -307,7 +310,13 @@ Grass, flowers and reeds (bushes a little) are pushed aside by the character in 
 
 - Every instance of a type lives in one GPU storage buffer. Painting, erasing, re-scattering and type edits
   update only the changed ranges.
-- Each frame one compute pass per type tests every instance: cull distance × foliage distance, density falloff,
+- **Coarse culling first**: each frame the CPU tests every cell's bounds (instances and their bounding
+  spheres; tiles grown on the GPU: their column) against the cull distance, the view frustum, the reflection
+  camera and the shadow distance, and the culling pass runs only over the slots of the cells that pass (a
+  table of cell ranges, found per thread by binary search). Far and off-screen cells of a big map cost no
+  per-instance work. `profile_performance` reports slots, threads run, cells and coarse-visible cells
+  (`foliage.gpu_culling`).
+- Then one compute pass per type tests each instance of those cells: cull distance × foliage distance, density falloff,
   per-instance LOD with the LOD bias, the view frustum, and **Hi-Z occlusion**
   (`world/foliage/HiZ.ts`). Hi-Z builds a depth pyramid from the previous frame's depth and skips plants
   hidden behind terrain or other trees. It is conservative: anything uncertain counts as visible, and it is
@@ -320,8 +329,8 @@ Grass, flowers and reeds (bushes a little) are pushed aside by the character in 
 - The survivors are compacted into per-LOD lists, and each LOD draws with **one indirect draw call**. The CPU
   does no per-instance work, however much foliage a map has.
 - Shadow casters get their own lists, within the foliage shadow distance: all of them for the cached far
-  sun cascade, and the ones that reach into the near cascade for its every-frame pass (see
-  [Sun shadows](#sun-shadows)).
+  sun cascade (built only on the frames that cascade re-renders), and the ones that reach into the near
+  cascade for its every-frame pass (see [Sun shadows](#sun-shadows)).
 - The water's planar reflection gets its own cull against the mirrored camera (coarser LODs, no Hi-Z), so
   trees behind or beside the viewer still show in lakes and the sea.
 - Leaves and blades are translucent: sky light passes through the canopy and they glow when backlit, so
@@ -332,11 +341,22 @@ Grass, flowers and reeds (bushes a little) are pushed aside by the character in 
 
 On the WebGL 2 backend (no compute shaders), foliage uses CPU culling of 32–128 m cells with instanced meshes;
 sparse cells are merged into 256 m batches and distant terrain is drawn by quadtree nodes, so the fallback
-needs about as many draw calls as the pre-WebGPU renderer. There (no GPU compute) the editor moves its heavy
-CPU work to a **web worker** (`editor/workers/`): erosion brush steps (on a copy of the region they touch, one
-step in flight, results of a finished stroke dropped), the foliage scatter's noise candidates, and ground cover
-tiles (the worker keeps copies of the height, water and paint grids, patched after each edit). `?workers=1`
-or `?workers=0` forces the worker on or off; results are identical to the inline path.
+needs about as many draw calls as the pre-WebGPU renderer. Merged batches are culled against their instance
+box; shadow-casting ones outside the view move to a shadow-only render layer (`world/layers.ts`), so only the
+sun's shadow passes draw them, and the water reflection draws the ones its own camera sees.
+
+The editor moves its heavy CPU work to a **web worker** (`editor/workers/`) on both backends: erosion brush
+steps (on a copy of the region they touch, one step in flight, results of a finished stroke dropped) and the
+foliage scatter's noise candidates; on WebGL 2 also the ground cover tiles (WebGPU grows them on the GPU). The
+worker keeps copies of the height, water and paint grids, patched after each edit. `?workers=0` keeps
+everything on the main thread; results are identical to the inline path. The shore wetness and puddle map is
+recomputed only around an edit (the window it can affect), not over the whole map.
+
+**Distance thinning.** Grass and flowers (and, less, reeds and bushes) thin out with distance: beyond 15–30 %
+of their cull distance fewer instances are drawn (down to 18–35 % at the cull distance). The instances are
+shuffled within their cell, so the kept ones are an even subset; the ones at the edge of the kept share
+shrink away smoothly, and the survivors get wider (kept share^-0.4, at most 1.6×), so a far meadow stays
+about as green with a fraction of the blades. Both render paths drop the thinned instances before drawing.
 
 ## Player characters
 
@@ -363,13 +383,13 @@ leave these values alone:
 - artistic values: bloom intensity, saturation, contrast, vignette
 - frame-rate values: dynamic resolution, frame rate target, target FPS, FPS limit
 
-| Preset    | Draw dist. | Shadows (dist.) | AA   | AO          | Terrain tex. / aniso | Foliage density / dist. / shadow | Render scale / Retina cap |
-| --------- | ---------- | --------------- | ---- | ----------- | -------------------- | -------------------------------- | ------------------------- |
-| Low       | 4 km       | low (90 m)      | FXAA | off         | 512 / 2×             | 0.4 / 0.5× / off                 | 0.7 (FSR 1) / 1×          |
-| Medium    | 7 km       | medium (150 m)  | FXAA | off         | 1K / 4×              | 0.7 / 0.75× / 60 m               | 0.85 (FSR 1) / 1.25×      |
-| High      | 12 km      | high (220 m)    | TAA  | off         | 1K / 8×              | 1 / 1× / 120 m                   | 1 / 1.5×                  |
-| Epic      | 20 km      | ultra (400 m)   | TAA  | GTAO medium | 2K / 16×             | 1 / 1.5× / 250 m                 | 1 / 2×                    |
-| Cinematic | 30 km      | ultra (700 m)   | TAA  | GTAO high   | 2K / 16×             | 1 / 2× / 350 m                   | 1.25 (supersampled) / 3×  |
+| Preset    | Draw dist. | Shadows (dist.) | AA   | AO          | Terrain tex. / aniso | Foliage density / dist. / shadow | Render scale / Retina cap / Retina render scale |
+| --------- | ---------- | --------------- | ---- | ----------- | -------------------- | -------------------------------- | ----------------------------------------------- |
+| Low       | 4 km       | low (90 m)      | FXAA | off         | 512 / 2×             | 0.4 / 0.5× / off                 | 0.7 (FSR 1) / 1× / 0.5                          |
+| Medium    | 7 km       | medium (150 m)  | FXAA | off         | 1K / 4×              | 0.7 / 0.75× / 60 m               | 0.85 (FSR 1) / 1.25× / 0.6                      |
+| High      | 12 km      | high (220 m)    | TAA  | off         | 1K / 8×              | 1 / 1× / 120 m                   | 1 / 1.5× / 0.65                                 |
+| Epic      | 20 km      | ultra (400 m)   | TAA  | GTAO medium | 2K / 16×             | 1 / 1.5× / 250 m                 | 1 / 2× / 0.75                                   |
+| Cinematic | 30 km      | ultra (700 m)   | TAA  | GTAO high   | 2K / 16×             | 1 / 2× / 350 m                   | 1.25 (supersampled) / 3× / off                  |
 
 Low also switches off the LOD cross-fades, grass bending around the character (Foliage group), the cloud
 shadows (Shadows group), caustics and bounce light (Shading group) and footprints in snow (Effects group);
@@ -381,6 +401,15 @@ canvas); the browser upsamples the canvas to the screen. A MacBook's 2× Retina 
 has four times the pixels of the same window on a 1× screen, and every full-screen pass (TAA, light shafts,
 bloom, grading …) pays for each of them. At High, the cap of 1.5× outputs 56 % of the native pixels. Epic
 outputs native Retina (2×). 1× screens are not affected.
+
+**Retina render scale.** On high-DPI screens (pixel ratio 1.5 and up) `retina_render_scale` limits the scene
+itself to that share of the native device pixels per axis; temporal upscaling (TAAU with TAA, FSR 1
+otherwise) reconstructs the capped output, and the UI (HTML) stays sharp at native resolution. At High (0.65)
+a 2× screen renders the scene at 1.3× (42 % of the native pixels) and upscales it to the 1.5× output; Epic
+(0.75) renders 1.5× and upscales to native 2×. Low 0.5, Medium 0.6, Cinematic 1 (off). It is a limit on top
+of `render_scale`, and dynamic resolution starts from it. F10 → Resolution, the studio graphics settings and
+MCP (`set_device_graphics`, `update_game_settings`) set it; `profile_performance` reports it with the
+`native_pixel_share` the scene renders.
 
 **Render scale (TSR-style upscaling).** The render scale applies on top of the capped resolution, like
 Unreal's screen percentage:
@@ -563,7 +592,15 @@ How it works (`resources/game/world/`):
   sky's cloud layer is anchored to the world 500 m above the lowest ground, and every lit surface (terrain,
   water, foliage, props) looks up along the light into the same cloud field (same drift, coverage
   and softness, 3 octaves), so the shadows match the clouds overhead and move with the wind. They thin out as the
-  deck closes (the sun itself is dimmed then). Graphics `cloud_shadows`; they need sun shadows.
+  deck closes (the sun itself is dimmed then). Graphics `cloud_shadows`; they need sun shadows. The mask is
+  baked every 4th frame into a 512² texture spanning 6 km of the cloud plane around the focus
+  (`CloudShadowBake`), and lit pixels sample it (shifted by the wind drift since the bake, so the shadows keep
+  gliding) instead of evaluating the noise per pixel in every pass; points outside it fall back to the noise.
+
+**Staggered low-rate work.** Large uploads that run a few times a second (the wetness map after edits, the snow
+footprint texture, the bounce light probe atlas) share one slot per frame (`core/stagger.ts`), so they never
+land on the same frame.
+
 - **Fog** (`HeightFog.ts`): three's fog shader chunks are patched once, so every material (terrain, water,
   foliage, characters) gets exponential distance fog, analytic height fog and sun in-scattering. The fog
   colour follows the sky's horizon, so distant terrain melts into the sky.

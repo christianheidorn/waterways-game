@@ -388,10 +388,19 @@ reach the agent; without a key, the tools say which one to add under Settings �
   72M triangles per pass …".
 
 The foliage block also has `occluded` (instances hidden by Hi-Z occlusion), `drawn_late` (instances the
-second phase of two-phase occlusion found visible after all and drew in the same frame) and
-`two_phase_occlusion`. `resolution` includes the dynamic resolution `frame_rate_target`, the measured display
-`refresh_hz`, the `target_fps` it holds right now and `editor_worker` (erosion, scatter and ground cover run in a
-web worker, on WebGL 2).
+second phase of two-phase occlusion found visible after all and drew in the same frame),
+`two_phase_occlusion` and `gpu_culling` (WebGPU: instance `slots`, `threads` the culling passes ran — only the
+slots of cells that passed the coarse per-cell distance / frustum / shadow test —, `cells` and
+`visible_cells`). `resolution` includes the dynamic resolution `frame_rate_target`, the measured display
+`refresh_hz`, the `target_fps` it holds right now, `editor_worker` (erosion and scatter run in a web worker;
+on WebGL 2 ground cover too), `retina_render_scale` with `native_pixel_share` (scene pixels / native device
+pixels) and `water_reflection` (`rendering`, `size`, `every_nth_frame`, `screen_coverage` of the reflected
+water, `weight` of the planar over the sky reflection: the pass is skipped with little or far water).
+
+**Retina screens.** `retina_render_scale` (graphics; `set_device_graphics` `settings` for the open editor's
+browser, `update_game_settings` for the project) limits the scene to that share of the native device pixels
+per axis on screens with a pixel ratio of 1.5 and up, upscaled temporally (TAAU) to the output. Presets: Low
+0.5, Medium 0.6, High 0.65, Epic 0.75, Cinematic 1 (off).
 
 **Before / after.** `save_as: "before-trees"` stores the profile as a named baseline of the map
 (`storage/app/private/performance/{map id}/{name}.json`, names are slugged; the same name replaces it). A later

@@ -132,6 +132,8 @@ function emptyVolume(res = 1): THREE.Data3DTexture {
     tex.wrapR = THREE.ClampToEdgeWrapping;
     tex.generateMipmaps = false;
     tex.unpackAlignment = 1;
+    // Sample clones bind as plain textures on WebGPU unless the texture says it is 3D.
+    (tex as THREE.Data3DTexture & { is3DTexture: boolean }).is3DTexture = true;
     tex.needsUpdate = true;
 
     return tex;

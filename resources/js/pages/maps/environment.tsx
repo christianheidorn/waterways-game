@@ -3,6 +3,7 @@ import {
     Clapperboard,
     CloudFog,
     CloudRain,
+    Sparkles,
     SunMedium,
     Waves,
 } from 'lucide-react';
@@ -54,6 +55,10 @@ const SECTIONS: SettingsSection[] = [
             'lightning_frequency',
             'thunder_volume',
             'wetness',
+            'puddles',
+            'puddle_dry_time',
+            'footprint_depth',
+            'footprint_fade_time',
         ],
     },
     {
@@ -113,6 +118,23 @@ const SECTIONS: SettingsSection[] = [
             'sea_level',
         ],
     },
+    {
+        title: 'Shores, rivers & caustics',
+        description:
+            'Foam where water meets land, rivers flowing along their course, and light patterns on shallow beds.',
+        icon: Sparkles,
+        fields: [
+            'shore_foam',
+            'foam_width',
+            'foam_intensity',
+            'foam_breakup',
+            'rapids_foam',
+            'flow_speed',
+            'caustics_intensity',
+            'caustics_scale',
+            'caustics_depth',
+        ],
+    },
 ];
 
 const percent = (v: number) => `${Math.round(v * 100)}%`;
@@ -123,6 +145,9 @@ const FORMATTERS = {
     cloud_coverage: percent,
     precipitation: percent,
     wetness: percent,
+    puddles: percent,
+    footprint_depth: percent,
+    foam_breakup: percent,
     thunder_volume: percent,
     wind_direction: formatWindDirection,
     cloud_shadow_strength: percent,

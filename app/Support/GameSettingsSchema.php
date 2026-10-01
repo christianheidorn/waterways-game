@@ -89,6 +89,8 @@ final class GameSettingsSchema
                 SettingField::select('water_quality', 'Water quality', 'medium', [
                     'low' => 'Low', 'medium' => 'Medium', 'high' => 'High',
                 ], 'Resolution of the refraction/depth pass and planar reflections used by water.'),
+                SettingField::boolean('caustics', 'Caustics', true, 'Animated light patterns on shallow river and lake beds.'),
+                SettingField::boolean('snow_footprints', 'Snow footprints', true, 'The character leaves footprints in snow cover that fade and fill with new snow.'),
                 // Foliage
                 SettingField::number('foliage_density', 'Foliage density', 1, 0, 1, 0.05, '×', 'Scales the number of rendered foliage instances.'),
                 SettingField::number('foliage_distance', 'Foliage distance', 1, 0.25, 3, 0.05, '×', 'Scales every foliage type\'s cull distance.'),

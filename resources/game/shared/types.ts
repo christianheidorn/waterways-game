@@ -52,6 +52,12 @@ export type EnvironmentSettings = {
     foam_width: number;
     foam_intensity: number;
     rapids_foam: boolean;
+    /** 0-1: breaks the shoreline foam into drifting patches (0 = an even band). */
+    foam_breakup?: number;
+    /** Caustics on shallow beds: brightness (0 = off), cell size (m) and the depth they reach (m). */
+    caustics_intensity?: number;
+    caustics_scale?: number;
+    caustics_depth?: number;
     ocean_enabled: boolean;
     sea_level: number;
     // ---- Weather (see resources/game/world/Weather.ts) ----
@@ -70,6 +76,12 @@ export type EnvironmentSettings = {
     height_fog_density: number;
     /** 0-1 how wet surfaces look (darker, glossier ground). */
     wetness: number;
+    /** 0-1 how much rain collects in hollows as puddles; seconds full puddles take to dry. */
+    puddles?: number;
+    puddle_dry_time?: number;
+    /** 0-1 depth of the character's footprints in snow; seconds they take to fade without snowfall. */
+    footprint_depth?: number;
+    footprint_fade_time?: number;
     // ---- Camera & look: artistic post-processing per map (resources/game/core/PostFx.ts) ----
     /** Colour grade preset, applied as a generated 3D LUT. */
     color_grade: ColorGrade;
@@ -216,6 +228,10 @@ export type GraphicsSettings = {
     grass_interaction: boolean;
     /** Drifting cloud shadows on everything the sun lights (needs sun shadows). */
     cloud_shadows: boolean;
+    /** Animated caustics on shallow river / lake beds. */
+    caustics: boolean;
+    /** Footprints in snow cover (a trail texture around the character). */
+    snow_footprints: boolean;
     /** Weather particles, lightning, splashes. */
     effects_quality: QualityLevel;
     cloud_quality: 'off' | 'low' | 'medium' | 'high';

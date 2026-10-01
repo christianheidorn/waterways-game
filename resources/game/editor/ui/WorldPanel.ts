@@ -105,6 +105,10 @@ const ENV_SECTIONS: { title: string; match: (key: string) => boolean }[] = [
                 'lightning_frequency',
                 'thunder_volume',
                 'wetness',
+                'puddles',
+                'puddle_dry_time',
+                'footprint_depth',
+                'footprint_fade_time',
             ].includes(k) ||
             k.startsWith('wind_') ||
             k.startsWith('gust_'),
@@ -113,7 +117,7 @@ const ENV_SECTIONS: { title: string; match: (key: string) => boolean }[] = [
     {
         title: 'Water',
         match: (k) =>
-            /^(water_|wave_|flow_|shore_|foam_|rapids_|ocean_|sea_)/.test(k),
+            /^(water_|wave_|flow_|shore_|foam_|rapids_|caustics_|ocean_|sea_)/.test(k),
     },
     { title: 'Camera & look', match: () => true },
 ];

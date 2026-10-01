@@ -45,6 +45,10 @@ final class EnvironmentDefaults
             SettingField::number('height_fog_height', 'Valley fog height', 0, 0, 2000, 1, 'm', 'Fog that pools in valleys, up to this height above the lowest point of the map (or sea level with an ocean). 0 = off.'),
             SettingField::number('height_fog_density', 'Valley fog density', 0.012, 0, 0.1, 0.0005, null, 'Thickness of the valley fog at its base.'),
             SettingField::number('wetness', 'Ground wetness', 0, 0, 1, 0.01, null, 'How wet the ground looks. Rain also soaks the ground over time.'),
+            SettingField::number('puddles', 'Puddles', 0.6, 0, 1, 0.01, null, 'How much rain water collects in hollows and on flat low ground as reflective puddles that ripple in the rain (0 = none). They fill while it rains and dry afterwards.'),
+            SettingField::number('puddle_dry_time', 'Puddle drying time', 240, 10, 1800, 5, 's', 'How long full puddles take to dry up after the rain stops.'),
+            SettingField::number('footprint_depth', 'Footprints in snow', 0.7, 0, 1, 0.01, null, 'How deep the character\'s footprints press into snow cover (0 = none). Needs the Snow footprints graphics switch.'),
+            SettingField::number('footprint_fade_time', 'Footprints fade', 300, 10, 1800, 5, 's', 'How long footprints take to fade without snowfall; falling snow fills them much faster.'),
             // Camera & look (post-processing; each effect also needs its quality switch in Graphics settings)
             SettingField::select('color_grade', 'Colour grade', 'filmic', [
                 'neutral' => 'Neutral', 'filmic' => 'Filmic', 'golden_hour' => 'Golden hour', 'teal_orange' => 'Teal & orange',
@@ -82,7 +86,11 @@ final class EnvironmentDefaults
             SettingField::boolean('shore_foam', 'Shoreline foam', true, 'Foam where water meets land, rocks and plants.'),
             SettingField::number('foam_width', 'Foam width', 0.8, 0.1, 6, 0.05, 'm', 'Water depth up to which shoreline foam appears.'),
             SettingField::number('foam_intensity', 'Foam intensity', 0.45, 0, 1, 0.01),
+            SettingField::number('foam_breakup', 'Foam breakup', 0.6, 0, 1, 0.01, null, 'Breaks the shoreline foam into drifting patches and streaks (0 = an even band).'),
             SettingField::boolean('rapids_foam', 'Rapids foam', true, 'White water where rivers flow fast.'),
+            SettingField::number('caustics_intensity', 'Caustics', 0.8, 0, 2, 0.01, null, 'Dancing light patterns the waves focus onto shallow river and lake beds (0 = off). Needs the Caustics graphics switch.'),
+            SettingField::number('caustics_scale', 'Caustics size', 2.5, 0.5, 10, 0.1, 'm', 'Size of the caustic light cells.'),
+            SettingField::number('caustics_depth', 'Caustics depth', 4, 0.5, 20, 0.1, 'm', 'Water depth down to which caustics reach the bed (they fade with depth).'),
             SettingField::boolean('ocean_enabled', 'Ocean', false, 'Fill everything below sea level that touches the map edge with ocean.'),
             SettingField::number('sea_level', 'Sea level', 0, -500, 5000, 0.1, 'm'),
         ]);

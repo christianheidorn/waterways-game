@@ -32,6 +32,7 @@ import {
     LOD_FADE_BAND,
     RANK_FADE,
     rootTintFor,
+    setLodFadeMask,
     windStiffness,
 } from './foliage/FoliageMaterial';
 import type {
@@ -1391,8 +1392,21 @@ export class Foliage {
 
     /** Dithered LOD cross-fades (graphics lod_crossfade); off switches LODs at once. */
     setLodCrossfade(enabled: boolean): void {
+        if (this.globals.lodFade.value > 0 === enabled) {
+            return;
+        }
+
         this.globals.lodFade.value = enabled ? LOD_FADE_BAND : 0;
         this.needsEval = true;
+
+        // The dither mask is only compiled into the shaders while cross-fades are on.
+        for (const renderer of this.renderers.values()) {
+            for (const material of renderer.lodMaterials.flat()) {
+                setLodFadeMask(material, enabled);
+            }
+
+            renderer.gpu?.setLodFadeMask(enabled);
+        }
     }
 
     /** The cross-fade dither changes every frame (for TAA to resolve), or stays fixed. */
@@ -2252,7 +2266,6 @@ export class Foliage {
         const g = this.globals;
         const front =
             (GUST_BASE + GUST_PER_WIND * g.wind.value) * this.gustSpeed * dt;
-        g.gustOffsetPrev.value.copy(g.gustOffset.value);
         g.gustOffset.value.addScaledVector(g.windDir.value, front);
 
         if (this.temporalDither) {

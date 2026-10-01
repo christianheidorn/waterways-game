@@ -33,7 +33,12 @@ import type {
     InstanceSource,
     RootTint,
 } from './FoliageMaterial';
-import { createFoliageMaterial, lodBandT, RANK_FADE } from './FoliageMaterial';
+import {
+    createFoliageMaterial,
+    lodBandT,
+    RANK_FADE,
+    setLodFadeMask,
+} from './FoliageMaterial';
 import type { HiZ } from './HiZ';
 import { occludedNode } from './HiZ';
 import { INSTANCE_FLOATS, writeInstance } from './instances';
@@ -448,6 +453,13 @@ export class GpuFoliageType {
 
         for (const mesh of this.reflectionDraws) {
             mesh.visible = reflection;
+        }
+    }
+
+    /** Adds or removes the LOD cross-fade mask of every draw's material. */
+    setLodFadeMask(enabled: boolean): void {
+        for (const material of this.materials) {
+            setLodFadeMask(material, enabled);
         }
     }
 

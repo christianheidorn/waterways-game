@@ -15,6 +15,7 @@ import {
     floor,
     Fn,
     hash,
+    If,
     interleavedGradientNoise,
     length,
     log2,
@@ -118,9 +119,8 @@ export type FoliageGlobals = {
     lightingOnly: FloatUniform;
     /** Travelling gusts: x = strength (0 = steady wind), y = 1 / patch size (1/m). */
     gust: THREE.UniformNode<'vec2', THREE.Vector2>;
-    /** Downwind offset of the gust field (m), accumulated so speed changes never jump; and last frame's. */
+    /** Downwind offset of the gust field (m), accumulated so speed changes never jump. */
     gustOffset: THREE.UniformNode<'vec2', THREE.Vector2>;
-    gustOffsetPrev: THREE.UniformNode<'vec2', THREE.Vector2>;
     /** Character trail: xyz = position, w = push strength (0 = unused), newest first. */
     interactors: THREE.UniformArrayNode<'vec4'>;
     /** Radius (m) around an interactor within which grass bends away. */
@@ -158,7 +158,6 @@ export function createFoliageGlobals(
         lightingOnly: uniform(0),
         gust: uniform(new THREE.Vector2(0.5, 1 / 40)),
         gustOffset: uniform(new THREE.Vector2()),
-        gustOffsetPrev: uniform(new THREE.Vector2()),
         interactors: uniformArray<'vec4'>(
             Array.from({ length: INTERACTORS }, () => new THREE.Vector4()),
             'vec4',
@@ -230,15 +229,35 @@ export function lodBandT(
     return d.sub(at.sub(band)).div(band).clamp(0, 1);
 }
 
-/** Discards the fragments this LOD leaves to its neighbour (screen-space dither, shadow maps too). */
+/**
+ * Discards the fragments this LOD leaves to its neighbour (screen-space dither, shadow maps too). The
+ * mask is only part of the shader while cross-fades are on (see setLodFadeMask): a discard costs
+ * early depth testing, so with hard switches it is left out.
+ */
 function lodFadeMask(material: THREE.NodeMaterial, g: FoliageGlobals): void {
     const range = lodFadeVarying();
     const n = interleavedGradientNoise(screenCoordinate.xy)
         .add(g.ditherFrame.mul(range.z))
         .fract();
-    material.maskNode = n
+    material.userData.lodFadeMask = n
         .greaterThanEqual(range.x)
         .and(n.lessThan(range.y)) as unknown as Node<'bool'>;
+    setLodFadeMask(material, g.lodFade.value > 0);
+}
+
+/** Adds (or removes) a foliage material's cross-fade mask; the material recompiles on change. */
+export function setLodFadeMask(
+    material: THREE.Material,
+    enabled: boolean,
+): void {
+    const m = material as THREE.NodeMaterial;
+    const mask = (m.userData.lodFadeMask as Node<'bool'> | undefined) ?? null;
+    const next = enabled ? mask : null;
+
+    if (mask && m.maskNode !== next) {
+        m.maskNode = next;
+        m.needsUpdate = true;
+    }
 }
 
 /**
@@ -303,12 +322,13 @@ function foliagePosition(
         // world-space wind direction is brought into instance space first (transpose × wind).
         const windLocal = r0.xyz.mul(g.windDir.x).add(r2.xyz.mul(g.windDir.y));
         const windDir = normalize(windLocal.xz.add(vec2(1e-5))).toVar();
-        const swayed = (time: Node<'float'>, gustOffset: Node<'vec2'>) => {
+        // Travelling gusts: patches of stronger wind sweep downwind (calmer between them). Evaluated
+        // once (also for last frame's position: the field moves a few centimetres per frame).
+        const field = gustField(g, instPos.xz, g.gustOffset, g.time).toVar();
+        const swayed = (time: Node<'float'>) => {
             const gust = sin(time.mul(0.7).add(instPos.x.mul(0.01)))
                 .mul(0.5)
                 .add(0.5);
-            // Travelling gusts: patches of stronger wind sweep downwind (calmer between them).
-            const field = gustField(g, instPos.xz, gustOffset, time);
             const gusting = float(1)
                 .add(g.gust.x.mul(field.mul(1.5).sub(0.4)))
                 .max(0.1);
@@ -333,13 +353,19 @@ function foliagePosition(
 
             return vec3(q.x.add(offset.x), q.y, q.z.add(offset.y));
         };
-        const p = swayed(g.time, g.gustOffset).toVar();
-        const pPrev = swayed(g.prevTime, g.gustOffsetPrev).toVar();
+        const p = swayed(g.time).toVar();
+        const pPrev = swayed(g.prevTime).toVar();
 
         if (interact > 0) {
             // Bent away from the character: tips move furthest, roots stay put (the push is
             // brought into instance space like the wind).
-            const push = interactionPush(g, instPos).mul(interact).toVar();
+            const push = vec2(0).toVar();
+
+            // Skipped while there is no character (editor camera) or the switch is off.
+            If(g.interactors.element(0).w.greaterThan(0), () => {
+                push.assign(interactionPush(g, instPos).mul(interact));
+            });
+
             const amount = length(push);
             const local = r0.xyz.mul(push.x).add(r2.xyz.mul(push.y)).xz;
             const dir = local.div(length(local).max(1e-5)).mul(amount);

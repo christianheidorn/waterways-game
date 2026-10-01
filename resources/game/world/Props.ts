@@ -17,7 +17,7 @@ import { MeshShape, trianglesOf } from './collision/shapes';
 import type { Shape } from './collision/shapes';
 import { voxelBoxes } from './collision/voxelBoxes';
 import { simplifyGeometry, triangleCount } from './FoliageLod';
-import { LOD_FADE_BAND } from './foliage/FoliageMaterial';
+import { LOD_FADE_BAND, setLodFadeMask } from './foliage/FoliageMaterial';
 import type { Heightfield } from './Heightfield';
 
 /** One draw: a geometry in the model's normalised space (base centre at the origin, library size). */
@@ -514,6 +514,13 @@ export class Props implements CollisionProvider {
         if (enabled !== this.crossfade) {
             this.crossfade = enabled;
             this.dirty = true;
+
+            // The dither mask is only compiled into the shaders while cross-fades are on.
+            for (const batch of this.batches.values()) {
+                for (const material of batch.template.fadeMaterials.values()) {
+                    setLodFadeMask(material, enabled);
+                }
+            }
         }
     }
 
@@ -879,7 +886,11 @@ export class Props implements CollisionProvider {
                 const mesh = new THREE.InstancedMesh(
                     part.geometry,
                     fade
-                        ? crossfadeMaterial(batch.template, part.material)
+                        ? crossfadeMaterial(
+                              batch.template,
+                              part.material,
+                              this.crossfade,
+                          )
                         : part.material,
                     capacity,
                 );
@@ -1126,10 +1137,11 @@ function countTriangles(parts: Part[]): number {
 function crossfadeMaterial(
     template: Template,
     source: THREE.Material | THREE.Material[],
+    enabled: boolean,
 ): THREE.Material | THREE.Material[] {
     if (Array.isArray(source)) {
         return source.map(
-            (m) => crossfadeMaterial(template, m) as THREE.Material,
+            (m) => crossfadeMaterial(template, m, enabled) as THREE.Material,
         );
     }
 
@@ -1155,9 +1167,10 @@ function crossfadeMaterial(
         if ((material as THREE.NodeMaterial).isNodeMaterial) {
             const range = attribute(CROSSFADE_ATTRIBUTE, 'vec2');
             const n = interleavedGradientNoise(screenCoordinate.xy);
-            (material as THREE.NodeMaterial).maskNode = n
+            material.userData.lodFadeMask = n
                 .greaterThanEqual(range.x)
                 .and(n.lessThan(range.y)) as unknown as THREE.Node<'bool'>;
+            setLodFadeMask(material, enabled);
         }
 
         template.fadeMaterials.set(source, material);

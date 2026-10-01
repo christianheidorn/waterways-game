@@ -21,6 +21,8 @@ import {
 /** Particle kinds: droplets fly on ballistic arcs and stretch with speed, spray puffs billow and fade. */
 const DROP = 0;
 const SPRAY = 1;
+/** Air bubbles rising under water (a swimmer's breath and strokes), popping at the surface. */
+const BUBBLE = 2;
 /** Pool size. */
 const MAX_PARTICLES = 700;
 const GRAVITY = 9.81;
@@ -188,6 +190,31 @@ export class Splashes {
         }
     }
 
+    /**
+     * Air bubbles under water at (x, y, z): `count` bubbles of about `size` m that wobble up and pop at
+     * the surface (with a tiny ring, see onDropLanded).
+     */
+    bubbles(x: number, y: number, z: number, count: number, size = 0.02): void {
+        if (!this.enabled) {
+            return;
+        }
+
+        for (let i = 0; i < count; i++) {
+            const s = size * (0.4 + Math.random() * 1.2);
+            this.emit(
+                x + (Math.random() - 0.5) * 0.25,
+                y + (Math.random() - 0.5) * 0.2,
+                z + (Math.random() - 0.5) * 0.25,
+                (Math.random() - 0.5) * 0.3,
+                0.2 + Math.random() * 0.4,
+                (Math.random() - 0.5) * 0.3,
+                s,
+                6,
+                BUBBLE,
+            );
+        }
+    }
+
     /** One drop falling from a wet character. */
     drip(x: number, y: number, z: number): void {
         if (!this.enabled) {
@@ -232,6 +259,25 @@ export class Splashes {
 
                         continue;
                     }
+                }
+            } else if (p.kind === BUBBLE) {
+                // Bubbles rise towards their terminal speed (bigger ones faster) and wobble.
+                const rise = 0.25 + Math.min(0.5, p.size * 12);
+                p.vy += (rise - p.vy) * Math.min(1, dt * 3);
+                const drag = Math.exp(-dt * 2);
+                p.vx = p.vx * drag + Math.sin(p.age * 11 + p.size * 900) * 0.4 * dt;
+                p.vz = p.vz * drag + Math.cos(p.age * 9 + p.size * 700) * 0.4 * dt;
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                p.z += p.vz * dt;
+                const water = this.surfaceAt(p.x, p.z);
+
+                if (water === null || p.y >= water - p.size) {
+                    if (water !== null && Math.random() < 0.3) {
+                        this.onDropLanded?.(p.x, p.z, p.size * 0.5);
+                    }
+
+                    continue;
                 }
             } else {
                 // Spray slows in the air and rises a little.
@@ -337,6 +383,7 @@ export class Splashes {
         const kind = vel.w.floor();
         const age = vel.w.fract();
         const isDrop = select(kind.lessThan(0.5), float(1), float(0));
+        const isBubble = select(kind.greaterThan(1.5), float(1), float(0));
         const toCam = normalize(cameraPosition.sub(centre));
         const speed = length(vel.xyz);
         // Droplets stretch along their motion (motion blur), puffs face the camera.
@@ -357,15 +404,29 @@ export class Splashes {
             .add(axis.mul(positionGeometry.y.mul(size.mul(stretch))));
         const vAge = varying(age);
         const vDrop = varying(isDrop);
+        const vBubble = varying(isBubble);
         const p = vec2(positionGeometry.x, positionGeometry.y).mul(2);
         const r = length(p);
         const dropShape = smoothstep(1, 0.35, r);
         const puffShape = smoothstep(1, 0, r).mul(smoothstep(1, 0, r));
-        const shape = mix(puffShape.mul(0.35), dropShape.mul(0.85), vDrop);
+        // Bubbles: a bright rim and a glint, clear inside.
+        const bubbleShape = smoothstep(1, 0.8, r)
+            .mul(smoothstep(0.45, 0.85, r))
+            .mul(0.9)
+            .add(smoothstep(0.35, 0, length(p.sub(vec2(-0.3, 0.3)))).mul(0.8));
+        const shape = mix(
+            mix(puffShape.mul(0.35), dropShape.mul(0.85), vDrop),
+            bubbleShape,
+            vBubble,
+        );
         const life = mix(
-            vAge.oneMinus().mul(vAge.oneMinus()),
-            smoothstep(1, 0.7, vAge),
-            vDrop,
+            mix(
+                vAge.oneMinus().mul(vAge.oneMinus()),
+                smoothstep(1, 0.7, vAge),
+                vDrop,
+            ),
+            smoothstep(0, 0.05, vAge),
+            vBubble,
         );
         const material = new THREE.MeshBasicNodeMaterial({
             transparent: true,

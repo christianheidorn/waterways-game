@@ -15,9 +15,11 @@ export type WaderState = {
     height: number;
     swimming: boolean;
     yaw: number;
+    /** The head is under water (diving). */
+    headUnder?: boolean;
 };
 
-export type WaterSound = 'step' | 'splash' | 'stroke';
+export type WaterSound = 'step' | 'splash' | 'stroke' | 'bubbles';
 
 /** Snapshot for get_editor_state / control_player. */
 export type WaterInteractionState = {
@@ -26,6 +28,8 @@ export type WaterInteractionState = {
     water_depth_m: number;
     wet: number;
     wet_line_m: number;
+    /** The head is under water. */
+    underwater: boolean;
 };
 
 /**
@@ -40,6 +44,7 @@ export class WaterInteraction {
     readonly wetness = new CharacterWetness();
     wading = false;
     depth = 0;
+    underwater = false;
     /** Sounds (WeatherAudio.waterSound). */
     onSound: ((kind: WaterSound, volume: number) => void) | null = null;
     private swimming = false;
@@ -49,6 +54,7 @@ export class WaterInteraction {
     private lastSubmerged = 0;
     private lastVy = 0;
     private dripCarry = 0;
+    private bubbleCarry = 0;
     private wasCharacter = false;
 
     constructor(private readonly water: Water) {
@@ -158,6 +164,7 @@ export class WaterInteraction {
             this.wasCharacter = false;
             this.wading = false;
             this.swimming = false;
+            this.underwater = false;
             this.depth = 0;
             characterSoak.amount.value = 0;
         }
@@ -172,6 +179,7 @@ export class WaterInteraction {
             water_depth_m: Math.round(this.depth * 100) / 100,
             wet: Math.round(this.wetness.amount * 100) / 100,
             wet_line_m: Math.round(this.wetness.line * 100) / 100,
+            underwater: this.underwater,
         };
     }
 
@@ -187,6 +195,7 @@ export class WaterInteraction {
         const moving = speed > 0.3;
         this.depth = Math.max(0, submerged);
         this.swimming = c.swimming;
+        this.underwater = !!c.headUnder;
         this.wading = !c.swimming && submerged > WADE_MIN_DEPTH;
 
         // Falling in: crossing the surface downwards.
@@ -216,7 +225,7 @@ export class WaterInteraction {
         if (this.wading && level !== null) {
             this.wade(dt, c, level, submerged, speed, dirX, dirZ);
         } else if (c.swimming && level !== null) {
-            this.swim(dt, c, speed, dirX, dirZ);
+            this.swim(dt, c, level, speed, dirX, dirZ);
         } else {
             this.stride = 0;
         }
@@ -311,11 +320,60 @@ export class WaterInteraction {
     private swim(
         dt: number,
         c: WaderState,
+        level: number,
         speed: number,
         dirX: number,
         dirZ: number,
     ): void {
         const p = c.position;
+
+        // Under water: no rings on the surface (unless just below it), bubbles from the breath and
+        // the strokes instead.
+        if (c.headUnder) {
+            const head = p.y + c.height * 0.85;
+            this.bubbleCarry += dt * (1.5 + speed * 2);
+
+            while (this.bubbleCarry >= 1) {
+                this.bubbleCarry -= 1;
+                this.splashes.bubbles(
+                    p.x - dirX * 0.1,
+                    head,
+                    p.z - dirZ * 0.1,
+                    1 + Math.floor(Math.random() * 3),
+                    0.015,
+                );
+            }
+
+            this.strokePhase += dt * (0.8 + speed * 0.5);
+
+            if (this.strokePhase >= 1) {
+                this.strokePhase = 0;
+
+                if (speed > 0.3) {
+                    this.splashes.bubbles(
+                        p.x + dirX * 0.4,
+                        p.y + c.height * 0.5,
+                        p.z + dirZ * 0.4,
+                        5,
+                        0.01,
+                    );
+                    this.onSound?.('bubbles', 0.3);
+                }
+            }
+
+            // A diver close below the surface still pushes a faint bulge.
+            if (head > level - 1 && speed > 0.2) {
+                this.water.ripples.disturb({
+                    x: p.x,
+                    z: p.z,
+                    radius: 0.4,
+                    amount: Math.min(2, speed) * dt * 0.02,
+                    foam: 0,
+                });
+            }
+
+            return;
+        }
 
         // Wake behind the body.
         if (speed > 0.2) {

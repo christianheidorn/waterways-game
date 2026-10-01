@@ -10,6 +10,12 @@ const MUTE_KEY = 'waterways.muted';
 export class WeatherAudio {
     private ctx: AudioContext | null = null;
     private master: GainNode | null = null;
+    /** Low-pass after the master: everything sounds muffled with the listener under water. */
+    private muffle: BiquadFilterNode | null = null;
+    /** Low rumble of the water around a submerged listener. */
+    private underGain: GainNode | null = null;
+    private underwater = 0;
+    private lastUnderwater = -1;
     private rainGain: GainNode | null = null;
     private rainHeavyGain: GainNode | null = null;
     private windGain: GainNode | null = null;
@@ -150,13 +156,48 @@ export class WeatherAudio {
     }
 
     /**
+     * The listener (camera) under water, 0-1 (eased across the surface): every sound passes a low-pass
+     * that closes to a few hundred hertz (muffled), and a low rumble of the water fades in.
+     */
+    setUnderwater(amount: number): void {
+        this.underwater = amount;
+        const ctx = this.ctx;
+
+        if (!ctx || !this.muffle || !this.underGain) {
+            return;
+        }
+
+        if (Math.abs(amount - this.lastUnderwater) < 0.01) {
+            return;
+        }
+
+        this.lastUnderwater = amount;
+        // Exponential in frequency: 20 kHz (open) → 420 Hz (submerged).
+        this.muffle.frequency.setTargetAtTime(
+            20000 * Math.pow(420 / 20000, amount),
+            ctx.currentTime,
+            0.06,
+        );
+        this.underGain.gain.setTargetAtTime(amount * 0.35, ctx.currentTime, 0.2);
+    }
+
+    /**
      * Water sounds near the listener (WaterInteraction): a slosh per wading step, a stroke while swimming,
      * a splash (volume 0-1 grows with the impact) — short filtered noise bursts.
      */
-    waterSound(kind: 'step' | 'splash' | 'stroke', volume: number): void {
+    waterSound(
+        kind: 'step' | 'splash' | 'stroke' | 'bubbles',
+        volume: number,
+    ): void {
         const ctx = this.ctx;
 
         if (!ctx || !this.master || !this.white || volume <= 0) {
+            return;
+        }
+
+        if (kind === 'bubbles') {
+            this.bubbleSound(ctx, this.master, volume);
+
             return;
         }
 
@@ -193,6 +234,35 @@ export class WeatherAudio {
         src.connect(band).connect(g).connect(this.master);
         src.start(start, Math.random() * 1.5);
         src.stop(start + duration + 0.05);
+    }
+
+    /** A burst of bubbles: a few short sine "blips" whose pitch rises as each bubble rings. */
+    private bubbleSound(
+        ctx: AudioContext,
+        out: AudioNode,
+        volume: number,
+    ): void {
+        const count = 3 + Math.floor(Math.random() * 5);
+
+        for (let i = 0; i < count; i++) {
+            const start = ctx.currentTime + 0.01 + Math.random() * 0.25;
+            const f0 = 300 + Math.random() * 900;
+            const duration = 0.04 + Math.random() * 0.06;
+            const osc = ctx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(f0, start);
+            osc.frequency.exponentialRampToValueAtTime(
+                f0 * 1.8,
+                start + duration,
+            );
+            const g = ctx.createGain();
+            g.gain.setValueAtTime(0.0001, start);
+            g.gain.exponentialRampToValueAtTime(volume * 0.12, start + 0.005);
+            g.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+            osc.connect(g).connect(out);
+            osc.start(start);
+            osc.stop(start + duration + 0.02);
+        }
     }
 
     /** Thunder for a strike `distance` metres away (delayed by the speed of sound). */
@@ -303,7 +373,21 @@ export class WeatherAudio {
         const pink = noiseBuffer(ctx, 4, 'pink');
 
         this.master = ctx.createGain();
-        this.master.connect(ctx.destination);
+        this.muffle = ctx.createBiquadFilter();
+        this.muffle.type = 'lowpass';
+        this.muffle.frequency.value = 20000;
+        this.muffle.Q.value = 0.5;
+        this.master.connect(this.muffle).connect(ctx.destination);
+        // Under water: a dull, low rumble of the water mass (brown noise, low-passed hard).
+        const underSrc = loop(ctx, this.brown);
+        const underLp = ctx.createBiquadFilter();
+        underLp.type = 'lowpass';
+        underLp.frequency.value = 160;
+        this.underGain = ctx.createGain();
+        this.underGain.gain.value = 0;
+        underSrc.connect(underLp).connect(this.underGain).connect(this.muffle);
+        this.lastUnderwater = -1;
+        this.setUnderwater(this.underwater);
 
         // Rain: bright hiss + a lower "heavy rain" wash.
         const rainSrc = loop(ctx, pink);

@@ -26,6 +26,7 @@ import type {
 import type { AgentContext } from './AgentCommands';
 import { Player } from '../player/Player';
 import { ThirdPersonCamera } from '../player/ThirdPersonCamera';
+import type { CameraWater } from '../player/ThirdPersonCamera';
 import type {
     GameMode,
     GameStats,
@@ -68,7 +69,7 @@ import { SplatMap } from '../world/SplatMap';
 import { Terrain } from '../world/Terrain';
 import { TerrainMaterial } from '../world/TerrainMaterial';
 import { Water } from '../world/Water';
-import type { WaterBodiesFile } from '../world/Water';
+import type { WaterBodiesFile, WaterSurfaceSample } from '../world/Water';
 import {
     REFLECTION_FADE,
     REFLECTION_OFF,
@@ -1377,8 +1378,38 @@ export class Game {
             waterLevelAt: (x: number, z: number) =>
                 this.world.water.levelAt(x, z),
             collision: this.collision,
+            surfaceAt: (x: number, z: number) =>
+                this.world.water.sampleSurface(x, z, this.playerSurface),
         };
     }
+
+    private readonly playerSurface: WaterSurfaceSample = {
+        level: 0,
+        height: 0,
+        normal: new THREE.Vector3(),
+        velocity: new THREE.Vector3(),
+        depth: 0,
+        body: null,
+    };
+
+    /** The third-person camera stays on the character's side of the water surface. */
+    private cameraWater(): CameraWater {
+        return {
+            surfaceAt: (x, z) =>
+                this.world.water.sampleSurface(x, z, this.cameraSurface)
+                    ?.height ?? null,
+            under: this.player.swimming && this.player.diving,
+        };
+    }
+
+    private readonly cameraSurface: WaterSurfaceSample = {
+        level: 0,
+        height: 0,
+        normal: new THREE.Vector3(),
+        velocity: new THREE.Vector3(),
+        depth: 0,
+        body: null,
+    };
 
     /**
      * Walk mode (build mode, J or the Walk button): the character drops at the point under the cursor
@@ -1459,7 +1490,13 @@ export class Game {
             return;
         }
 
-        this.player.update(dt, input, this.playerCamera.yaw, this.playerEnv());
+        this.player.update(
+            dt,
+            input,
+            this.playerCamera.yaw,
+            this.playerEnv(),
+            this.playerCamera.pitch,
+        );
         this.playerCamera.update(
             dt,
             input,
@@ -1467,6 +1504,7 @@ export class Game {
             this.world.heights,
             input.buttons.has(2) || this.pointerLocked,
             this.collision,
+            this.cameraWater(),
         );
     }
 
@@ -1565,6 +1603,7 @@ export class Game {
                       height: this.player.height,
                       swimming: this.player.swimming,
                       yaw: this.player.yaw,
+                      headUnder: this.player.headUnder,
                   }
                 : null,
         );
@@ -1647,7 +1686,13 @@ export class Game {
             return;
         }
 
-        this.player.update(dt, input, this.playerCamera.yaw, this.playerEnv());
+        this.player.update(
+            dt,
+            input,
+            this.playerCamera.yaw,
+            this.playerEnv(),
+            this.playerCamera.pitch,
+        );
         this.playerCamera.update(
             dt,
             input,
@@ -1655,6 +1700,7 @@ export class Game {
             this.world.heights,
             this.pointerLocked,
             this.collision,
+            this.cameraWater(),
         );
     }
 

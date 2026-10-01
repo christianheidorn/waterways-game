@@ -54,7 +54,7 @@ export type BounceStats = {
 const WATER_ALBEDO = [0.03, 0.045, 0.05];
 /** Props whose material we don't know: a neutral stone / wood albedo. */
 const PROP_ALBEDO = 0.28;
-/** Main-thread time per frame spent gathering the scene for the worker (ms). */
+/** Main-thread time per frame spent gathering the scene for the worker at 60 fps (ms). */
 const FRAME_BUDGET_MS = 2.5;
 /** Edits are gathered this long after the last one (s). */
 const SETTLE_DELAY = 0.4;
@@ -207,6 +207,7 @@ export class BounceLight {
     /** Ground colours and weather the last gathered scene used (a change gathers it again). */
     private groundSignature = '';
     private pollTimer = 0;
+    private lastUpdate = 0;
 
     constructor(
         private readonly renderer: GameRenderer,
@@ -319,6 +320,8 @@ export class BounceLight {
             return;
         }
 
+        const updateStart = performance.now();
+
         this.pollTimer -= dt;
 
         if (this.pollTimer <= 0) {
@@ -339,7 +342,12 @@ export class BounceLight {
         }
 
         if (this.build) {
-            const deadline = performance.now() + FRAME_BUDGET_MS;
+            // A slice of the frame: 2.5 ms at 60 fps, more when frames are slow anyway (≤ 25 ms).
+            const now = performance.now();
+            const interval = this.lastUpdate ? now - this.lastUpdate : 16;
+            const deadline =
+                now +
+                THREE.MathUtils.clamp(interval * 0.1, FRAME_BUDGET_MS, 25);
             let result: IteratorResult<void, BounceScene | null>;
 
             do {
@@ -387,6 +395,8 @@ export class BounceLight {
             this.uploadCooldown = this.pendingTiles > 0 ? 0.35 : 0;
             this.atlas.needsUpdate = true;
         }
+
+        this.lastUpdate = updateStart;
     }
 
     /**

@@ -566,6 +566,27 @@ surf is saved per map in `surf.u8` (asset `surf`: one byte per sample, 0 = autom
 For a beach: shape a gentle ramp into the water (`sculpt_terrain`, ~1:10-1:30), paint sand, then turn on the
 body's surf (`edit_water_body`) or paint it. Nearby surf is audible (a wash that swells as the waves break).
 
+## Water interaction
+
+The character interacts with the water (play mode, or the editor's walk mode): wading slows it down with depth
+(knee-deep ~70 %, hip-deep ~45 % speed), its legs and footsteps make ripples, bow waves and wakes, spray flies at
+the shins, jumping or falling in splashes, and the clothes stay wet (darker, glossy) up to the waterline for a
+while, dripping after it leaves the water. Ripples are a wave simulation around the player that reflects off
+shores; props dropped or dragged into water in the editor (or by `place_props` / `edit_props`) splash and
+ripple too.
+
+- `control_player` `walk_to` wades through shallow water like the user; `state` (and every action) reports
+  `water`: `wading`, `swimming`, `water_depth_m` (at the feet), `wet` (0-1) and `wet_line_m` (soaked up to this
+  height above the feet).
+- `control_player` `splash` (`x`, `z` default 2 m ahead of the character; `strength` 0-2, 1 ≈ a person jumping in,
+  0.2 a stone; `size` the footprint in m) previews an impact: spray, droplets, a foam ring and rings of waves.
+  Works in edit mode too; follow with `take_screenshot`.
+- `get_editor_state` reports `water_interaction`: the character's state above, the ripple field (`mode` gpu / cpu /
+  off, `resolution`, `origin`) and the live `splash_particles`.
+- Graphics (`set_device_graphics` / `update_game_settings` group "graphics"): `water_ripples` (`off` / `low` 128² /
+  `medium` 192² / `high` 256² cells over 40 m; Shading group, off on Low; WebGL 2 at most 128² on the CPU) and
+  `water_splashes` (Effects group, off on Low).
+
 ## Bounce light
 
 Light bounced off the ground, trees and props (diffuse global illumination from a grid of irradiance probes

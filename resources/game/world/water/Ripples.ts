@@ -11,6 +11,7 @@ import {
     int,
     max,
     min,
+    positionWorld,
     select,
     smoothstep,
     texture,
@@ -18,6 +19,7 @@ import {
     uniform,
     uniformArray,
     uvec2,
+    varying,
     vec2,
     vec3,
     vec4,
@@ -248,31 +250,41 @@ export class Ripples {
 
     /** The water surface layer (displacement, slope, foam; CPU sample from the WebGL 2 field). */
     layer(): WaterSurfaceLayer {
-        const read = (ctx: WaterLayerContext) => {
-            const uv = ctx.xz.sub(this.origin).div(this.extent);
-            const edge = min(min(uv.x, uv.y), min(uv.x.oneMinus(), uv.y.oneMinus()));
+        const sampleAt = (xz: Node<'vec2'>) => {
+            const uv = xz.sub(this.origin).div(this.extent);
+            const edge = min(
+                min(uv.x, uv.y),
+                min(uv.x.oneMinus(), uv.y.oneMinus()),
+            );
             const fade = smoothstep(0, 0.12, edge).mul(this.strength);
 
-            return { v: this.textureNode.sample(uv) as unknown as Vec4, fade };
+            return {
+                v: this.textureNode.sample(uv) as unknown as Vec4,
+                fade,
+            };
+        };
+        // The water's fragment stage is at WebGPU's 16 sampled-texture limit: the field is only read in
+        // the vertex stage and its slope / foam reach the pixels as a varying (the fine mesh's 0.25 m
+        // quads resolve the ~0.2 m cells well enough).
+        let shaded: Vec4 | null = null;
+        const pixel = (): Vec4 => {
+            if (!shaded) {
+                const { v, fade } = sampleAt(positionWorld.xz);
+                shaded = varying(vec4(v.y, v.z, v.w, 1).mul(fade));
+            }
+
+            return shaded;
         };
 
         return {
             name: 'ripples',
             displacement: (ctx) => {
-                const { v, fade } = read(ctx);
+                const { v, fade } = sampleAt(ctx.xz);
 
                 return vec3(0, v.x.mul(fade), 0);
             },
-            slope: (ctx) => {
-                const { v, fade } = read(ctx);
-
-                return vec2(v.y, v.z).mul(fade);
-            },
-            foam: (ctx) => {
-                const { v, fade } = read(ctx);
-
-                return clamp(v.w.mul(fade), 0, 1);
-            },
+            slope: () => pixel().xy,
+            foam: () => clamp(pixel().z, 0, 1),
             sample: (x, z, _time, out) => {
                 const cpu = this.cpu;
 

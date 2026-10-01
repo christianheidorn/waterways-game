@@ -332,6 +332,12 @@ export class Game {
                     tool_group: this.editor.state.group,
                     paint_layer_slot: this.editor.state.paintLayer,
                     walking: this.walking,
+                    // Phase 12: the character in water and the ripple field.
+                    water_interaction: {
+                        ...this.waterInteraction.state(),
+                        ripples: this.world.water.ripples.describe(),
+                        splash_particles: this.waterInteraction.splashes.count,
+                    },
                     roads: this.world.splines.roads.length,
                     rivers: this.world.splines.rivers.length,
                     // e.g. a far LOD skipped because its cut-out texture is opaque on this GPU.
@@ -397,6 +403,9 @@ export class Game {
                 position: () => this.player.position,
                 yaw: () => this.player.yaw,
                 swimming: () => this.player.swimming,
+                water: () => this.waterInteraction.state(),
+                splash: (x, z, strength, size) =>
+                    this.waterInteraction.splash(x, z, strength, size),
                 teleport: (x, z, yaw) =>
                     this.player.spawn(x, z, yaw, this.playerEnv()),
                 view: () => ({

@@ -197,6 +197,12 @@ export type PlayerHost = {
     /** Facing of the character (radians, 0 = north / −z). */
     yaw: () => number;
     swimming: () => boolean;
+    /** Wading / wet state (WaterInteraction). */
+    water?: () => Record<string, unknown>;
+    /**
+     * A splash at (x, z): strength 0-2 (1 ≈ a person jumping in), footprint size (m). False where dry.
+     */
+    splash?: (x: number, z: number, strength: number, size: number) => boolean;
     /** Puts the player at (x, z), facing yaw, on the ground. */
     teleport: (x: number, z: number, yaw: number) => void;
     view: () => { yaw: number; pitch: number };
@@ -238,14 +244,15 @@ function playerState(host: PlayerHost): Record<string, unknown> {
         facing_deg: deg(host.yaw()),
         camera: { yaw_deg: deg(v.yaw), pitch_deg: deg(v.pitch) },
         swimming: host.swimming(),
+        ...(host.water ? { water: host.water() } : {}),
     };
 }
 
 /**
  * control_player: play mode as the user plays it. "state"; "teleport" (x, z, facing); "look" (turn
  * the camera: yaw / pitch in degrees, or towards a point); "walk_to" walks (or runs) with the real
- * movement (slopes, water, collision) until the target is reached, the player is stuck or the time
- * runs out; "jump".
+ * movement (slopes, water, wading, collision) until the target is reached, the player is stuck or the
+ * time runs out; "jump"; "splash" disturbs the water (particles, foam ring, ripples) at x, z or ahead.
  */
 export async function controlPlayer(
     host: PlayerHost,
@@ -255,7 +262,13 @@ export async function controlPlayer(
         typeof payload.action === 'string' ? payload.action : 'state';
 
     // Walk mode drives the same character in the editor: no switch to play mode needed.
-    if (action !== 'state' && host.mode() !== 'play' && !host.walking?.()) {
+    // A splash needs no character (it is a preview of the water's reaction).
+    if (
+        action !== 'state' &&
+        action !== 'splash' &&
+        host.mode() !== 'play' &&
+        !host.walking?.()
+    ) {
         host.play();
         await frames(2);
     }
@@ -309,6 +322,46 @@ export async function controlPlayer(
             return playerState(host);
         case 'walk_to':
             return walkTo(host, payload);
+        case 'splash': {
+            // Default: two metres in front of the character.
+            const p = host.position();
+            const yaw = host.yaw();
+            const x =
+                typeof payload.x === 'number'
+                    ? payload.x
+                    : p.x - Math.sin(yaw) * 2;
+            const z =
+                typeof payload.z === 'number'
+                    ? payload.z
+                    : p.z - Math.cos(yaw) * 2;
+            const strength =
+                typeof payload.strength === 'number' ? payload.strength : 1;
+            const size = typeof payload.size === 'number' ? payload.size : 0.6;
+
+            if (!host.splash) {
+                throw new Error('Splashes are not available.');
+            }
+
+            const hit = host.splash(x, z, strength, size);
+
+            if (!hit) {
+                throw new Error(
+                    `No water at (${Math.round(x * 10) / 10}, ${Math.round(z * 10) / 10}).`,
+                );
+            }
+
+            await frames(6);
+
+            return {
+                splash: {
+                    x: Math.round(x * 100) / 100,
+                    z: Math.round(z * 100) / 100,
+                    strength,
+                    size,
+                },
+                ...playerState(host),
+            };
+        }
         default:
             throw new Error(`Unknown player action ${action}.`);
     }

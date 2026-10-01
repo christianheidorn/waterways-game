@@ -715,6 +715,32 @@ land on the same frame.
 - **CPU**: `Water.sampleSurface` includes the surf (height, slope, orbital velocity); `water.surf.activity(x, z)`
   and `swashAt(x, z)` for gameplay.
 
+## Water interaction
+
+- **Ripples** (`world/water/rippleSim.ts`, `Ripples.ts`): a damped 2D wave equation (c ≈ 1.1 m/s, fixed 60 Hz
+  steps, at most three per frame) on a 40 m square around the player (the camera in the editor), 128² / 192² /
+  256² cells (graphics `water_ripples` Low / Medium / High; off on the Low preset). It moves in jumps of 16 cells,
+  shifting its state; a shore mask built from the water depth then makes dry cells walls (rings reflect off the
+  shore) and damps very shallow water harder. Foam builds where the surface moves fast and fades over ~1.4 s.
+  WebGPU: compute kernels on storage buffers (shift + sources, steps, output) write one RGBA16F texture (height,
+  ∂h/∂x, ∂h/∂z, foam); WebGL 2: the same model on the CPU (≤ 128², half-float upload). It is a water surface
+  layer (displacement, slope, foam); the water's fragment stage is at WebGPU's 16 sampled textures, so the field
+  is read in the vertex stage only and slope / foam reach the pixels as a varying. `Water.sampleSurface` includes
+  it on WebGL 2 (on WebGPU the state stays on the GPU).
+- **Sources** (`WaterInteraction.ts`): wading legs push a bow wave and leave a trough (V-shaped wakes emerge),
+  footsteps every half stride, swimming strokes and a wake, drops falling back in, impacts (`splash`), props
+  placed or dragged into water in the editor (or by the MCP).
+- **Wading** (`player/wading.ts`): from 6 cm of water at the feet the character slows (knee-deep ~70 %, hip-deep
+  ~45 %), kicks spray at the shins on each step, with a slosh sound (`WeatherAudio.waterSound`).
+- **Splashes** (`Splashes.ts`): CPU particles (≤ 700, one instanced draw): droplets on ballistic arcs stretched
+  along their motion, spray puffs; sized by the impact speed (falling / jumping in, dropped props) together with
+  a foam ring and waves from the ripple field. Graphics `water_splashes` (off on Low).
+- **Wet character**: clothes darken and turn glossy below the highest waterline reached (`characterSoak`
+  uniforms in the character materials), drip for ~10 s after leaving the water (drops make tiny rings) and dry
+  over ~90 s, the top first.
+- **MCP**: `control_player` `walk_to` wades, `state` reports `water` (wading, depth, wet, wet line); `splash`
+  previews an impact at a point; `get_editor_state` reports `water_interaction` (incl. the ripple field).
+
 ## Bounce light
 
 Sunlight and skylight bounce off the ground, trees and props before they reach whatever is in their shade:

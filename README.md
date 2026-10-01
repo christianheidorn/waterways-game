@@ -724,8 +724,10 @@ land on the same frame.
   shore) and damps very shallow water harder. Foam builds where the surface moves fast and fades over ~1.4 s.
   WebGPU: compute kernels on storage buffers (shift + sources, steps, output) write one RGBA16F texture (height,
   ∂h/∂x, ∂h/∂z, foam); WebGL 2: the same model on the CPU (≤ 128², half-float upload). It is a water surface
-  layer (displacement, slope, foam); the water's fragment stage is at WebGPU's 16 sampled textures, so the field
-  is read in the vertex stage only and slope / foam reach the pixels as a varying. `Water.sampleSurface` includes
+  layer (displacement, slope, foam). Texture budget: the water's shaders are at WebGPU's 16 sampled textures
+  (vertex and fragment bindings count together), so the field is read in the vertex stage only (slope / foam reach
+  the pixels as a varying, the normals steepened), the FFT's three displacement cascades share one atlas (filtered
+  by hand) and the level / cell mask share one RGBA32F grid texture with the surf's shore field. `Water.sampleSurface` includes
   it on WebGL 2 (on WebGPU the state stays on the GPU).
 - **Sources** (`WaterInteraction.ts`): wading legs push a bow wave and leave a trough (V-shaped wakes emerge),
   footsteps every half stride, swimming strokes and a wake, drops falling back in, impacts (`splash`), props

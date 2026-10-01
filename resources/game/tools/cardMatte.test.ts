@@ -312,6 +312,49 @@ describe('card matte', () => {
         expect(score(plant, result).leaked).toBeLessThan(0.01);
     });
 
+    it('keeps a thin stem whose colour is close to the vignette behind it', () => {
+        // A 6 px stem only ~30 RGB units from the vignette's centre colour, plus the plant.
+        const stemColor = [62, 122, 44];
+        const stem: Plant = {
+            alpha: plant.alpha.slice(),
+            color: plant.color.slice(),
+        };
+
+        for (let y = 20; y < H; y++) {
+            for (let x = 60; x < 66; x++) {
+                const i = y * W + x;
+                stem.alpha[i] = 1;
+                stem.color.set(stemColor, i * 3);
+            }
+        }
+
+        const input = composite(stem, brightVignette);
+        dump('stem in', input);
+        const result = extractCardMatte(
+            { ...input, data: input.data.slice() },
+            {},
+        );
+        dump('stem out', result.image);
+        let kept = 0;
+        let total = 0;
+
+        for (let y = 30; y < H - 10; y++) {
+            for (let x = 61; x < 65; x++) {
+                const lx = x - result.offset.x;
+                const ly = y - result.offset.y;
+                total++;
+                kept +=
+                    result.image.data[(ly * result.image.width + lx) * 4 + 3] >=
+                    128
+                        ? 1
+                        : 0;
+            }
+        }
+
+        expect(kept / total).toBeGreaterThan(0.95);
+        expect(score(stem, result).leaked).toBeLessThan(0.01);
+    });
+
     it('refuses a background it cannot remove instead of shipping a box', () => {
         const noisy = rand(3);
         const busy: Background = () => [

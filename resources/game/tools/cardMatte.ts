@@ -709,6 +709,50 @@ export function keyBackground(
         isKey[i] = id >= 0 && keyRegion[id] ? 1 : 0;
     }
 
+    // The feather (background-ish but beyond the tolerance) is an anti-aliased rim: it only reaches
+    // a few px in from clear background. Further in, a plant part merely close to the background
+    // colour (a dark stem in front of a green vignette) is plant, not a mix with the background.
+    {
+        const reach = Math.max(2, Math.round(Math.max(w, h) / 300));
+        const steps = new Int16Array(n).fill(-1);
+        let front: number[] = [];
+
+        for (let i = 0; i < n; i++) {
+            if (isKey[i] && dist[i] < tolerance) {
+                steps[i] = 0;
+                front.push(i);
+            }
+        }
+
+        for (let step = 1; step <= reach && front.length; step++) {
+            const next: number[] = [];
+
+            for (const i of front) {
+                const x = i % w;
+
+                for (const j of [
+                    x > 0 ? i - 1 : -1,
+                    x < w - 1 ? i + 1 : -1,
+                    i - w,
+                    i + w,
+                ]) {
+                    if (j >= 0 && j < n && steps[j] < 0 && isKey[j]) {
+                        steps[j] = step;
+                        next.push(j);
+                    }
+                }
+            }
+
+            front = next;
+        }
+
+        for (let i = 0; i < n; i++) {
+            if (isKey[i] && steps[i] < 0) {
+                isKey[i] = 0;
+            }
+        }
+    }
+
     // Edge band: everything within `radius` px of a keyed pixel; beyond it the plant is "solid".
     const radius = Math.max(3, Math.round(Math.max(w, h) / 400));
     const band = new Uint8Array(n);

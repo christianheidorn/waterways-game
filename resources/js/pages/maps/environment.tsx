@@ -27,7 +27,7 @@ const SECTIONS: SettingsSection[] = [
     {
         title: 'Sky & lighting',
         description:
-            'Sun position, sky haze, clouds and their shadows, and overall brightness.',
+            'Sun position, sky haze, clouds and their shadows, overall brightness and the light bounced off the ground and trees.',
         icon: SunMedium,
         fields: [
             'time_of_day',
@@ -36,6 +36,7 @@ const SECTIONS: SettingsSection[] = [
             'cloud_coverage',
             'cloud_shadow_strength',
             'exposure',
+            'bounce_light',
         ],
     },
     {

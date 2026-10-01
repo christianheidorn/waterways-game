@@ -93,6 +93,7 @@ const ENV_SECTIONS: { title: string; match: (key: string) => boolean }[] = [
                 'cloud_coverage',
                 'cloud_shadow_strength',
                 'exposure',
+                'bounce_light',
             ].includes(k),
     },
     {

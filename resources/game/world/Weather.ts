@@ -11,6 +11,8 @@ import { FallingLeaves } from './FallingLeaves';
 import { Lightning } from './Lightning';
 import { Precipitation } from './Precipitation';
 import type { PrecipitationLight } from './PrecipitationCommon';
+import { SnowTrail } from './SnowTrail';
+import type { TrailWalker } from './SnowTrail';
 import { surfaceWetness } from './SurfaceWetness';
 import type { CloudQuality } from './SkyDome';
 import type { TerrainMaterial } from './TerrainMaterial';
@@ -31,13 +33,16 @@ const TAU = 0.9;
 /**
  * Weather effects on top of the Atmosphere: rain / snow particles, lightning strikes with thunder,
  * gusting wind (foliage, water, rain slant, audio), wet ground that soaks up during rain and dries
- * afterwards, snow cover, and rain ripples on water. Every setting blends smoothly when changed.
+ * afterwards, puddles that fill in hollows and dry up, snow cover with the character's footprints,
+ * rain ripples on water, and the caustics on shallow beds. Every setting blends smoothly when changed.
  */
 export class Weather {
     readonly precipitation: Precipitation;
     readonly lightning = new Lightning();
     readonly leaves = new FallingLeaves();
     readonly audio = new WeatherAudio();
+    /** Footprints in snow around the character. */
+    readonly trail = new SnowTrail();
     private env: EnvironmentSettings | null = null;
     private settled = false;
     // Blended values.
@@ -49,6 +54,10 @@ export class Weather {
     // Slowly accumulating ground state.
     private soaked = 0;
     private snowCover = 0;
+    /** Puddle water level (0-1): rises while it rains, dries over `puddle_dry_time`. */
+    private puddleFill = 0;
+    private walker: TrailWalker | null = null;
+    private causticsOn = true;
     private time = 0;
     private nextStrike = 5;
     private windNow = 0;
@@ -84,6 +93,12 @@ export class Weather {
             this.leaves.mesh,
         );
         this.terrainMin = world.heights.minMax().min;
+        world.material.setTrail(this.trail.texture, this.trail.info);
+    }
+
+    /** Who leaves footprints in snow (the character in play / walk mode), or null. */
+    setWalker(walker: TrailWalker | null): void {
+        this.walker = walker;
     }
 
     apply(input: EnvironmentSettings): void {
@@ -105,7 +120,13 @@ export class Weather {
             // A map saved with rain / snow starts soaked / snowed in.
             this.soaked = t.rain;
             this.snowCover = t.snow * 0.9;
+            this.puddleFill = Math.max(
+                Math.min(1, t.rain * 1.5),
+                env.wetness * 0.7,
+            );
         }
+
+        this.applyCaustics();
     }
 
     setQuality(graphics: Partial<GraphicsSettings>): void {
@@ -115,6 +136,27 @@ export class Weather {
         this.atmosphere.setCloudQuality(
             (graphics.cloud_quality as CloudQuality | undefined) ?? 'medium',
         );
+        this.trail.enabled = graphics.snow_footprints !== false;
+
+        if (!this.trail.enabled) {
+            this.trail.clear();
+        }
+
+        this.causticsOn = graphics.caustics !== false;
+        this.applyCaustics();
+    }
+
+    private applyCaustics(): void {
+        const env = this.env;
+
+        if (env) {
+            this.world.material.setCaustics(
+                env.caustics_intensity ?? 0.8,
+                env.caustics_scale ?? 2.5,
+                env.caustics_depth ?? 4,
+                this.causticsOn,
+            );
+        }
     }
 
     update(dt: number, camera: THREE.Camera): void {
@@ -154,6 +196,20 @@ export class Weather {
             this.snowCover = Math.max(snowTarget, this.snowCover - melt);
         }
 
+        // Puddles fill within about a minute of heavy rain (the map's ground wetness keeps some
+        // standing) and dry at a steady rate once it stops.
+        const puddleFloor = this.envWetness * 0.7;
+
+        if (this.rain > 0.02) {
+            this.puddleFill = Math.min(
+                1,
+                Math.max(puddleFloor, this.puddleFill + (this.rain * dt) / 50),
+            );
+        } else {
+            const dry = dt / Math.max(1, env.puddle_dry_time ?? 240);
+            this.puddleFill = Math.max(puddleFloor, this.puddleFill - dry);
+        }
+
         // ---- wind with gusts (stronger and more erratic in storms)
         const storm = THREE.MathUtils.clamp(this.lightningRate / 5, 0, 1);
         const base = env.wind_strength;
@@ -188,6 +244,21 @@ export class Weather {
             1,
         );
         this.world.material.setWeather(wet, this.snowCover);
+        this.world.material.setPuddles(
+            this.puddleFill * (env.puddles ?? 0.6),
+            this.rain,
+        );
+        this.world.material.setFrame(this.time, this.atmosphere.lightDirection());
+        this.world.material.setTrailDepth(
+            this.trail.enabled ? (env.footprint_depth ?? 0.7) : 0,
+        );
+        this.trail.update(
+            dt,
+            this.walker,
+            this.snowCover,
+            this.snow,
+            env.footprint_fade_time ?? 300,
+        );
         this.atmosphere.setGround(wet, this.snowCover);
         // Characters and props soak with the rain itself (not with the map's ground wetness setting).
         surfaceWetness.value = this.soaked;
@@ -245,6 +316,7 @@ export class Weather {
         this.leaves.dispose();
         this.lightning.dispose();
         this.audio.dispose();
+        this.trail.dispose();
     }
 
     /** Trigger a strike now (debugging / screenshots); `angle` is the compass angle in radians (atan2(z, x)). */

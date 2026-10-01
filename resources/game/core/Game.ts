@@ -823,7 +823,15 @@ export class Game {
         this.scene.add(terrain.group);
 
         this.progress(0.82, 'Filling rivers and lakes');
-        const water = new Water(waterGrid, heights);
+        const splines = new Splines();
+        splines.load(
+            assets.splines
+                ? await this.api.json<SplinesFile>(assets.splines)
+                : null,
+        );
+        // Rivers flow along their splines (the editor's spline tool chains its own listener).
+        const water = new Water(waterGrid, heights, splines.rivers);
+        splines.onChange = () => water.setRivers(splines.rivers);
         this.scene.add(water.group);
 
         this.progress(0.9, 'Growing foliage');
@@ -843,13 +851,6 @@ export class Game {
             assets.props ? await this.api.json<PropsFile>(assets.props) : null,
         );
         this.scene.add(props.group);
-
-        const splines = new Splines();
-        splines.load(
-            assets.splines
-                ? await this.api.json<SplinesFile>(assets.splines)
-                : null,
-        );
 
         let landCoverAt: ((x: number, z: number) => number) | undefined;
 
@@ -1431,6 +1432,10 @@ export class Game {
         // Grass bends around the character (play and the editor's walk mode).
         this.world.foliage.setInteractor(
             this.mode === 'play' || this.walking ? this.player.position : null,
+        );
+        // ... and leaves footprints in snow.
+        this.weather?.setWalker(
+            this.mode === 'play' || this.walking ? this.player : null,
         );
         this.world.foliage.update(dt, this.camera);
         this.world.props.updateView(this.camera);

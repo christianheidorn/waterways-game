@@ -44,9 +44,10 @@ import {
 import { depthPrecision, isSkyDepth } from '../core/depth';
 import { gridWaterLevel } from './foliage/placement';
 import { NO_WATER } from '../shared/types';
-import type { EnvironmentSettings } from '../shared/types';
+import type { EnvironmentSettings, RiverSpline } from '../shared/types';
 import { mulberry32 } from '../util/noise';
 import type { GridRect, Heightfield } from './Heightfield';
+import { sampleSpline } from './Splines';
 import { rainRipples } from './waterPatterns';
 
 const CHUNK_CELLS = 64;
@@ -70,7 +71,12 @@ type WaterChunk = {
  * - reflections come from the standard PBR lighting (sky environment, sun specular) weighted by
  *   Fresnel; near the reflected water level the environment is replaced by the planar reflection;
  * - waves: a physically inspired spectrum normal map in three scrolling octaves plus a gentle
- *   vertex swell on deep water; rivers flow along the downhill surface gradient (flow mapping).
+ *   vertex swell on deep water;
+ * - rivers flow along their course: the river splines (splines.json) give the direction downstream
+ *   (faster mid-stream), elsewhere the downhill surface gradient does; normals and foam streaks are
+ *   flow-mapped along it;
+ * - foam: an animated band along every shore (lines lapping towards the land, broken into drifting
+ *   patches by noise), rapids on fast water and streaks drifting downstream.
  */
 export class Water {
     readonly group = new THREE.Group();
@@ -82,12 +88,16 @@ export class Water {
     private chunksPerSide: number;
     private ocean: THREE.Mesh | null = null;
     private step: number;
+    /** Flow along the river splines per surface sample (x, z; 0 = no river here). */
+    private riverFlow: Float32Array | null = null;
+    private riverRect: GridRect | null = null;
     /** Called whenever water meshes are rebuilt (e.g. to refresh shore wetness). */
     onRebuild: ((rect?: GridRect) => void) | null = null;
 
     constructor(
         readonly surface: Heightfield,
         readonly terrain: Heightfield,
+        rivers: RiverSpline[] = [],
     ) {
         this.group.name = 'Water';
         this.chunksPerSide = (surface.resolution - 1) / CHUNK_CELLS;
@@ -111,12 +121,164 @@ export class Water {
             }
         }
 
+        this.computeRiverFlow(rivers);
         this.rebuildRect({
             x0: 0,
             z0: 0,
             x1: surface.resolution - 1,
             z1: surface.resolution - 1,
         });
+    }
+
+    /** River splines changed: recompute their flow and rebuild the water they touch (before and after). */
+    setRivers(rivers: RiverSpline[]): void {
+        const before = this.riverRect;
+        this.computeRiverFlow(rivers);
+        const after = this.riverRect;
+        const rect =
+            before && after
+                ? {
+                      x0: Math.min(before.x0, after.x0),
+                      z0: Math.min(before.z0, after.z0),
+                      x1: Math.max(before.x1, after.x1),
+                      z1: Math.max(before.z1, after.z1),
+                  }
+                : (before ?? after);
+
+        if (rect) {
+            for (const chunk of this.chunks) {
+                if (
+                    rect.x1 < chunk.col0 - 1 ||
+                    rect.x0 > chunk.col0 + CHUNK_CELLS + 1 ||
+                    rect.z1 < chunk.row0 - 1 ||
+                    rect.z0 > chunk.row0 + CHUNK_CELLS + 1
+                ) {
+                    continue;
+                }
+
+                this.buildChunk(chunk);
+            }
+        }
+    }
+
+    /**
+     * Direction downstream along each river spline, splatted onto the surface grid within the river's
+     * width (plus half its banks), fastest mid-stream. Downstream is the end with the lower water.
+     */
+    private computeRiverFlow(rivers: RiverSpline[]): void {
+        const hf = this.surface;
+        const res = hf.resolution;
+        const usable = rivers.filter((r) => r.points.length >= 2);
+
+        if (!usable.length) {
+            this.riverFlow = null;
+            this.riverRect = null;
+
+            return;
+        }
+
+        const sum = new Float32Array(res * res * 2);
+        const weight = new Float32Array(res * res);
+        const levelAt = (x: number, z: number) => {
+            const w = hf.contains(x, z) ? hf.sample(x, z) : NO_WATER;
+
+            return w > NO_WATER + 1 ? w : this.terrain.sample(x, z);
+        };
+        let rect: GridRect | null = null;
+
+        for (const river of usable) {
+            let pts = sampleSpline(river.points, Math.max(1, hf.cell));
+            const n = pts.length;
+            const quarter = Math.max(1, Math.floor(n / 4));
+            let head = 0;
+            let tail = 0;
+
+            for (let k = 0; k < quarter; k++) {
+                head += levelAt(pts[k].x, pts[k].z);
+                tail += levelAt(pts[n - 1 - k].x, pts[n - 1 - k].z);
+            }
+
+            if (tail > head + 1e-3) {
+                pts = [...pts].reverse();
+            }
+
+            const half = Math.max(1, river.width / 2 + river.bank * 0.5);
+
+            for (let k = 0; k + 1 < pts.length; k++) {
+                const a = pts[k];
+                const b = pts[k + 1];
+                const len = Math.hypot(b.x - a.x, b.z - a.z);
+
+                if (len < 1e-4) {
+                    continue;
+                }
+
+                const tx = (b.x - a.x) / len;
+                const tz = (b.z - a.z) / len;
+                const g0 = hf.toGrid(
+                    Math.min(a.x, b.x) - half,
+                    Math.min(a.z, b.z) - half,
+                );
+                const g1 = hf.toGrid(
+                    Math.max(a.x, b.x) + half,
+                    Math.max(a.z, b.z) + half,
+                );
+                const c0 = Math.max(0, Math.floor(g0.gx));
+                const r0 = Math.max(0, Math.floor(g0.gz));
+                const c1 = Math.min(res - 1, Math.ceil(g1.gx));
+                const r1 = Math.min(res - 1, Math.ceil(g1.gz));
+
+                if (c0 > c1 || r0 > r1) {
+                    continue;
+                }
+
+                rect = rect
+                    ? {
+                          x0: Math.min(rect.x0, c0),
+                          z0: Math.min(rect.z0, r0),
+                          x1: Math.max(rect.x1, c1),
+                          z1: Math.max(rect.z1, r1),
+                      }
+                    : { x0: c0, z0: r0, x1: c1, z1: r1 };
+
+                for (let r = r0; r <= r1; r++) {
+                    for (let c = c0; c <= c1; c++) {
+                        const px = hf.colToX(c) - a.x;
+                        const pz = hf.rowToZ(r) - a.z;
+                        const along = Math.min(len, Math.max(0, px * tx + pz * tz));
+                        const d = Math.hypot(px - tx * along, pz - tz * along);
+
+                        if (d >= half) {
+                            continue;
+                        }
+
+                        const t = d / half;
+                        // Mid-stream flows fastest; the weight also blends overlapping segments.
+                        const w = 1 - t * t;
+                        const i = r * res + c;
+                        sum[i * 2] += tx * w;
+                        sum[i * 2 + 1] += tz * w;
+                        weight[i] = Math.max(weight[i], w);
+                    }
+                }
+            }
+        }
+
+        for (let i = 0; i < res * res; i++) {
+            const x = sum[i * 2];
+            const z = sum[i * 2 + 1];
+            const len = Math.hypot(x, z);
+
+            if (len > 1e-5) {
+                // Speed 0.3 at the banks to 0.55 mid-stream (the gradient may add more on steep runs).
+                const speed = 0.3 + 0.25 * weight[i];
+                sum[i * 2] = (x / len) * speed;
+                sum[i * 2 + 1] = (z / len) * speed;
+            }
+        }
+
+        this.riverFlow = sum;
+        this.riverRect = rect;
     }
 
     /** Rain ripples (0-1), current (gusting) wind strength and direction the wind blows towards. */
@@ -151,6 +313,7 @@ export class Water {
         u.foamWidth.value = env.foam_width;
         u.foamIntensity.value = env.foam_intensity;
         u.rapids.value = env.rapids_foam ? 1 : 0;
+        u.foamBreakup.value = env.foam_breakup ?? 0.6;
         u.roughness.value = env.water_roughness;
         this.material.envMapIntensity = env.water_reflectivity;
         this.setOcean(env.ocean_enabled, env.sea_level);
@@ -439,7 +602,10 @@ export class Water {
             }
         }
 
-        // Flow follows the downhill surface gradient.
+        // Flow follows the river splines (downstream along the course), elsewhere the downhill
+        // surface gradient; on a river a steep run speeds the current up.
+        const river = this.riverFlow;
+
         for (let j = 0; j < n; j++) {
             for (let i = 0; i < n; i++) {
                 const k = j * n + i;
@@ -453,6 +619,21 @@ export class Water {
                 const speed = Math.min(1, mag * 40);
                 flow[k * 2] = mag > 1e-5 ? (gx / mag) * speed : 0;
                 flow[k * 2 + 1] = mag > 1e-5 ? (gz / mag) * speed : 0;
+
+                if (river) {
+                    const g =
+                        Math.min(res - 1, chunk.row0 + j * s) * res +
+                        Math.min(res - 1, chunk.col0 + i * s);
+                    const fx = river[g * 2];
+                    const fz = river[g * 2 + 1];
+                    const base = Math.hypot(fx, fz);
+
+                    if (base > 1e-5) {
+                        const total = Math.min(1, Math.max(base, speed));
+                        flow[k * 2] = (fx / base) * total;
+                        flow[k * 2 + 1] = (fz / base) * total;
+                    }
+                }
             }
         }
 
@@ -664,6 +845,7 @@ function createWaterUniforms() {
         foamWidth: uniform(1.2),
         foamIntensity: uniform(0.6),
         rapids: uniform(1),
+        foamBreakup: uniform(0.6),
         roughness: uniform(0.06),
         reflMatrix: uniform(new THREE.Matrix4()),
         reflLevel: uniform(0),
@@ -891,23 +1073,69 @@ function createWaterMaterial(
         pos.xz.div(1.7).sub(wind.yx.mul(waveTime.mul(0.022))),
     ).a;
     const bubbles = bubblesA.mul(0.6).add(bubblesB.mul(0.4));
-    const edge = smoothstep(0, max(u.foamWidth, 0.01), vertical).oneMinus();
-    const lap = sin(
-        waveTime.mul(1.3).sub(vertical.mul(5).div(max(u.foamWidth, 0.05))),
+    const foamWidth = max(u.foamWidth, 0.05);
+    const edge = smoothstep(0, foamWidth, vertical).oneMinus();
+    // Large drifting patches (smooth noise from the wave normals) break the band up.
+    const patchNoise = wave(
+        pos.xz
+            .div(29)
+            .add(wind.mul(waveTime.mul(0.006)))
+            .add(waterFlow.mul(waveTime.mul(0.02))),
     )
+        .x.add(wave(pos.xz.div(11.3).sub(wind.yx.mul(waveTime.mul(0.01)))).y)
+        .mul(0.5)
+        .toVar();
+    const patches = smoothstep(
+        0.4,
+        0.58,
+        patchNoise.add(edge.mul(edge).mul(0.18)),
+    );
+    const breakup = mix(1, patches, clamp(u.foamBreakup, 0, 1));
+    // Lines of foam rolling in towards the shore (wavy along the shoreline) and fading out on it.
+    const rollPhase = vertical
+        .div(foamWidth)
+        .mul(4.5)
+        .add(waveTime.mul(1.1))
+        .add(patchNoise.mul(9));
+    const rolls = smoothstep(0.55, 0.95, sin(rollPhase).mul(0.5).add(0.5))
+        .mul(smoothstep(0, 0.35, edge));
+    const lap = sin(waveTime.mul(1.3).sub(vertical.mul(5).div(foamWidth)))
         .mul(0.5)
         .add(0.5);
     const shoreFoam = u.foamEnabled
-        .mul(edge)
-        .mul(smoothstep(0.15, 0.55, bubbles.add(edge.mul(0.35).mul(lap))));
+        .mul(
+            edge
+                .mul(smoothstep(0.15, 0.55, bubbles.add(edge.mul(0.35).mul(lap))))
+                .add(rolls.mul(smoothstep(0.1, 0.4, bubbles)).mul(0.8)),
+        )
+        .mul(breakup);
     const flowSpeed = length(waterFlow);
+    // Foam carried downstream: two phases of a flow-mapped lookup, cross-faded (as the normals).
+    const flowUv = pos.xz.div(4.1);
+    const flowVec = waterFlow.mul(u.flowSpeed).mul(0.35);
+    const fph0 = fract(waveTime.mul(0.12));
+    const fph1 = fract(waveTime.mul(0.12).add(0.5));
+    const carried = mix(
+        wave(flowUv.sub(flowVec.mul(fph0))).a,
+        wave(flowUv.sub(flowVec.mul(fph1)).add(0.37)).a,
+        abs(fph0.sub(0.5)).mul(2),
+    );
+    const streaks = smoothstep(0.5, 0.85, carried)
+        .mul(smoothstep(0.15, 0.5, flowSpeed))
+        .mul(mix(1, patches, 0.6))
+        .mul(0.45);
     const rapids = u.rapids
         .mul(smoothstep(0.45, 1, flowSpeed))
-        .mul(smoothstep(0.25, 0.6, bubbles));
+        .mul(smoothstep(0.25, 0.6, bubbles.mul(0.5).add(carried.mul(0.5))));
     // Far away the bubble texture minifies into a solid band, so fade foam out with distance.
     const foamFade = smoothstep(40, 220, viewDist).oneMinus();
     const foam = clamp(
-        shoreFoam.add(rapids).mul(u.foamIntensity).mul(1.5).mul(foamFade),
+        shoreFoam
+            .add(rapids)
+            .add(streaks.mul(u.foamEnabled.mul(0.5).add(0.5)))
+            .mul(u.foamIntensity)
+            .mul(1.5)
+            .mul(foamFade),
         0,
         1,
     );

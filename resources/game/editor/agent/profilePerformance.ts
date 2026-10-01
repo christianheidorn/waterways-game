@@ -454,6 +454,10 @@ function describeProps(host: PerformanceHost): Record<string, unknown> {
                 triangles_per_instance: triangles,
                 lod_triangles: st?.triangles ?? null,
                 drawn_per_lod: st?.visible ?? null,
+                // Frustum culling: in range but off screen (skipped), and off screen but drawn
+                // because their shadow can fall into view or the water reflects them.
+                culled_off_screen: st?.culled ?? null,
+                drawn_off_screen: st?.offscreen ?? null,
                 meshes_per_instance:
                     st?.parts ?? measured?.meshes ?? ref?.meshes ?? null,
                 materials_per_instance:

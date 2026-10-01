@@ -1481,7 +1481,14 @@ export class Game {
             this.mode === 'play' || this.walking ? this.player : null,
         );
         this.world.foliage.update(dt, this.camera);
-        this.world.props.updateView(this.camera);
+        const sunShadows = this.atmosphere.sunShadows;
+        this.world.props.updateView(this.camera, {
+            shadowCaster: sunShadows.casterTest(),
+            shadowRevision: sunShadows.casterRevision,
+            reflectionLevel: this.reflection.enabled
+                ? this.reflectionLevel
+                : null,
+        });
 
         const waterLevel = this.world.water.levelAt(
             this.camera.position.x,

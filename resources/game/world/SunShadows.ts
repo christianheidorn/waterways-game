@@ -190,6 +190,11 @@ export class SunShadows {
     private readonly farDirection = new THREE.Vector3();
     private editPending = false;
     private editTimer = 0;
+    /** Light-space placement of the far cascade (for casterTest) and its revision. */
+    private readonly farCenter = new THREE.Vector3();
+    private readonly farRotInv = new THREE.Matrix4();
+    private farRevision = 0;
+    private readonly tmpCaster = new THREE.Vector3();
     // Scratch objects (no per-frame allocations).
     private readonly lightRot = new THREE.Matrix4();
     private readonly lightRotInv = new THREE.Matrix4();
@@ -231,6 +236,36 @@ export class SunShadows {
     /** The near cascade for GPU foliage culling (null while shadows are off). */
     get cascade(): ShadowCascade | null {
         return this.enabled ? this.nearCascade : null;
+    }
+
+    /**
+     * Whether a bounding sphere lies in the shadow maps' reach (the far cascade's square in light
+     * space; it holds the near one): casters there can throw a shadow into view even when they are
+     * off screen, and the cached far map must have all of them when it re-renders. Null while
+     * shadows are off. `casterRevision` changes whenever that region moves.
+     */
+    casterTest(): ((center: THREE.Vector3, radius: number) => boolean) | null {
+        if (!this.enabled || !this.farValid) {
+            return null;
+        }
+
+        const reach = this.distance;
+        const c = this.farCenter;
+        const p = this.tmpCaster;
+        const inv = this.farRotInv;
+
+        return (center, radius) => {
+            p.copy(center).applyMatrix4(inv);
+
+            return (
+                Math.abs(p.x - c.x) <= reach + radius &&
+                Math.abs(p.y - c.y) <= reach + radius
+            );
+        };
+    }
+
+    get casterRevision(): number {
+        return this.farRevision;
     }
 
     /** Map resolution and reach (m, from the focus) of the shadow, per the graphics settings. */
@@ -348,7 +383,11 @@ export class SunShadows {
             (this.editPending && this.editTimer <= 0);
 
         if (refresh) {
-            this.place(this.far, focus, direction, this.distance);
+            this.farCenter.copy(
+                this.place(this.far, focus, direction, this.distance),
+            );
+            this.farRotInv.copy(this.lightRotInv);
+            this.farRevision++;
             this.farValid = true;
             last.copy(focus);
             this.farDirection.copy(direction);

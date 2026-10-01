@@ -63,6 +63,10 @@ export type PropStats = {
     instances: number;
     /** Instances drawn per LOD in the last view update. */
     visible: number[];
+    /** Instances within range but outside the view (not drawn) in the last view update. */
+    culled: number;
+    /** Instances outside the view but drawn for their shadow or reflection. */
+    offscreen: number;
     /** Triangles of one instance per LOD. */
     triangles: number[];
     /** Draw calls per instanced LOD (materials after merging). */
@@ -74,8 +78,29 @@ export type PropStats = {
 const LOD0_BUDGET = 60_000;
 /** Models lighter than this keep a single LOD. */
 const LOD_MIN_TRIANGLES = 1_500;
-/** Re-bucket instances once the camera moved this far (m). */
+/** Re-bucket instances once the camera moved this far (m)… */
 const VIEW_EPSILON = 1;
+/** …or turned this far (radians), or its projection changed. */
+const TURN_EPSILON = THREE.MathUtils.degToRad(2);
+/**
+ * The frustum test widens every bounding sphere by the moves and turns allowed before the next
+ * re-bucket (twice the turn, for margin), so nothing pops in at the screen edges in between.
+ */
+const TURN_MARGIN = Math.sin(TURN_EPSILON * 2);
+
+/**
+ * What else sees the props besides the camera, for the frustum culling in Props.updateView: the sun's
+ * shadow casters (a test that keeps props whose shadow can fall into view) and the water reflection
+ * (its plane height; the mirrored camera sees what lies in the camera's view mirrored at it).
+ */
+export type PropViewOptions = {
+    /** True when a bounding sphere lies inside the shadow maps' reach (see SunShadows.casterTest). */
+    shadowCaster?: ((center: THREE.Vector3, radius: number) => boolean) | null;
+    /** Changes whenever `shadowCaster` covers another region (e.g. the cached cascade moved). */
+    shadowRevision?: number;
+    /** Height of the reflecting water plane, or null without a reflection. */
+    reflectionLevel?: number | null;
+};
 /** Cell size (m) of the collision grid. */
 const COLLISION_CELL = 16;
 
@@ -101,7 +126,12 @@ export class Props implements CollisionProvider {
     private readonly loader = createGltfLoader();
     private dirty = true;
     private readonly lastView = new THREE.Vector3(Infinity, 0, 0);
+    private readonly lastDir = new THREE.Vector3();
+    private readonly lastProjection = new THREE.Matrix4();
+    private lastShadowRevision = -1;
+    private lastReflection: number | null = null;
     private visible = new Map<number, number[]>();
+    private culling = new Map<number, { culled: number; offscreen: number }>();
     /** Collision grid: instance ids per cell, and the cells of each instance. */
     private readonly collisionGrid = new Map<number, Set<string>>();
     private readonly collisionCells = new Map<string, number[]>();
@@ -498,6 +528,8 @@ export class Props implements CollisionProvider {
                 name: this.models.get(model)?.name ?? `#${model}`,
                 instances,
                 visible: this.visible.get(model) ?? [],
+                culled: this.culling.get(model)?.culled ?? 0,
+                offscreen: this.culling.get(model)?.offscreen ?? 0,
                 triangles: batch?.template.lods.map((l) => l.triangles) ?? [],
                 parts: batch?.template.lods[0].parts.length ?? 0,
                 loaded: !!batch,
@@ -525,21 +557,71 @@ export class Props implements CollisionProvider {
     }
 
     /**
-     * Per frame: assigns each instance its LOD for the camera's distance and uploads the instance
-     * matrices. Cheap when nothing moved: it only re-buckets after changes or a camera move of a metre.
+     * Per frame: assigns each instance its LOD for the camera's distance, culls it against the view
+     * frustum and uploads the instance matrices. Off-screen instances stay when their shadow can fall
+     * into view (`options.shadowCaster`: inside the shadow maps' reach, which the cached far cascade
+     * needs complete) or the water reflection can show them. Cheap when nothing changed: it only
+     * re-buckets after edits, a camera move of a metre, a turn of 2°, a projection change or when the
+     * shadow region moved.
      */
-    updateView(camera: THREE.Camera): void {
+    updateView(camera: THREE.Camera, options: PropViewOptions = {}): void {
         const eye = camera.getWorldPosition(new THREE.Vector3());
+        const dir = camera.getWorldDirection(new THREE.Vector3());
+        const shadowRevision = options.shadowCaster
+            ? (options.shadowRevision ?? 0)
+            : -1;
+        const reflection = options.reflectionLevel ?? null;
 
         if (
             !this.dirty &&
-            eye.distanceToSquared(this.lastView) < VIEW_EPSILON ** 2
+            eye.distanceToSquared(this.lastView) < VIEW_EPSILON ** 2 &&
+            dir.dot(this.lastDir) > Math.cos(TURN_EPSILON) &&
+            camera.projectionMatrix.equals(this.lastProjection) &&
+            shadowRevision === this.lastShadowRevision &&
+            reflection === this.lastReflection
         ) {
             return;
         }
 
         this.dirty = false;
         this.lastView.copy(eye);
+        this.lastDir.copy(dir);
+        this.lastProjection.copy(camera.projectionMatrix);
+        this.lastShadowRevision = shadowRevision;
+        this.lastReflection = reflection;
+        camera.updateMatrixWorld();
+        const frustum = new THREE.Frustum().setFromProjectionMatrix(
+            new THREE.Matrix4().multiplyMatrices(
+                camera.projectionMatrix,
+                camera.matrixWorldInverse,
+            ),
+            camera.coordinateSystem,
+            (camera as { reversedDepth?: boolean }).reversedDepth ?? false,
+        );
+        const sphere = new THREE.Sphere();
+        // In the view (spheres widened by the moves / turns allowed until the next re-bucket).
+        const inView = (center: THREE.Vector3, radius: number) => {
+            sphere.center.copy(center);
+            sphere.radius =
+                radius + VIEW_EPSILON + center.distanceTo(eye) * TURN_MARGIN;
+
+            if (frustum.intersectsSphere(sphere)) {
+                return true;
+            }
+
+            // Mirrored at the water plane: what the reflection camera sees (above the water only).
+            if (
+                reflection !== null &&
+                eye.y > reflection &&
+                center.y + radius > reflection
+            ) {
+                sphere.center.y = 2 * reflection - center.y;
+
+                return frustum.intersectsSphere(sphere);
+            }
+
+            return false;
+        };
         const byModel = new Map<number, PropInstance[]>();
 
         for (const p of this.instances.values()) {
@@ -553,12 +635,19 @@ export class Props implements CollisionProvider {
         }
 
         this.visible.clear();
+        this.culling.clear();
 
         for (const [model, batch] of this.batches) {
             const list = byModel.get(model) ?? [];
             this.ensureCapacity(batch, list.length);
             const counts = batch.meshes.map(() => 0);
             const center = new THREE.Vector3();
+            const bounds = new THREE.Vector3();
+            const last = batch.template.lods.length - 1;
+            // Same rule as ensureCapacity: the far LOD casts no shadow (unless it is the only one).
+            const castsShadow = (lod: number) => lod < last || last === 0;
+            let culled = 0;
+            let offscreen = 0;
             const distances = batch.template.distances;
             const fades = this.crossfade ? batch.fades : null;
             const put = (
@@ -585,6 +674,22 @@ export class Props implements CollisionProvider {
                     continue;
                 }
 
+                // Bounding sphere in the world.
+                bounds.copy(batch.template.sphere.center).applyMatrix4(matrix);
+                const radius = batch.template.sphere.radius * p.scale;
+                const visible = inView(bounds, radius);
+                const shadow =
+                    !visible &&
+                    castsShadow(lod) &&
+                    !!options.shadowCaster?.(bounds, radius);
+
+                if (!visible && !shadow) {
+                    culled++;
+                    continue;
+                }
+
+                offscreen += visible ? 0 : 1;
+
                 if (!fades) {
                     put(lod, matrix, -1, 2);
                     continue;
@@ -597,7 +702,11 @@ export class Props implements CollisionProvider {
                 const t = Math.min(1, Math.max(0, (d - (at - band)) / band));
                 put(lod, matrix, t, 2);
 
-                if (t > 0 && lod + 1 < distances.length) {
+                if (
+                    t > 0 &&
+                    lod + 1 < distances.length &&
+                    (visible || castsShadow(lod + 1))
+                ) {
                     put(lod + 1, matrix, -1, t);
                 }
             }
@@ -623,6 +732,7 @@ export class Props implements CollisionProvider {
                 }
             });
             this.visible.set(model, counts);
+            this.culling.set(model, { culled, offscreen });
         }
     }
 

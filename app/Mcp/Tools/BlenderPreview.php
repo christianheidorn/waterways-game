@@ -27,6 +27,7 @@ class BlenderPreview extends WaterwaysTool
             'engine' => $schema->string()->enum(['eevee', 'workbench', 'cycles'])->description('Render engine (default eevee, or WATERWAYS_BLENDER_PREVIEW_ENGINE).'),
             'figure' => $schema->boolean()->description('Show the 1.8 m scale figure (default true).'),
             'elevation' => $schema->number()->min(-10)->max(90)->description('Camera elevation in degrees (default 22; 90 = top view).'),
+            'lod' => $schema->integer()->min(0)->max(5)->description('Models with LODs (<name>_LOD0, _LOD1 …): the level to show (default 0).'),
             'separate' => $schema->boolean()->description('Return each view as its own image instead of one contact sheet (default false).'),
         ];
     }
@@ -48,9 +49,11 @@ class BlenderPreview extends WaterwaysTool
         $figure = $request->get('figure') === false ? 'False' : 'True';
         $elevation = (float) ($request->get('elevation') ?? 22);
         $separate = (bool) $request->get('separate', false);
+        $lod = $request->get('lod') !== null ? max(0, min(5, (int) $request->get('lod'))) : null;
 
         $script = 'wb.preview(views='.$views.', size='.$size.', engine='.json_encode($engine).', figure='.$figure
-            .', elevation='.$elevation.', sheet='.($separate ? 'False' : 'True').")\n";
+            .', elevation='.$elevation.', sheet='.($separate ? 'False' : 'True')
+            .($lod !== null ? ', lod='.$lod : '').")\n";
         $job = $runner->run($script, $open, false);
 
         return BlenderRun::respond($job, 'Change the model with blender_run continue_job, or export it with blender_export_prop.', $separate ? $views : 1);

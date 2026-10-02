@@ -952,15 +952,28 @@ def _setup_render(engine, size):
 
 
 def preview(views=4, size=384, engine='eevee', figure=True, ground=True, elevation=22, folder='preview',
-            sheet=True, distance=1.0):
+            sheet=True, distance=1.0, lod=None):
     """Renders the model from `views` directions around it (front three-quarter first) with a 1.8 m
     figure beside it for scale and a ground disc. Writes <job>/<folder>/view_N.png and sheet.png (all
     views in one image). engine: eevee (materials, default), workbench (fast, flat studio light) or
-    cycles (CPU, slow). distance > 1 moves the camera back. Returns the image paths (sheet first)."""
+    cycles (CPU, slow). distance > 1 moves the camera back. A model with LODs shows LOD0 (or `lod`).
+    Returns the image paths (sheet first)."""
     _cleanup_preview()
     objs = _meshes()
     if not objs:
         raise ValueError('preview(): the scene has no meshes to render')
+    levels = {}
+    for o in objs:
+        level = _lod_of(o.name)
+        if level is not None:
+            levels.setdefault(level, []).append(o)
+    hidden = []
+    if levels:
+        shown = levels.get(lod if lod is not None else min(levels)) or levels[min(levels)]
+        hidden = [o for o in objs if o not in shown and not o.hide_render]
+        for o in hidden:
+            o.hide_render = True
+        objs = shown
     lo, hi = bounds(objs)
     cx, cy = (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2
     if figure:
@@ -996,7 +1009,7 @@ def preview(views=4, size=384, engine='eevee', figure=True, ground=True, elevati
     count = max(1, min(8, int(views)))
     for i in range(count):
         az = math.radians(-35 + i * 360 / count)
-        el = math.radians(elevation)
+        el = math.radians(max(-10, min(89, elevation)))
         offset = mathutils.Vector((math.sin(az) * math.cos(el), -math.cos(az) * math.cos(el), math.sin(el))) * dist
         cam.location = center + offset
         cam.rotation_euler = (-offset).to_track_quat('-Z', 'Y').to_euler()
@@ -1007,6 +1020,8 @@ def preview(views=4, size=384, engine='eevee', figure=True, ground=True, elevati
     if sheet and count > 1:
         paths.insert(0, _sheet(paths, os.path.join(folder_path, 'sheet.png')))
     _cleanup_preview()
+    for o in hidden:
+        o.hide_render = False
     print('@@WB_PREVIEW ' + json.dumps(paths))
     return paths
 

@@ -17,6 +17,7 @@ use App\Mcp\Tools\EditFoliage;
 use App\Mcp\Tools\EditRoad;
 use App\Mcp\Tools\EditWater;
 use App\Mcp\Tools\EditWaterBody;
+use App\Mcp\Tools\EngineChangeStatus;
 use App\Mcp\Tools\GenerateImage;
 use App\Mcp\Tools\GenerateMaterial;
 use App\Mcp\Tools\GenerateModel;
@@ -46,6 +47,7 @@ use App\Mcp\Tools\PlaceProps;
 use App\Mcp\Tools\ProfilePerformance;
 use App\Mcp\Tools\RegenerateTerrain;
 use App\Mcp\Tools\RemoveProps;
+use App\Mcp\Tools\RequestEngineChange;
 use App\Mcp\Tools\SampleCollision;
 use App\Mcp\Tools\SampleTerrain;
 use App\Mcp\Tools\SaveFoliageType;
@@ -56,6 +58,7 @@ use App\Mcp\Tools\SetDeviceGraphics;
 use App\Mcp\Tools\SetMapThumbnail;
 use App\Mcp\Tools\TakePhoto;
 use App\Mcp\Tools\TakeScreenshot;
+use App\Mcp\Tools\UpdateEngine;
 use App\Mcp\Tools\UpdateEnvironment;
 use App\Mcp\Tools\UpdateGameSettings;
 use App\Mcp\Tools\UpdateLibraryItem;
@@ -125,6 +128,9 @@ Editor history
 Safety
 - Before an agent tool changes a map, a snapshot is taken automatically (at most every 10 minutes); while the user edits, the editor takes automatic snapshots after saves too (editor settings auto_snapshot_minutes / auto_snapshot_keep). map_snapshots lists, creates and restores them. regenerate_terrain discards the user's terrain work: confirm with them first.
 - Prefer small, verifiable steps; tell the user what you changed.
+
+Engine changes (docs/AUTONOMY.md)
+- When the tools cannot do what the work needs and no workaround is reasonable, request_engine_change files a GitHub issue for the cloud agent; poll engine_change_status; after the PR is merged, update_engine pulls and rebuilds (reconnect this server when it says so).
 MD)]
 class WaterwaysServer extends Server
 {
@@ -202,5 +208,9 @@ class WaterwaysServer extends Server
         EditWaterBody::class,
         // Beaches (docs/ROADMAP.md phase 11)
         PaintSurf::class,
+        // Autonomy: updates and engine change requests (docs/AUTONOMY.md, phase 14)
+        UpdateEngine::class,
+        RequestEngineChange::class,
+        EngineChangeStatus::class,
     ];
 }

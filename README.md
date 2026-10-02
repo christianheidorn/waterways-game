@@ -860,6 +860,15 @@ reopened). `--check` only says whether updates are available, `--dry-run` shows 
 changes unless `--force`, and rolls back to the previous commit when a step fails. CLAUDE.md is the project
 guide for every Claude session.
 
+### Modelling with headless Blender
+
+With Blender installed (macOS: `brew install --cask blender`; elsewhere set `WATERWAYS_BLENDER_PATH`), agents
+model their own props without the Blender UI: `blender_run` runs a Python script in Blender in the background with
+a helper library for low-poly game assets (`resources/blender/waterways_blender.py`), every run returns a
+turntable preview with a 1.8 m figure for scale, and `blender_export_prop` exports a game-ready GLB (metres, +Y up,
+pivot at the base, optional LODs) and imports it as a prop or foliage model. Workflow, budgets and examples (hut,
+fence, rowing boat, rock): [docs/BLENDER.md](docs/BLENDER.md).
+
 ## Requirements
 
 - PHP 8.3+ with `gd`, `pdo_sqlite` and `curl`, plus Composer.

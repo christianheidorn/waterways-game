@@ -84,4 +84,11 @@ return [
         ],
     ],
 
+    // Headless Blender for the agent's modelling tools (blender_run, blender_preview, blender_export_prop).
+    'blender' => [
+        'path' => env('WATERWAYS_BLENDER_PATH'),
+        'timeout' => (int) env('WATERWAYS_BLENDER_TIMEOUT', 300),
+        'preview_engine' => env('WATERWAYS_BLENDER_PREVIEW_ENGINE', 'eevee'),
+    ],
+
 ];

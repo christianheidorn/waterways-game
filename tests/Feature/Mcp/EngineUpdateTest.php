@@ -17,6 +17,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
+use PHPUnit\Framework\AssertionFailedError;
 use Tests\TestCase;
 
 class EngineUpdateTest extends TestCase
@@ -88,7 +89,7 @@ class EngineUpdateTest extends TestCase
             Process::assertRan(fn (PendingProcess $process) => str_ends_with((string) $process->command, $command));
 
             return true;
-        } catch (\PHPUnit\Framework\AssertionFailedError) {
+        } catch (AssertionFailedError) {
             return false;
         }
     }

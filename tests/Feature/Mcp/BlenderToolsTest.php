@@ -209,7 +209,7 @@ class BlenderToolsTest extends TestCase
         WaterwaysServer::tool(BlenderPreview::class, ['job_id' => $job, 'views' => 8, 'engine' => 'workbench', 'elevation' => 90])
             ->assertOk()->assertSee(['preview/sheet.png']);
         $script = (string) file_get_contents(dirname($this->commands[1][6]).'/script.py');
-        $this->assertStringContainsString("wb.preview(views=8, size=448, engine=\"workbench\", figure=True, elevation=90, sheet=True)", $script);
+        $this->assertStringContainsString('wb.preview(views=8, size=448, engine="workbench", figure=True, elevation=90, sheet=True)', $script);
         $this->assertStringContainsString(', False)', (string) file_get_contents(dirname($this->commands[1][6]).'/job.py'), 'Previews do not save the scene');
 
         $glb = $this->dir.'/boat.glb';

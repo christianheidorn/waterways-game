@@ -346,6 +346,11 @@ def _object(name, bm, at, rotate, mat):
     return obj
 
 
+def mesh(name, bm, at=(0, 0, 0), mat=None, rotate=None):
+    """Object from a bmesh you built yourself (custom shapes: hulls, lofts); frees the bmesh."""
+    return _object(name, bm, at, rotate, mat)
+
+
 def box(size=(1, 1, 1), at=(0, 0, 0), name='Box', mat=None, rotate=None, base=True, bevel=0.0):
     """Box of size (x, y, z) metres. base=True: `at` is the bottom centre, else the centre.
     rotate: (x, y, z) degrees. bevel: rounded edges width in metres (modifier, 1 segment)."""

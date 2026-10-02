@@ -6,6 +6,10 @@ use App\Mcp\Tools\AddTerrainLayer;
 use App\Mcp\Tools\ApplyBiome;
 use App\Mcp\Tools\ApplyStamp;
 use App\Mcp\Tools\BakeFoliageAsset;
+use App\Mcp\Tools\BlenderExportProp;
+use App\Mcp\Tools\BlenderPreview;
+use App\Mcp\Tools\BlenderRun;
+use App\Mcp\Tools\BlenderStatus;
 use App\Mcp\Tools\CloseEditor;
 use App\Mcp\Tools\ControlEditor;
 use App\Mcp\Tools\ControlPlayer;
@@ -109,6 +113,11 @@ Assets (3D models, images, materials)
 - generate_image (OpenRouter), generate_material (PBR terrain materials from a prompt or an image) and generate_model (Meshy text / image to 3D) use the project's configured services and cost credits; generation runs in the background: poll get_asset_status.
 - Foliage models must be baked (LODs) before use: bake_foliage_asset does it in the open editor.
 
+Modelling with headless Blender (no Blender MCP needed)
+- blender_status says whether Blender is installed. blender_run runs a Python script in Blender in the background with the helper library `wb` (docs/BLENDER.md; examples in resources/blender/examples/: hut, fence, rowing boat, rock): plan the parts and real sizes in metres first (Z-up, ground z = 0, front -y), build with wb primitives / modifiers / materials, print(wb.stats()).
+- Every run returns a turntable contact sheet with a 1.8 m figure: check proportions and scale against it, iterate in small steps with continue_job, look closer with blender_preview (more views, top view with elevation 90).
+- Keep props low-poly (hundreds to a few thousand triangles; budget 20k, ≤ 8 materials, share materials), then blender_export_prop (job_id, name, category, collision "mesh" for walk-in buildings, buoyancy for boats) and place it with place_props. Rocks and plants: kind "foliage" with lods.
+
 Everything else the UI offers
 - Placed props: update_props moves, turns, resizes, re-rolls or tilts them; place_props snaps (grid, end-to-end, slope) and places rows along paths (fences). Player start direction: update_map spawn facing / look_at.
 - Play mode: control_player teleports, walks (real movement), looks around and jumps; take_screenshot shows the player's view. Walk mode inside the editor (J): control_editor action "walk", then control_player. Photo mode: take_photo (cinematic still with a temporary look). Graphics menu (per device): set_device_graphics. Map card image: set_map_thumbnail.
@@ -202,5 +211,10 @@ class WaterwaysServer extends Server
         EditWaterBody::class,
         // Beaches (docs/ROADMAP.md phase 11)
         PaintSurf::class,
+        // Headless Blender bridge (docs/ROADMAP.md phase 15)
+        BlenderStatus::class,
+        BlenderRun::class,
+        BlenderPreview::class,
+        BlenderExportProp::class,
     ];
 }

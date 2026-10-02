@@ -29,7 +29,8 @@ yarn-error.log
 /.zed
 /.agents
 /.amp
-/.claude
+/.claude/*
+!/.claude/settings.json
 /.cursor
 /.factory
 /.grok
@@ -38,7 +39,6 @@ yarn-error.log
 /.pi
 /.mcp.json
 /AGENTS.md
-/CLAUDE.md
 /boost.json
 /opencode.json
 /opencode.jsonc

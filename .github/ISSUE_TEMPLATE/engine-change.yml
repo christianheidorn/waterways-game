@@ -1,0 +1,48 @@
+name: Engine change
+description: A change to the engine, editor or MCP tools, implemented by the Claude GitHub Action.
+title: 'Engine change: '
+labels: ['engine-change']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep **@claude** in the goal to start the cloud agent. It branches from main, implements, runs the checks and opens a PR for review.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should become possible, in one or two sentences.
+      value: '@claude '
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why it is needed, what was tried, tool names and error messages.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checkable criteria, one per line.
+      placeholder: |
+        - edit_water lake accepts `depth` (m)
+        - covered by a feature test
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: Maps and screenshots
+      description: Map slugs, coordinates, screenshots (drag them in).
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - normal
+        - low
+        - high
+        - blocking
+    validations:
+      required: true

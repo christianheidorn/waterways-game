@@ -1,0 +1,70 @@
+name: claude
+
+# The cloud half of the autonomy loop (docs/AUTONOMY.md): an issue or comment that mentions @claude
+# starts Claude Code, which branches from main, implements the change, runs the checks and opens a PR.
+on:
+  issues:
+    types: [opened, assigned]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: '8.4'
+          extensions: gd, pdo_sqlite, sqlite3, curl, mbstring, zip, fileinfo, intl
+          tools: composer:v2
+          coverage: none
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Prepare the project
+        run: |
+          composer install --no-interaction --prefer-dist --no-progress
+          cp .env.example .env
+          php artisan key:generate --ansi
+          touch database/database.sqlite
+          npm ci
+          npm run build
+
+      - name: Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Set ONE of these repository secrets: an Anthropic API key, or a Claude subscription
+          # OAuth token (`claude setup-token`).
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          trigger_phrase: '@claude'
+          claude_args: |
+            --allowedTools "Bash(git:*),Bash(gh:*),Bash(npm:*),Bash(npx:*),Bash(composer:*),Bash(php:*),Bash(vendor/bin/pint:*),Bash(vendor/bin/phpunit:*),Edit,Write,Read,Glob,Grep"
+            --append-system-prompt "You work on Waterways. Read CLAUDE.md first and follow it. Branch from main. Before opening the PR run: npx tsc --noEmit -p . ; npx vp check --fix ; npm test ; vendor/bin/pint ; php artisan test (all must pass). Keep MCP tools in parity with the UI and update docs/MCP.md for tool changes. Open a pull request that says Closes #<issue> and lists what changed and how it was verified. If the request is unclear, ask in the issue instead of guessing."

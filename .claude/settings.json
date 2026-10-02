@@ -1,0 +1,53 @@
+{
+    "$schema": "https://json.schemastore.org/claude-code-settings.json",
+    "permissions": {
+        "allow": [
+            "Bash(git status:*)",
+            "Bash(git diff:*)",
+            "Bash(git log:*)",
+            "Bash(git show:*)",
+            "Bash(git fetch:*)",
+            "Bash(git pull --ff-only:*)",
+            "Bash(git branch:*)",
+            "Bash(git rev-parse:*)",
+            "Bash(git rev-list:*)",
+            "Bash(php artisan waterways:*)",
+            "Bash(php artisan mcp:*)",
+            "Bash(php artisan test:*)",
+            "Bash(composer install:*)",
+            "Bash(npm ci)",
+            "Bash(npm install)",
+            "Bash(npm run build)",
+            "Bash(npm test)",
+            "Bash(npm run check)",
+            "Bash(npx tsc --noEmit:*)",
+            "Bash(vendor/bin/pint --test:*)",
+            "Bash(blender --background:*)",
+            "Bash(gh auth status)",
+            "Bash(gh issue view:*)",
+            "Bash(gh issue list:*)",
+            "Bash(gh pr view:*)",
+            "Bash(gh pr list:*)",
+            "Bash(gh pr checks:*)",
+            "mcp__waterways__open_editor",
+            "mcp__waterways__close_editor",
+            "mcp__waterways__get_project_overview",
+            "mcp__waterways__get_editor_state",
+            "mcp__waterways__take_screenshot",
+            "mcp__waterways__get_map_image",
+            "mcp__waterways__engine_change_status"
+        ],
+        "deny": [
+            "Bash(git push --force:*)",
+            "Bash(git push -f:*)",
+            "Bash(git reset --hard:*)",
+            "Bash(git clean:*)",
+            "Bash(rm -rf:*)",
+            "Bash(php artisan migrate:fresh:*)",
+            "Bash(php artisan migrate:reset:*)",
+            "Bash(php artisan db:wipe:*)",
+            "Bash(gh pr merge:*)",
+            "Bash(gh repo delete:*)"
+        ]
+    }
+}

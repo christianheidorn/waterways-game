@@ -848,6 +848,18 @@ In short: `claude mcp add waterways -- php artisan mcp:start waterways` in the p
 command to Claude Desktop), then open the map in the studio.
 Without an open editor, agents can start a hidden one (`open_editor`, needs Chrome, Chromium, Edge or Brave) and work unattended.
 
+## Autonomy: updates, CI and engine changes
+
+A local Claude session can keep building for hours and get engine changes made in the cloud
+([docs/AUTONOMY.md](docs/AUTONOMY.md)): when the MCP tools cannot do what a map needs, `request_engine_change`
+files a GitHub issue mentioning `@claude`; the Claude GitHub Action implements it on a branch and opens a PR; CI
+runs the checks; you review and merge; then `php artisan waterways:update` (MCP `update_engine`) brings the
+checkout up to date: it snapshots every map, runs `git pull --ff-only`, then `composer install`, migrations,
+`npm ci` and `npm run build` only as far as the changed files need them, and reloads open editors (hidden ones are
+reopened). `--check` only says whether updates are available, `--dry-run` shows the plan; it refuses on local
+changes unless `--force`, and rolls back to the previous commit when a step fails. CLAUDE.md is the project
+guide for every Claude session.
+
 ## Requirements
 
 - PHP 8.3+ with `gd`, `pdo_sqlite` and `curl`, plus Composer.
